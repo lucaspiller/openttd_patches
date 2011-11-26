@@ -1,0 +1,380 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3703)
++++ lang/english.txt	(working copy)
+@@ -749,14 +749,20 @@
+ STR_02DE_MAP_OF_WORLD                                           :Map of world
+ STR_EXTRA_VIEW_PORT                                             :Extra viewport
+ STR_SIGN_LIST                                                   :Sign list
++
+ STR_02DF_TOWN_DIRECTORY                                         :Town directory
+ STR_TOWN_POPULATION                                             :{BLACK}World population: {COMMA}
+ STR_EXTRA_VIEW_PORT_TITLE                                       :{WHITE}Viewport {COMMA}
+-STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN                                :{BLACK}Copy to viewport
+-STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT                             :{BLACK}Copy the location of the global view to this viewport
+-STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW                                :{BLACK}Paste from viewport
+-STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT                             :{BLACK}Paste the location of this viewport to the global view
+ 
++STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN                                :{BLACK}Go to location
++STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT                             :{BLACK}Paste the location of this viewport into the global view
++STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW                                :{BLACK}Set location
++STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT                             :{BLACK}Copy the location of the global view into this viewport
++ 
++STR_ZOOM_IN_SMALLMAP                             :{BLACK}Zoom in the small map
++STR_ZOOM_OUT_SMALLMAP                             :{BLACK}Zoom out the small map
++STR_RECENTRE_SMALLMAP                             :{BLACK}Recentre the location of the small map  
++
+ STR_02E0_CURRENCY_UNITS                                         :{BLACK}Currency units
+ STR_02E1                                                        :{BLACK}{SKIP}{STRING}
+ STR_02E2_CURRENCY_UNITS_SELECTION                               :{BLACK}Currency units selection
+Index: gfx.h
+===================================================================
+--- gfx.h	(revision 3703)
++++ gfx.h	(working copy)
+@@ -78,6 +78,8 @@
+ 
+ bool FillDrawPixelInfo(DrawPixelInfo* n, const DrawPixelInfo* o, int left, int top, int width, int height);
+ 
++void ScrollSmallmap(int mx, int my);
++
+ /* window.c */
+ void DrawOverlappedWindowForAll(int left, int top, int right, int bottom);
+ 
+Index: smallmap_gui.c
+===================================================================
+--- smallmap_gui.c	(revision 3703)
++++ smallmap_gui.c	(working copy)
+@@ -32,9 +32,11 @@
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   380,   401,   280,   301, SPR_IMG_SHOW_ROUTES,     STR_0194_SHOW_TRANSPORT_ROUTES_ON},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   402,   423,   280,   301, SPR_IMG_PLANTTREES,      STR_0195_SHOW_VEGETATION_ON_MAP},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   424,   445,   280,   301, SPR_IMG_COMPANY_GENERAL, STR_0196_SHOW_LAND_OWNERS_ON_MAP},
+-{    WWT_IMGBTN,   RESIZE_LRTB,    13,   358,   379,   258,   279, 0x0,                     STR_NULL},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   358,   379,   258,   279, 683,				STR_RECENTRE_SMALLMAP},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   358,   379,   280,   301, SPR_IMG_TOWN,            STR_0197_TOGGLE_TOWN_NAMES_ON_OFF},
+-{    WWT_IMGBTN,    RESIZE_RTB,    13,     0,   357,   258,   301, 0x0,                     STR_NULL},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   336,   357,   258,   279, 0x2DF,					STR_ZOOM_IN_SMALLMAP},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   336,   357,   280,   301, 0x2E0,					STR_ZOOM_OUT_SMALLMAP},
++{     WWT_IMGBTN,    RESIZE_RTB,    13,     0,   335,   258,   301, 0x0,					STR_NULL},
+ {     WWT_PANEL,    RESIZE_RTB,    13,     0,   433,   302,   313, 0x0,                     STR_NULL},
+ { WWT_RESIZEBOX,   RESIZE_LRTB,    13,   434,   445,   302,   313, 0x0,                     STR_RESIZE_BUTTON},
+ {  WIDGETS_END},
+@@ -42,6 +44,10 @@
+ 
+ static int _smallmap_type;
+ static bool _smallmap_show_towns = true;
++static double smallmap_zoom;
++static double smallmap_final_zoom;
++ 
++void SmallMapRecentre(void);
+ 
+ #define MK(a,b) a, b
+ #define MKEND() 0xFFFF
+@@ -320,7 +326,7 @@
+  * @param yc The Y coordinate of the first tile in the column
+  * @param pitch Number of pixels to advance in the screen buffer each time a pixel is written.
+  * @param reps Number of lines to draw
+- * @param mask ?
++ * @param mask The mask for which type to draw
+  * @param proc Pointer to the colour function
+  * @see GetSmallMapPixels(TileIndex)
+  */
+@@ -330,10 +336,10 @@
+ 
+ 	do {
+ 		// check if the tile (xc,yc) is within the map range
+-		if (xc < MapMaxX() && yc < MapMaxY()) {
++		if (xc * smallmap_zoom < MapMaxX() && yc * smallmap_zoom < MapMaxY()) {
+ 			// check if the dst pointer points to a pixel inside the screen buffer
+ 			if (dst > _screen.dst_ptr && dst < dst_ptr_end)
+-				WRITE_PIXELS_OR(dst, proc(TileXY(xc, yc)) & mask);
++				WRITE_PIXELS_OR(dst, proc(TileXY(xc * smallmap_zoom, yc * smallmap_zoom)) & mask);
+ 		}
+ 	// switch to next tile in the column
+ 	} while (xc++, yc++, dst += pitch, --reps != 0);
+@@ -691,8 +697,8 @@
+ 					(v->vehstatus & (VS_HIDDEN | VS_UNCLICKABLE)) == 0) {
+ 				// Remap into flat coordinates.
+ 				Point pt = RemapCoords(
+-					(v->x_pos - WP(w,smallmap_d).scroll_x) / 16,
+-					(v->y_pos - WP(w,smallmap_d).scroll_y) / 16,
++					((v->x_pos / smallmap_zoom) - WP(w,smallmap_d).scroll_x) / 16,
++					((v->y_pos / smallmap_zoom)  - WP(w,smallmap_d).scroll_y) / 16,
+ 					0);
+ 				x = pt.x;
+ 				y = pt.y;
+@@ -736,8 +742,8 @@
+ 			if (t->xy != 0) {
+ 				// Remap the town coordinate
+ 				Point pt = RemapCoords(
+-					(int)(TileX(t->xy) * 16 - WP(w, smallmap_d).scroll_x) / 16,
+-					(int)(TileY(t->xy) * 16 - WP(w, smallmap_d).scroll_y) / 16,
++					(int)((TileX(t->xy) / smallmap_zoom) * 16 - WP(w, smallmap_d).scroll_x) / 16,
++					(int)((TileY(t->xy) / smallmap_zoom) * 16 - WP(w, smallmap_d).scroll_y) / 16,
+ 					0);
+ 				x = pt.x - WP(w,smallmap_d).subscroll + 3 - (t->sign.width_2 >> 1);
+ 				y = pt.y;
+@@ -764,10 +770,10 @@
+ 
+ 		pt = RemapCoords(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y, 0);
+ 
+-		x = vp->virtual_left - pt.x;
+-		y = vp->virtual_top - pt.y;
+-		x2 = (x + vp->virtual_width) / 16;
+-		y2 = (y + vp->virtual_height) / 16;
++		x = (vp->virtual_left / smallmap_zoom) - pt.x;
++		y = (vp->virtual_top / smallmap_zoom) - pt.y;
++		x2 = (x + (vp->virtual_width / smallmap_zoom)) / 16;
++		y2 = (y + (vp->virtual_height / smallmap_zoom)) / 16;
+ 		x /= 16;
+ 		y /= 16;
+ 
+@@ -785,7 +791,20 @@
+ 
+ static void SmallMapWindowProc(Window *w, WindowEvent *e)
+ {
++	/* smooth scrolling */	
++	if (smallmap_final_zoom != smallmap_zoom)
++	{
++		double diff = smallmap_final_zoom - smallmap_zoom;
++		smallmap_zoom += diff / 100;
++		if ((diff < 0.001 && diff > 0) || (diff > -0.001 && diff < 0))
++			smallmap_zoom = smallmap_final_zoom;
++	}
++
+ 	switch (e->event) {
++	case WE_CREATE: {
++		smallmap_zoom = 1;
++		smallmap_final_zoom = 1;
++	} break;
+ 	case WE_PAINT: {
+ 		const uint16 *tbl;
+ 		int x,y,y_org;
+@@ -833,8 +852,8 @@
+ 			w2 = FindWindowById(WC_MAIN_WINDOW, 0);
+ 
+ 			pt = RemapCoords(WP(w,smallmap_d).scroll_x, WP(w,smallmap_d).scroll_y, 0);
+-			WP(w2,vp_d).scrollpos_x = pt.x + ((_cursor.pos.x - w->left + 2) << 4) - (w2->viewport->virtual_width >> 1);
+-			WP(w2,vp_d).scrollpos_y = pt.y + ((_cursor.pos.y - w->top - 16) << 4) - (w2->viewport->virtual_height >> 1);
++			WP(w2,vp_d).scrollpos_x = (pt.x * smallmap_zoom) + (((_cursor.pos.x - w->left + 2) << 4) * smallmap_zoom)  - (w2->viewport->virtual_width >> 1);
++			WP(w2,vp_d).scrollpos_y = (pt.y * smallmap_zoom) + (((_cursor.pos.y - w->top - 16) << 4) * smallmap_zoom) - (w2->viewport->virtual_height >> 1);
+ 		} break;
+ 
+ 		case 5: /* Show land contours */
+@@ -851,12 +870,33 @@
+ 			SndPlayFx(SND_15_BEEP);
+ 			break;
+ 
++		case 11: /* centre location */
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
+ 		case 12: /* toggle town names */
+ 			w->click_state ^= (1 << 12);
+ 			_smallmap_show_towns = (w->click_state >> 12) & 1;
+ 			SetWindowDirty(w);
+ 			SndPlayFx(SND_15_BEEP);
+ 			break;
++		case 13: /* zoom in */
++			if (smallmap_zoom > 0.04) // can zoom in up to 5 times
++				smallmap_final_zoom = smallmap_zoom / 2;
++			
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
++		case 14: /* zoom out */
++			if (smallmap_zoom < 32)
++				smallmap_final_zoom = smallmap_zoom * 2;
++			
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
+ 		}
+ 		break;
+ 
+@@ -876,6 +916,80 @@
+ 	}
+ }
+ 
++void SmallMapRecentre(void)
++{
++	int x, y, wx, wy;
++	Window *w;
++	ViewPort *vp;
++	
++	/* recentre the map */
++	w = FindWindowById(WC_SMALLMAP, 0);
++	vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
++
++	wx = (w->widget[4].right  - w->widget[4].left)/2;
++	wy = (w->widget[4].bottom - w->widget[4].top )/2;
++	x =  ((((vp->virtual_width  / smallmap_zoom) - (wx * 32)) / 2) + (vp->virtual_left / smallmap_zoom)) / 4;
++	y = (((((vp->virtual_height  / smallmap_zoom) - (wy * 32)) / 2) + (vp->virtual_top / smallmap_zoom)) / 2) - 32;
++
++	WP(w,smallmap_d).scroll_x = (y-x) & ~0xF;
++	WP(w,smallmap_d).scroll_y = (x+y) & ~0xF;
++	WP(w,smallmap_d).subscroll = 0;
++
++	/* handle disabled states of buttons */
++	CLRBIT(w->disabled_state, 13);
++	CLRBIT(w->disabled_state, 14);
++
++	if (smallmap_zoom <= 0) {
++		SETBIT(w->disabled_state, 13);
++	}if (smallmap_zoom >= 32) {
++		SETBIT(w->disabled_state, 14);
++	}
++}	
++
++void ScrollSmallmap(int mx, int my)
++{
++	int hx, hy;
++	int hvx, hvy;
++	int x, y, sub;
++	
++	Window *w = FindWindowById(WC_SMALLMAP, 0);
++
++	x = WP(w,smallmap_d).scroll_x;
++	y = WP(w,smallmap_d).scroll_y;
++
++	sub = WP(w,smallmap_d).subscroll + mx;
++
++	x -= (sub >> 2) << 4;
++	y += (sub >> 2) << 4;
++	sub &= 3;
++
++	x += (my >> 1) << 4;
++	y += (my >> 1) << 4;
++
++	if (my & 1) {
++		x += 16;
++		sub += 2;
++		if (sub > 3) {
++			sub -= 4;
++			x -= 16;
++			y += 16;
++		}
++	}
++
++	hx = (w->widget[4].right  - w->widget[4].left) / 2;
++	hy = (w->widget[4].bottom - w->widget[4].top ) / 2;
++	hvx = hx * -4 + hy * 8;
++	hvy = hx *  4 + hy * 8;
++	if (x < -hvx) { x = -hvx; sub = 0; }
++	if (x > (int)((MapMaxX() * 16) / smallmap_zoom) - hvx) { x = ((MapMaxX() * 16) / smallmap_zoom) - hvx; sub = 0; }
++	if (y < -hvy) { y = -hvy; sub = 0; }
++	if (y > (int)((MapMaxY() * 16) / smallmap_zoom) - hvy) { y = ((MapMaxY() * 16) / smallmap_zoom) - hvy; sub = 0; }
++
++	WP(w,smallmap_d).scroll_x = x;
++	WP(w,smallmap_d).scroll_y = y;
++	WP(w,smallmap_d).subscroll = sub;
++}
++
+ static const WindowDesc _smallmap_desc = {
+ 	-1,-1, 446, 314,
+ 	WC_SMALLMAP,0,
+@@ -898,8 +1012,9 @@
+ 
+ 		vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
+ 
+-		x = ((vp->virtual_width  - 220 * 32) / 2 + vp->virtual_left) / 4;
+-		y = ((vp->virtual_height - 120 * 32) / 2 + vp->virtual_top ) / 2 - 32;
++		x =  ((((vp->virtual_width / smallmap_zoom) - (220 * 32)) / 2) + vp->virtual_left) / (4  * smallmap_zoom);
++		y = (((((vp->virtual_height  / smallmap_zoom) - (120 * 32)) / 2) + vp->virtual_top) / (2 * smallmap_zoom)) - 32;
++
+ 		WP(w,smallmap_d).scroll_x = (y - x) & ~0xF;
+ 		WP(w,smallmap_d).scroll_y = (x + y) & ~0xF;
+ 		WP(w,smallmap_d).subscroll = 0;
+@@ -915,8 +1030,8 @@
+ {          WWT_6,     RESIZE_RB,    14,     2,   297,    16,   231, 0x0,				STR_NULL},
+ {      WWT_PANEL,     RESIZE_TB,    14,     0,    21,   234,   255, 0x2DF,			STR_017F_ZOOM_THE_VIEW_IN},
+ {      WWT_PANEL,     RESIZE_TB,    14,    22,    43,   234,   255, 0x2E0,			STR_0180_ZOOM_THE_VIEW_OUT},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,    44,   171,   234,   255, STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW,STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   172,   298,   234,   255, STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN,STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,    44,   171,   234,   255, STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN,STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   172,   298,   234,   255, STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW,STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT},
+ {      WWT_PANEL,    RESIZE_RTB,    14,   299,   299,   234,   255, 0x0,				STR_NULL},
+ {      WWT_PANEL,    RESIZE_RTB,    14,     0,   287,   256,   267, 0x0,				STR_NULL},
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   288,   299,   256,   267, 0x0,				STR_RESIZE_BUTTON},
+@@ -998,7 +1113,7 @@
+ 		v = FindWindowById(WC_MAIN_WINDOW, 0);
+ 		// New viewport start ats (zero,zero)
+ 		AssignWindowViewport(w, 3, 17, 294, 214, 0 , 0);
+-
++		
+ 		// center on same place as main window (zoom is maximum, no adjustment needed)
+ 		x = WP(v, vp_d).scrollpos_x;
+ 		y = WP(v, vp_d).scrollpos_y;
+Index: window.c
+===================================================================
+--- window.c	(revision 3703)
++++ window.c	(working copy)
+@@ -1177,63 +1177,9 @@
+ 		WP(w,vp_d).scrollpos_y += dy << vp->zoom;
+ 
+ 	} else {
+-		int x;
+-		int y;
+-		int sub;
+-		int hx;
+-		int hy;
+-		int hvx;
+-		int hvy;
+-
+-		_cursor.fix_at = true;
+-
+-		x = WP(w,smallmap_d).scroll_x;
+-		y = WP(w,smallmap_d).scroll_y;
+-
+-		sub = WP(w,smallmap_d).subscroll + dx;
+-
+-		x -= (sub >> 2) << 4;
+-		y += (sub >> 2) << 4;
+-		sub &= 3;
+-
+-		x += (dy >> 1) << 4;
+-		y += (dy >> 1) << 4;
+-
+-		if (dy & 1) {
+-			x += 16;
+-			sub += 2;
+-			if (sub > 3) {
+-				sub -= 4;
+-				x -= 16;
+-				y += 16;
+-			}
+-		}
+-
+-		hx = (w->widget[4].right  - w->widget[4].left) / 2;
+-		hy = (w->widget[4].bottom - w->widget[4].top ) / 2;
+-		hvx = hx * -4 + hy * 8;
+-		hvy = hx *  4 + hy * 8;
+-		if (x < -hvx) {
+-			x = -hvx;
+-			sub = 0;
+-		}
+-		if (x > (int)MapMaxX() * 16 - hvx) {
+-			x = MapMaxX() * 16 - hvx;
+-			sub = 0;
+-		}
+-		if (y < -hvy) {
+-			y = -hvy;
+-			sub = 0;
+-		}
+-		if (y > (int)MapMaxY() * 16 - hvy) {
+-			y = MapMaxY() * 16 - hvy;
+-			sub = 0;
+-		}
+-
+-		WP(w,smallmap_d).scroll_x = x;
+-		WP(w,smallmap_d).scroll_y = y;
+-		WP(w,smallmap_d).subscroll = sub;
+-
++		// scrolling the small map
++  		_cursor.fix_at = true;
++		ScrollSmallmap(_cursor.delta.x, _cursor.delta.y);
+ 		SetWindowDirty(w);
+ 	}
+ 

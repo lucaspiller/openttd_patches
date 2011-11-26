@@ -1,0 +1,1428 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 3159)
++++ station_cmd.c	(working copy)
+@@ -2364,7 +2364,7 @@
+ 	uint16 spd;
+ 
+ 	if (v->type == VEH_Train) {
+-		if (IS_BYTE_INSIDE(_m[tile].m5, 0, 8) && v->subtype == TS_Front_Engine &&
++		if (IS_BYTE_INSIDE(_m[tile].m5, 0, 8) && HASBIT(v->subtype, TS_Front) &&
+ 				!IsCompatibleTrainStationTile(tile + TileOffsByDir(v->direction >> 1), tile)) {
+ 
+ 			station_id = _m[tile].m2;
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 3159)
++++ vehicle_gui.c	(working copy)
+@@ -105,7 +105,7 @@
+ 
+ void BuildVehicleList(vehiclelist_d* vl, int type, PlayerID owner, StationID station)
+ {
+-	int subtype = (type != VEH_Aircraft) ? TS_Front_Engine : 2;
++	int subtype = (type != VEH_Aircraft) ? 0 : 2;
+ 	int n = 0;
+ 	int i;
+ 
+@@ -122,7 +122,9 @@
+ 	if (station != INVALID_STATION) {
+ 		const Vehicle *v;
+ 		FOR_ALL_VEHICLES(v) {
+-			if (v->type == type && v->subtype <= subtype) {
++			if (v->type == type && (
++				(type == VEH_Train && HASBIT(v->subtype, TS_Front)) ||
++				(type != VEH_Train && v->subtype <= subtype))) {
+ 				const Order *order;
+ 
+ 				FOR_VEHICLE_ORDERS(v, order) {
+@@ -138,7 +140,9 @@
+ 	} else {
+ 		const Vehicle *v;
+ 		FOR_ALL_VEHICLES(v) {
+-			if (v->type == type && v->subtype <= subtype && v->owner == owner) {
++			if (v->type == type && v->owner == owner && (
++				(type == VEH_Train && HASBIT(v->subtype, TS_Front)) ||
++				(type != VEH_Train && v->subtype <= subtype))) {
+ 				_vehicle_sort[n].index = v->index;
+ 				_vehicle_sort[n].owner = v->owner;
+ 				++n;
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3159)
++++ lang/english.txt	(working copy)
+@@ -2405,6 +2405,7 @@
+ STR_8834_CAN_T_DELETE_THIS_ORDER                                :{WHITE}Can't delete this order...
+ STR_8835_CAN_T_MODIFY_THIS_ORDER                                :{WHITE}Can't modify this order...
+ STR_8837_CAN_T_MOVE_VEHICLE                                     :{WHITE}Can't move vehicle...
++STR_REAR_ENGINE_FOLLOW_FRONT_ERROR                              :{WHITE}The rear engine will always follow it's front counterpart
+ STR_8838_N_A                                                    :N/A{SKIP}
+ STR_8839_CAN_T_SELL_RAILROAD_VEHICLE                            :{WHITE}Can't sell railway vehicle...
+ STR_883A_UNABLE_TO_FIND_ROUTE_TO                                :{WHITE}Unable to find route to local depot
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 3159)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -1492,7 +1492,7 @@
+ 			vdir = v->direction >> 1;
+ 
+ 			if (v->u.rail.track != 0x40 && dir == vdir) {
+-				if (v->subtype == TS_Front_Engine && fc == _tunnel_fractcoord_1[dir]) {
++				if (HASBIT(v->subtype, TS_Front) && fc == _tunnel_fractcoord_1[dir]) {
+ 					if (v->spritenum < 4)
+ 						SndPlayVehicleFx(SND_05_TRAIN_THROUGH_TUNNEL, v);
+ 					return 0;
+@@ -1547,7 +1547,7 @@
+ 			}
+ 		}
+ 	} else if (_m[tile].m5 & 0x80) {
+-		if (v->type == VEH_Road || (v->type == VEH_Train && v->subtype == TS_Front_Engine)) {
++		if (v->type == VEH_Road || (v->type == VEH_Train && HASBIT(v->subtype, TS_Front))) {
+ 			uint h;
+ 
+ 			if (GetTileSlope(tile, &h) != 0)
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 3159)
++++ saveload.c	(working copy)
+@@ -30,7 +30,7 @@
+ 
+ enum {
+ 	SAVEGAME_MAJOR_VERSION = 16,
+-	SAVEGAME_MINOR_VERSION = 1,
++	SAVEGAME_MINOR_VERSION = 2,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+ };
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 3159)
++++ train_cmd.c	(working copy)
+@@ -23,9 +23,6 @@
+ #include "waypoint.h"
+ #include "vehicle_gui.h"
+ 
+-#define IS_FIRSTHEAD_SPRITE(spritenum) \
+-	(is_custom_sprite(spritenum) ? IS_CUSTOM_FIRSTHEAD_SPRITE(spritenum) : _engine_sprite_add[spritenum] == 0)
+-
+ static bool TrainCheckIfLineEnds(Vehicle *v);
+ static void TrainController(Vehicle *v);
+ 
+@@ -49,7 +46,7 @@
+ 		vweight += (_cargoc.weights[u->cargo_type] * u->cargo_count) / 16;
+ 
+ 		// Vehicle weight is not added for articulated parts.
+-		if (u->subtype != TS_Artic_Part) {
++		if (!HASBIT(u->subtype, TS_Artic_Part)) {
+ 			// vehicle weight is the sum of the weight of the vehicle and the weight of its cargo
+ 			vweight += rvi->weight;
+ 
+@@ -84,10 +81,10 @@
+ 
+ 	assert(v->type == VEH_Train);
+ 
+-	assert(v->subtype == TS_Front_Engine || v->subtype == TS_Free_Car);
++	assert(HASBIT(v->subtype, TS_Front) || HASBIT(v->subtype, TS_Free_Car));
+ 
+ 	rvi_v = RailVehInfo(v->engine_type);
+-	first_engine = (v->subtype == TS_Front_Engine) ? v->engine_type : INVALID_VEHICLE;
++	first_engine = HASBIT(v->subtype, TS_Front) ? v->engine_type : INVALID_VEHICLE;
+ 	v->u.rail.cached_total_length = 0;
+ 
+ 	for (u = v; u != NULL; u = u->next) {
+@@ -95,12 +92,18 @@
+ 		uint16 veh_len;
+ 
+ 		// update the 'first engine'
+-		u->u.rail.first_engine = (v == u) ? INVALID_VEHICLE : first_engine;
++		if (first_engine != INVALID_VEHICLE) {
++			u->u.rail.first_engine = (v == u) ? INVALID_VEHICLE : first_engine;
++			if (HASBIT(u->subtype, TS_Engine))
++				first_engine = u->engine_type;
++		} else {
++			u->u.rail.first_engine = INVALID_VEHICLE;
++		}
+ 
+ 		if (rvi_u->visual_effect != 0) {
+ 			u->u.rail.cached_vis_effect = rvi_u->visual_effect;
+ 		} else {
+-			if (rvi_u->flags & RVI_WAGON || u->subtype == TS_Artic_Part) {
++			if (HASBIT(u->subtype, TS_Wagon) || HASBIT(u->subtype, TS_Artic_Part)) {
+ 				// Wagons and articulated parts have no effect by default
+ 				u->u.rail.cached_vis_effect = 0x40;
+ 			} else if (rvi_u->engclass == 0) {
+@@ -112,7 +115,7 @@
+ 			}
+ 		}
+ 
+-		if (u->subtype != TS_Artic_Part) {
++		if (!HASBIT(u->subtype, TS_Artic_Part)) {
+ 			// power is the sum of the powers of all engines and powered wagons in the consist
+ 			power += rvi_u->power;
+ 
+@@ -274,7 +277,7 @@
+ 
+ 	max_speed += (max_speed / 2) * v->u.rail.railtype;
+ 
+-	if (IsTileType(v->tile, MP_STATION) && v->subtype == TS_Front_Engine) {
++	if (IsTileType(v->tile, MP_STATION) && HASBIT(v->subtype, TS_Front)) {
+ 		if (TrainShouldStop(v, v->tile)) {
+ 			int station_length = 0;
+ 			TileIndex tile = v->tile;
+@@ -358,7 +361,7 @@
+ 	uint power = 0;
+ 	uint weight = 0;
+ 
+-	assert(v->subtype == TS_Front_Engine);
++	assert(HASBIT(v->subtype, TS_Front));
+ 
+ 	weight = v->u.rail.cached_weight;
+ 	power = v->u.rail.cached_power;
+@@ -491,7 +494,8 @@
+ 		u->engine_type = engine_type;
+ 		u->value = 0;
+ 		u->type = VEH_Train;
+-		u->subtype = TS_Artic_Part;
++		u->subtype = 0;
++		SETBIT(u->subtype, TS_Artic_Part);
+ 		u->cur_image = 0xAC2;
+ 
+ 		VehiclePositionChanged(u);
+@@ -532,7 +536,7 @@
+ 
+ 			FOR_ALL_VEHICLES(w) {
+ 				if (w->type == VEH_Train && w->tile == tile &&
+-				    w->subtype == TS_Free_Car && w->engine_type == engine) {
++				    HASBIT(w->subtype, TS_Free_Car) && w->engine_type == engine) {
+ 					u = GetLastVehicleInChain(w);
+ 					break;
+ 				}
+@@ -556,10 +560,12 @@
+ 			v->u.rail.track = 0x80;
+ 			v->vehstatus = VS_HIDDEN | VS_DEFPAL;
+ 
+-			v->subtype = TS_Free_Car;
++			v->subtype = 0;
++			SETBIT(v->subtype, TS_Wagon);
+ 			if (u != NULL) {
+ 				u->next = v;
+-				v->subtype = TS_Not_First;
++			} else {
++				SETBIT(v->subtype, TS_Free_Car);
+ 			}
+ 
+ 			v->cargo_type = rvi->cargo_type;
+@@ -595,11 +601,11 @@
+ 	Vehicle *v;
+ 
+ 	FOR_ALL_VEHICLES(v) {
+-		if (v->type == VEH_Train && v->subtype == TS_Free_Car &&
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Free_Car) &&
+ 				v->tile == u->tile &&
+ 				v->u.rail.track == 0x80) {
+-			if (DoCommandByTile(0, v->index | (u->index << 16), 1, DC_EXEC,
+-					CMD_MOVE_RAIL_VEHICLE) == CMD_ERROR)
++			if (CmdFailed(DoCommandByTile(0, v->index | (u->index << 16), 1, DC_EXEC,
++					CMD_MOVE_RAIL_VEHICLE)))
+ 				break;
+ 		}
+ 	}
+@@ -640,7 +646,8 @@
+ 	u->z_height = 6;
+ 	u->u.rail.track = 0x80;
+ 	u->vehstatus = v->vehstatus & ~VS_STOPPED;
+-	u->subtype = TS_Not_First;
++	u->subtype = 0;
++	SETBIT(u->subtype, TS_Multiheaded);
+ 	u->spritenum = v->spritenum + 1;
+ 	u->cargo_type = v->cargo_type;
+ 	u->cargo_cap = v->cargo_cap;
+@@ -752,13 +759,20 @@
+ 			v->type = VEH_Train;
+ 			v->cur_image = 0xAC2;
+ 
++			v->subtype = 0;
++			SETBIT(v->subtype, TS_Front);
++			SETBIT(v->subtype, TS_Engine);
++
+ 			v->u.rail.shortest_platform[0] = 255;
+ 			v->u.rail.shortest_platform[1] = 0;
+ 
+ 			VehiclePositionChanged(v);
+ 
+ 			if (rvi->flags & RVI_MULTIHEAD && !HASBIT(p2, 0)) {
++				SETBIT(v->subtype, TS_Multiheaded);
+ 				AddRearEngineToMultiheadedTrain(vl[0], vl[1], true);
++				vl[0]->u.rail.other_multiheaded_part = vl[1];
++				vl[1]->u.rail.other_multiheaded_part = vl[0];
+ 			} else {
+ 				AddArticulatedParts(rvi, vl);
+ 			}
+@@ -802,7 +816,7 @@
+ 	for (; v != NULL; v = v->next) {
+ 		count++;
+ 		if (v->u.rail.track != 0x80 || v->tile != tile ||
+-				(v->subtype == TS_Front_Engine && !(v->vehstatus & VS_STOPPED))) {
++				(HASBIT(v->subtype, TS_Front) && !(v->vehstatus & VS_STOPPED))) {
+ 			_error_message = STR_881A_TRAINS_CAN_ONLY_BE_ALTERED;
+ 			return -1;
+ 		}
+@@ -826,7 +840,7 @@
+ 		v = GetNextVehicle(v);
+ 		if (v == NULL) return NULL;
+ 
+-		v->subtype = TS_Free_Car;
++		SETBIT(v->subtype, TS_Free_Car);
+ 		return v;
+ 	}
+ 
+@@ -842,7 +856,7 @@
+ 	TileIndex tile = src->tile;
+ 
+ 	FOR_ALL_VEHICLES(dst) {
+-		if (dst->type == VEH_Train && dst->subtype == TS_Free_Car &&
++		if (dst->type == VEH_Train && HASBIT(dst->subtype, TS_Free_Car) &&
+ 				dst->tile == tile) {
+ 			// check so all vehicles in the line have the same engine.
+ 			Vehicle *v = dst;
+@@ -857,6 +871,47 @@
+ 	return NULL;
+ }
+ 
++/*
++ * add a vehicle v behind vehicle dest
++ * use this function since it sets flags as needed
++ */
++static void AddWagonToConsist(Vehicle *v, Vehicle *dest)
++{
++	UnlinkWagon(v, GetFirstVehicleInChain(v));
++	if (dest == NULL) return;
++
++	v->next = dest->next;
++	dest->next = v;
++	CLRBIT(v->subtype, TS_Free_Car);
++	CLRBIT(v->subtype, TS_Front);
++}
++
++/*
++ * move around on the train so rear engines are placed correctly according to the other engines
++ * always call with the front engine
++ */
++static void NormaliseTrainConsist(Vehicle *v)
++{
++	Vehicle *u;
++
++	if (HASBIT(v->subtype, TS_Free_Car)) return;
++
++	assert(HASBIT(v->subtype, TS_Front));
++
++	for(v = v; v != NULL; v = GetNextVehicle(v)) {
++		if (!HASBIT(v->subtype, TS_Multiheaded)) continue;
++
++		if (HASBIT(v->subtype, TS_Engine)) continue;
++
++		/* make sure that there are no free cars before next engine */
++		for(u=v; u->next != NULL && !HASBIT(u->next->subtype, TS_Engine); u = u->next);
++
++		if (u == v) continue;
++		AddWagonToConsist(v, u);
++
++	}
++}
++
+ /** Move a rail vehicle around inside the depot.
+  * @param x,y unused
+  * @param p1 various bitstuffed elements
+@@ -869,7 +924,6 @@
+ 	VehicleID s = GB(p1, 0, 16);
+ 	VehicleID d = GB(p1, 16, 16);
+ 	Vehicle *src, *dst, *src_head, *dst_head;
+-	bool is_loco;
+ 
+ 	if (!IsVehicleIndex(s)) return CMD_ERROR;
+ 
+@@ -877,27 +931,25 @@
+ 
+ 	if (src->type != VEH_Train) return CMD_ERROR;
+ 
+-	is_loco = !(RailVehInfo(src->engine_type)->flags & RVI_WAGON) && IS_FIRSTHEAD_SPRITE(src->spritenum);
+-
+ 	// if nothing is selected as destination, try and find a matching vehicle to drag to.
+ 	if (d == INVALID_VEHICLE) {
+ 		dst = NULL;
+-		if (!is_loco) dst = FindGoodVehiclePos(src);
++		if (!HASBIT(src->subtype, TS_Engine)) dst = FindGoodVehiclePos(src);
+ 	} else {
+ 		dst = GetVehicle(d);
+ 	}
+ 
+ 	// if an articulated part is being handled, deal with its parent vehicle
+-	while (src->subtype == TS_Artic_Part) src = GetPrevVehicleInChain(src);
++	while (HASBIT(src->subtype, TS_Artic_Part)) src = GetPrevVehicleInChain(src);
+ 	if (dst != NULL) {
+-		while (dst->subtype == TS_Artic_Part) dst = GetPrevVehicleInChain(dst);
++		while (HASBIT(dst->subtype, TS_Artic_Part)) dst = GetPrevVehicleInChain(dst);
+ 	}
+ 
+ 	// don't move the same vehicle..
+ 	if (src == dst) return 0;
+ 
+ 	/* the player must be the owner */
+-	if (!CheckOwnership(src->owner) || (dst!=NULL && !CheckOwnership(dst->owner)))
++	if (!CheckOwnership(src->owner) || (dst != NULL && !CheckOwnership(dst->owner)))
+ 		return CMD_ERROR;
+ 
+ 	/* locate the head of the two chains */
+@@ -909,6 +961,42 @@
+ 		dst = GetLastEnginePart(dst);
+ 	}
+ 
++	if (dst != NULL && HASBIT(dst->subtype, TS_Multiheaded) && !HASBIT(dst->subtype, TS_Engine) && HASBIT(src->subtype, TS_Wagon)) {
++		/* We are moving a wagon to the rear part of a multiheaded engine */
++		if (dst->next == NULL) {
++			/* It's the last one, so we will add the wagon just before the rear engine */
++			dst = GetPrevVehicleInChain(dst);
++			// if dst is NULL, it means that dst got a rear multiheaded engine as first engine. We can't use that
++			if (dst == NULL) return CMD_ERROR;
++		} else {
++			/* there are more units on this train, so we will add the wagon after the next one*/
++			dst = dst->next;
++		}
++	}
++
++	if (HASBIT(src->subtype, TS_Engine) && dst_head != NULL) {
++		/* we need to make sure that we didn't place it between a pair of multiheaded engines */
++		Vehicle *u, *engine = NULL;
++
++		for(u = dst_head; u != NULL; u = u->next) {
++			if (HASBIT(u->subtype, TS_Engine) && HASBIT(u->subtype, TS_Multiheaded) && u->u.rail.other_multiheaded_part != NULL) {
++				engine = u;
++			}
++				if (engine != NULL && engine->u.rail.other_multiheaded_part == u) {
++					engine = NULL;
++				}
++				if (u == dst) {
++					if (engine != NULL) {
++					dst = engine->u.rail.other_multiheaded_part;
++					}
++					break;
++				}
++
++		}
++	}
++
++	if (HASBIT(src->subtype, TS_Multiheaded) && !HASBIT(src->subtype, TS_Engine)) return_cmd_error(STR_REAR_ENGINE_FOLLOW_FRONT_ERROR);
++
+ 	/* clear the ->first cache */
+ 	{
+ 		Vehicle *u;
+@@ -926,18 +1014,9 @@
+ 		int num = CheckTrainStoppedInDepot(dst_head);
+ 		if (num < 0) return CMD_ERROR;
+ 
+-		if (num > (_patches.mammoth_trains ? 100 : 9) && dst_head->subtype == TS_Front_Engine )
++		if (num > (_patches.mammoth_trains ? 100 : 9) && HASBIT(dst_head->subtype, TS_Front))
+ 			return_cmd_error(STR_8819_TRAIN_TOO_LONG);
+ 
+-		// if it's a multiheaded vehicle we're dragging to, drag to the vehicle before..
+-		while (IS_CUSTOM_SECONDHEAD_SPRITE(dst->spritenum) || (
+-			!is_custom_sprite(dst->spritenum) && _engine_sprite_add[dst->spritenum] != 0)
+-		) {
+-			Vehicle *v = GetPrevVehicleInChain(dst);
+-			if (v == NULL || src == v) break;
+-			dst = v;
+-		}
+-
+ 		assert(dst_head->tile == src_head->tile);
+ 	}
+ 
+@@ -945,7 +1024,7 @@
+ 	if (HASBIT(p2, 0) && src_head == dst_head) return 0;
+ 
+ 	// moving a loco to a new line?, then we need to assign a unitnumber.
+-	if (dst == NULL && src->subtype != TS_Front_Engine && is_loco) {
++	if (dst == NULL && !HASBIT(src->subtype, TS_Front) && HASBIT(src->subtype, TS_Engine)) {
+ 		UnitID unit_num = GetFreeUnitNumber(VEH_Train);
+ 		if (unit_num > _patches.max_trains)
+ 			return_cmd_error(STR_00E1_TOO_MANY_VEHICLES_IN_GAME);
+@@ -958,8 +1037,12 @@
+ 	/* do it? */
+ 	if (flags & DC_EXEC) {
+ 		Vehicle *new_front = GetNextVehicle(src);	//used if next in line should make a train on it's own
+-		bool make_new_front = src->subtype == TS_Front_Engine;
++		bool make_new_front = HASBIT(src->subtype, TS_Front);
+ 
++		if (make_new_front && HASBIT(src->subtype, TS_Multiheaded) && src->u.rail.other_multiheaded_part == src->next) {
++			new_front = new_front->next;
++		}
++
+ 		if (HASBIT(p2, 0)) {
+ 			// unlink ALL wagons
+ 			if (src != src_head) {
+@@ -980,25 +1063,26 @@
+ 
+ 		if (dst == NULL) {
+ 			// move the train to an empty line. for locomotives, we set the type to 0. for wagons, 4.
+-			if (is_loco) {
+-				if (src->subtype != TS_Front_Engine) {
++			if (HASBIT(src->subtype, TS_Engine)) {
++				if (!HASBIT(src->subtype, TS_Front)) {
+ 					// setting the type to 0 also involves setting up the orders field.
+-					src->subtype = TS_Front_Engine;
++					SETBIT(src->subtype, TS_Front);
+ 					assert(src->orders == NULL);
+ 					src->num_orders = 0;
+ 				}
+ 			} else {
+-				src->subtype = TS_Free_Car;
++				SETBIT(src->subtype, TS_Free_Car);
+ 			}
+ 			dst_head = src;
+ 		} else {
+-			if (src->subtype == TS_Front_Engine) {
++			if (HASBIT(src->subtype, TS_Front)) {
+ 				// the vehicle was previously a loco. need to free the order list and delete vehicle windows etc.
+ 				DeleteWindowById(WC_VEHICLE_VIEW, src->index);
+ 				DeleteVehicleOrders(src);
+ 			}
+ 
+-			src->subtype = TS_Not_First;
++			CLRBIT(src->subtype, TS_Front);
++			CLRBIT(src->subtype, TS_Free_Car);
+ 			src->unitnumber = 0; // doesn't occupy a unitnumber anymore.
+ 
+ 			// link in the wagon(s) in the chain.
+@@ -1010,19 +1094,44 @@
+ 			}
+ 			dst->next = src;
+ 		}
++		if (src->u.rail.other_multiheaded_part != NULL) {
++			if (src->u.rail.other_multiheaded_part == src_head) {
++				src_head = src_head->next;
++			}
++			AddWagonToConsist(src->u.rail.other_multiheaded_part, src);
++		}
+ 
++		if (HASBIT(p2, 0) && src_head != NULL && src_head != src) {
++			/* if we stole a rear multiheaded engine, we better give it back to the front end */
++			Vehicle *engine = NULL, *u;
++			for (u = src_head; u != NULL; u = u->next) {
++				if (HASBIT(u->subtype, TS_Multiheaded)) {
++					if (HASBIT(u->subtype, TS_Multiheaded)) {
++						engine = u;
++						continue;
++					}
++					/* we got the rear engine to match with the front one */
++					engine = NULL;
++				}
++			}
++			if (engine != NULL && engine->u.rail.other_multiheaded_part != NULL) {
++				AddWagonToConsist(engine->u.rail.other_multiheaded_part, engine);
++			}
++		}
++
+ 		/* If there is an engine behind first_engine we moved away, it should become new first_engine
+ 		 * To do this, CmdMoveRailVehicle must be called once more
+ 		 * since we set p2 to a condition that makes the statement false, we can't loop forever with this one */
+ 		if (make_new_front && new_front != NULL && !(HASBIT(p2, 0))) {
+-			if (!(RailVehInfo(new_front->engine_type)->flags & RVI_WAGON)) {
++			if (!HASBIT(new_front->subtype, TS_Wagon)) {
+ 				CmdMoveRailVehicle(x, y, flags, new_front->index | (INVALID_VEHICLE << 16), 1);
+ 			}
+ 		}
+ 
+ 		if (src_head) {
++			NormaliseTrainConsist(src_head);
+ 			TrainConsistChanged(src_head);
+-			if (src_head->subtype == TS_Front_Engine) {
++			if (HASBIT(src_head->subtype, TS_Front)) {
+ 				UpdateTrainAcceleration(src_head);
+ 				InvalidateWindow(WC_VEHICLE_DETAILS, src_head->index);
+ 				/* Update the refit button and window */
+@@ -1034,8 +1143,9 @@
+ 		};
+ 
+ 		if (dst_head) {
++			NormaliseTrainConsist(dst_head);
+ 			TrainConsistChanged(dst_head);
+-			if (dst_head->subtype == TS_Front_Engine) {
++			if (HASBIT(dst_head->subtype, TS_Front)) {
+ 				UpdateTrainAcceleration(dst_head);
+ 				InvalidateWindow(WC_VEHICLE_DETAILS, dst_head->index);
+ 				/* Update the refit button and window */
+@@ -1076,27 +1186,6 @@
+ 	return 0;
+ }
+ 
+-/**
+- * Search for a matching rear-engine of a dual-headed train.
+- * Do this as if you would find matching parentheses. If a new
+- * engine is 'started', first 'close' that before 'closing' our
+- * searched engine
+- */
+-Vehicle *GetRearEngine(const Vehicle *v, EngineID engine)
+-{
+-	Vehicle *u;
+-	int en_count = 1;
+-
+-	for (u = v->next; u != NULL; u = u->next) {
+-		if (u->engine_type == engine) { // find matching engine
+-			en_count += (IS_FIRSTHEAD_SPRITE(u->spritenum)) ? +1 : -1;
+-
+-			if (en_count == 0) return (Vehicle *)u;
+-		}
+-	}
+-	return NULL;
+-}
+-
+ /** Sell a (single) train wagon/engine.
+  * @param x,y unused
+  * @param p1 the wagon/engine index
+@@ -1110,6 +1199,7 @@
+ int32 CmdSellRailWagon(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Vehicle *v, *tmp, *first;
++	Vehicle *new_f = NULL;
+ 	int32 cost = 0;
+ 
+ 	if (!IsVehicleIndex(p1) || p2 > 2) return CMD_ERROR;
+@@ -1120,14 +1210,16 @@
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+-	while (v->subtype == TS_Artic_Part) v = GetPrevVehicleInChain(v);
++	while (HASBIT(v->subtype, TS_Artic_Part)) v = GetPrevVehicleInChain(v);
+ 	first = GetFirstVehicleInChain(v);
+ 
+ 	// make sure the vehicle is stopped in the depot
+ 	if (CheckTrainStoppedInDepot(first) < 0) return CMD_ERROR;
+ 
++	if (HASBIT(v->subtype, TS_Multiheaded) && !HASBIT(v->subtype, TS_Front)) return_cmd_error(STR_REAR_ENGINE_FOLLOW_FRONT_ERROR);
++
+ 	if (flags & DC_EXEC) {
+-		if (v == first && first->subtype == TS_Front_Engine) {
++		if (v == first && HASBIT(first->subtype, TS_Front)) {
+ 			DeleteWindowById(WC_VEHICLE_VIEW, first->index);
+ 		}
+ 		if (IsLocalPlayer() && (p1 == 1 || !(RailVehInfo(v->engine_type)->flags & RVI_WAGON))) {
+@@ -1143,20 +1235,22 @@
+ 			byte ori_subtype = v->subtype; // backup subtype of deleted wagon in case DeleteVehicle() changes
+ 
+ 			/* 1. Delete the engine, if it is dualheaded also delete the matching
+-			* rear engine of the loco (from the point of deletion onwards) */
+-			Vehicle *rear = (RailVehInfo(v->engine_type)->flags & RVI_MULTIHEAD) ? GetRearEngine(v, v->engine_type) : NULL;
++			 * rear engine of the loco (from the point of deletion onwards) */
++			Vehicle *rear = (HASBIT(v->subtype, TS_Multiheaded) &&
++				HASBIT(v->subtype, TS_Engine)) ? v->u.rail.other_multiheaded_part : NULL;
+ 			if (rear != NULL) {
+-				cost -= v->value;
++				cost -= rear->value;
+ 				if (flags & DC_EXEC) {
+-					v = UnlinkWagon(rear, v);
++					UnlinkWagon(rear, first);
++					CLRBIT(rear->subtype, TS_Free_Car);
+ 					DeleteVehicle(rear);
+ 				}
+ 			}
+ 
+ 			/* 2. We are selling the first engine, some special action might be required
+-				* here, so take attention */
++			 * here, so take attention */
+ 			if ((flags & DC_EXEC) && v == first) {
+-				Vehicle *new_f = GetNextVehicle(first);
++				new_f = GetNextVehicle(first);
+ 
+ 				/* 2.1 If the first wagon is sold, update the first-> pointers to NULL */
+ 				for (tmp = first; tmp != NULL; tmp = tmp->next) tmp->first = NULL;
+@@ -1165,7 +1259,7 @@
+ 					* if the second wagon (which will be first) is an engine. If it is one,
+ 					* promote it as a new train, retaining the unitnumber, orders */
+ 				if (new_f != NULL) {
+-					if (!(RailVehInfo(new_f->engine_type)->flags & RVI_WAGON) && IS_FIRSTHEAD_SPRITE(new_f->spritenum)) {
++					if (HASBIT(new_f->subtype, TS_Engine)) {
+ 						switch_engine = true;
+ 						/* Copy important data from the front engine */
+ 						new_f->unitnumber = first->unitnumber;
+@@ -1187,12 +1281,13 @@
+ 
+ 				/* 4 If the second wagon was an engine, update it to front_engine
+ 					* which UnlinkWagon() has changed to TS_Free_Car */
+-				if (switch_engine) first->subtype = TS_Front_Engine;
++				if (switch_engine) SETBIT(first->subtype, TS_Front);
+ 
+ 				/* 5. If the train still exists, update its acceleration, window, etc. */
+ 				if (first != NULL) {
++					NormaliseTrainConsist(first);
+ 					TrainConsistChanged(first);
+-					if (first->subtype == TS_Front_Engine) {
++					if (HASBIT(first->subtype, TS_Front)) {
+ 						InvalidateWindow(WC_VEHICLE_DETAILS, first->index);
+ 						InvalidateWindow(WC_VEHICLE_REFIT, first->index);
+ 						UpdateTrainAcceleration(first);
+@@ -1201,10 +1296,10 @@
+ 
+ 
+ 				/* (6.) Borked AI. If it sells an engine it expects all wagons lined
+-				* up on a new line to be added to the newly built loco. Replace it is.
+-				* Totally braindead cause building a new engine adds all loco-less
+-				* engines to its train anyways */
+-				if (p2 == 2 && ori_subtype == TS_Front_Engine) {
++				 * up on a new line to be added to the newly built loco. Replace it is.
++				 * Totally braindead cause building a new engine adds all loco-less
++				 * engines to its train anyways */
++				if (p2 == 2 && HASBIT(ori_subtype, TS_Front)) {
+ 					for (v = first; v != NULL; v = tmp) {
+ 						tmp = GetNextVehicle(v);
+ 						DoCommandByTile(v->tile, v->index | INVALID_VEHICLE << 16, 0, DC_EXEC, CMD_MOVE_RAIL_VEHICLE);
+@@ -1213,31 +1308,26 @@
+ 			}
+ 		} break;
+ 		case 1: { /* Delete wagon and all wagons after it given certain criteria */
+-			/* 1. Count the number for first and rear engines for dualheads
+-			* to be able to deduce which ones go with which ones */
+-			int enf_count = 0;
+-			int enr_count = 0;
+-			for (tmp = first; tmp != NULL; tmp = GetNextVehicle(tmp)) {
+-				if (RailVehInfo(tmp->engine_type)->flags & RVI_MULTIHEAD)
+-					(IS_FIRSTHEAD_SPRITE(tmp->spritenum)) ? enf_count++ : enr_count++;
+-			}
+-
+-			/* 2. Start deleting every vehicle after the selected one
+-			* If we encounter a matching rear-engine to a front-engine
+-			* earlier in the chain (before deletion), leave it alone */
++			/* Start deleting every vehicle after the selected one
++			 * If we encounter a matching rear-engine to a front-engine
++			 * earlier in the chain (before deletion), leave it alone */
+ 			for (; v != NULL; v = tmp) {
+ 				tmp = GetNextVehicle(v);
+ 
+-				if (RailVehInfo(v->engine_type)->flags & RVI_MULTIHEAD) {
+-					if (IS_FIRSTHEAD_SPRITE(v->spritenum)) {
+-						/* Always delete newly encountered front-engines */
+-						enf_count--;
+-					} else if (enr_count > enf_count) {
+-						/* More rear engines than front engines means this rear-engine does
+-						 * not belong to any front-engine; delete */
+-						enr_count--;
+-					} else {
+-						/* Otherwise leave it alone */
++				if (HASBIT(v->subtype, TS_Multiheaded)) {
++					if (!HASBIT(v->subtype, TS_Engine)) {
++						/* We got a front engine of a multiheaded set. Now we will sell the rear end too */
++						Vehicle *rear = v->u.rail.other_multiheaded_part;
++
++						if (rear != NULL) {
++							cost -= rear->value;
++							if (flags & DC_EXEC) {
++								first = UnlinkWagon(rear, first);
++								DeleteVehicle(rear);
++							}
++						}
++					} else if (v->u.rail.other_multiheaded_part != NULL) {
++						/* The front to this engine is earlier in this train. Do nothing */
+ 						continue;
+ 					}
+ 				}
+@@ -1251,9 +1341,12 @@
+ 
+ 			/* 3. If it is still a valid train after selling, update its acceleration and cached values */
+ 			if ((flags & DC_EXEC) && first != NULL) {
++				NormaliseTrainConsist(first);
+ 				TrainConsistChanged(first);
+-				if (first->subtype == TS_Front_Engine)
++				if (HASBIT(first->subtype, TS_Front))
+ 					UpdateTrainAcceleration(first);
++				InvalidateWindow(WC_VEHICLE_DETAILS, first->index);
++				InvalidateWindow(WC_VEHICLE_REFIT, first->index);
+ 			}
+ 		} break;
+ 	}
+@@ -2636,7 +2729,7 @@
+ 			// tracks over roads, do owner check of tracks
+ 			return
+ 				IsTileOwner(tile, v->owner) && (
+-					v->subtype != TS_Front_Engine ||
++					!HASBIT(v->subtype, TS_Front) ||
+ 					IsCompatibleRail(v->u.rail.railtype, GB(_m[tile].m4, 0, 4))
+ 				);
+ 
+@@ -2646,7 +2739,7 @@
+ 
+ 	return
+ 		IsTileOwner(tile, v->owner) && (
+-			v->subtype != TS_Front_Engine ||
++			!HASBIT(v->subtype, TS_Front) ||
+ 			IsCompatibleRail(v->u.rail.railtype, GetRailType(tile))
+ 		);
+ }
+@@ -2760,7 +2853,7 @@
+ 
+ /*
+  * Checks whether the specified train has a collision with another vehicle. If
+- * so, destroys this vehicle, and the other vehicle if its subtype is 0 (TS_Front_Engine).
++ * so, destroys this vehicle, and the other vehicle if its subtype has TS_Front.
+  * Reports the incident in a flashy news item, modifies station ratings and
+  * plays a sound.
+  */
+@@ -2800,7 +2893,7 @@
+ 		num += 2 + CountPassengersInTrain(coll);
+ 
+ 	SetVehicleCrashed(v);
+-	if (coll->subtype == TS_Front_Engine)
++	if (HASBIT(coll->subtype, TS_Front))
+ 		SetVehicleCrashed(coll);
+ 
+ 
+@@ -2825,7 +2918,7 @@
+ {
+ 	const VehicleAtSignalData* vasd = data;
+ 
+-	if (v->type == VEH_Train && v->subtype == TS_Front_Engine &&
++	if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front) &&
+ 			v->tile == vasd->tile) {
+ 		byte diff = (v->direction - vasd->direction + 2) & 7;
+ 
+@@ -2995,7 +3088,7 @@
+ 					goto invalid_rail;
+ 				}
+ 
+-				if (v->subtype == TS_Front_Engine) v->load_unload_time_rem = 0;
++				if (HASBIT(v->subtype, TS_Front)) v->load_unload_time_rem = 0;
+ 
+ 				if (!(r&0x4)) {
+ 					v->tile = gp.new_tile;
+@@ -3003,7 +3096,7 @@
+ 					assert(v->u.rail.track);
+ 				}
+ 
+-				if (v->subtype == TS_Front_Engine)
++				if (HASBIT(v->subtype, TS_Front))
+ 				TrainMovedChangeSignals(gp.new_tile, enterdir);
+ 
+ 				/* Signals can only change when the first
+@@ -3466,13 +3559,13 @@
+ 
+ 	v->tick_counter++;
+ 
+-	if (v->subtype == TS_Front_Engine) {
++	if (HASBIT(v->subtype, TS_Front)) {
+ 		TrainLocoHandler(v, false);
+ 
+ 		// make sure vehicle wasn't deleted.
+-		if (v->type == VEH_Train && v->subtype == TS_Front_Engine)
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front))
+ 			TrainLocoHandler(v, true);
+-	} else if (v->subtype == TS_Free_Car && HASBITS(v->vehstatus, VS_CRASHED)) {
++	} else if (HASBIT(v->subtype, TS_Free_Car) && HASBITS(v->vehstatus, VS_CRASHED)) {
+ 		// Delete flooded standalone wagon
+ 		if (++v->u.rail.crash_anim_pos >= 4400)
+ 			DeleteVehicle(v);
+@@ -3493,7 +3586,7 @@
+ {
+ 	SetSignalsOnBothDir(tile, _depot_track_ind[GB(_m[tile].m5, 0, 2)]);
+ 
+-	if (v->subtype != TS_Front_Engine)
++	if (!HASBIT(v->subtype, TS_Front))
+ 		v = GetFirstVehicleInChain(v);
+ 
+ 	VehicleServiceInDepot(v);
+@@ -3610,7 +3703,7 @@
+ 	if ((++v->day_counter & 7) == 0)
+ 		DecreaseVehicleValue(v);
+ 
+-	if (v->subtype == TS_Front_Engine) {
++	if (HASBIT(v->subtype, TS_Front)) {
+ 		CheckVehicleBreakdown(v);
+ 		AgeVehicle(v);
+ 
+@@ -3654,7 +3747,7 @@
+ 	Vehicle *v;
+ 
+ 	FOR_ALL_VEHICLES(v) {
+-		if (v->type == VEH_Train && v->subtype == TS_Front_Engine) {
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front)) {
+ 
+ 			// show warning if train is not generating enough income last 2 years (corresponds to a red icon in the vehicle list)
+ 			if (_patches.train_income_warn && v->owner == _local_player && v->age >= 730 && v->profit_this_year < 0) {
+@@ -3676,7 +3769,7 @@
+ 
+ void HandleClickOnTrain(Vehicle *v)
+ {
+-	if (v->subtype != TS_Front_Engine) v = GetFirstVehicleInChain(v);
++	if (!HASBIT(v->subtype, TS_Front)) v = GetFirstVehicleInChain(v);
+ 	ShowTrainViewWindow(v);
+ }
+ 
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 3159)
++++ vehicle.c	(working copy)
+@@ -243,7 +243,7 @@
+ 			v->left_coord = INVALID_COORD;
+ 			VehiclePositionChanged(v);
+ 
+-			if (v->type == VEH_Train && (v->subtype == TS_Front_Engine || v->subtype == TS_Free_Car))
++			if (v->type == VEH_Train && (HASBIT(v->subtype, TS_Front) || HASBIT(v->subtype, TS_Free_Car)))
+ 				TrainConsistChanged(v);
+ 		}
+ 	}
+@@ -505,7 +505,7 @@
+ 	assert(v != NULL);
+ 
+ 	if (v->first != NULL) {
+-		if (v->first->subtype == TS_Front_Engine) return v->first;
++		if (HASBIT(v->first->subtype, TS_Front)) return v->first;
+ 
+ 		DEBUG(misc, 0) ("v->first cache faulty. We shouldn't be here, rebuilding cache!");
+ 	}
+@@ -519,7 +519,7 @@
+ 	while ((u = GetPrevVehicleInChain_bruteforce(v)) != NULL) v = u;
+ 
+ 	/* Set the first pointer of all vehicles in that chain to the first wagon */
+-	if (v->subtype == TS_Front_Engine)
++	if (HASBIT(v->subtype, TS_Front))
+ 		for (u = (Vehicle *)v; u != NULL; u = u->next) u->first = (Vehicle *)v;
+ 
+ 	return (Vehicle*)v;
+@@ -1495,10 +1495,13 @@
+ 	switch (v->type) {
+ 		case VEH_Train:
+ 		{
+-			const RailVehicleInfo *rvi = RailVehInfo(v->engine_type);
+-			if (rvi->flags & RVI_MULTIHEAD)
+-				return GetRearEngine(v, v->engine_type);
+-			if (v->next != NULL && v->next->subtype == TS_Artic_Part)
++			if (HASBIT(v->subtype, TS_Multiheaded)) {
++			if (!HASBIT(v->subtype, TS_Engine))
++				return v->u.rail.other_multiheaded_part;
++			else
++				return NULL;
++			}
++			if (v->next != NULL && HASBIT(v->next->subtype, TS_Artic_Part))
+ 				return v->next;
+ 		}
+ 			break;
+@@ -1545,7 +1548,7 @@
+ 	if (!CheckOwnership(v->owner))
+ 		return CMD_ERROR;
+ 
+-	if (v->type == VEH_Train && v->subtype != TS_Front_Engine) return CMD_ERROR;
++	if (v->type == VEH_Train && !HASBIT(v->subtype, TS_Front)) return CMD_ERROR;
+ 
+ 	// check that we can allocate enough vehicles
+ 	if (!(flags & DC_EXEC)) {
+@@ -1562,8 +1565,14 @@
+ 	v = v_front;
+ 
+ 	do {
+-		cost = DoCommand(x, y, v->engine_type, 3, flags, CMD_BUILD_VEH(v->type));
+ 
++		if (HASBIT(v->subtype, TS_Multiheaded) && !HASBIT(v->subtype, TS_Engine)) {
++			/* we build the rear ends of multiheaded trains with the front ones */
++			continue;
++		}
++
++		cost = DoCommand(x, y, v->engine_type, 2, flags, CMD_BUILD_VEH(v->type));
++
+ 		if (CmdFailed(cost)) return cost;
+ 
+ 		total_cost += cost;
+@@ -1577,7 +1586,7 @@
+ 				}
+ 			}
+ 
+-			if (v->type == VEH_Train && v->subtype != TS_Front_Engine) {
++			if (v->type == VEH_Train && !HASBIT(v->subtype, TS_Front)) {
+ 				// this s a train car
+ 				// add this unit to the end of the train
+ 				DoCommand(x, y, (w_rear->index << 16) | w->index, 1, flags, CMD_MOVE_RAIL_VEHICLE);
+@@ -1586,22 +1595,13 @@
+ 				w_front = w;
+ 				DoCommand(x, y, (v->index << 16) | w->index, p2 & 1 ? CO_SHARE : CO_COPY, flags, CMD_CLONE_ORDER);
+ 			}
+-			w_rear = w;	// trains needs to know the last car in the train, so they can add more in next loop
++			w_rear = w; //for(w_rear = w; w_rear->next != NULL; w_rear = w_rear->next);	// a train needs to know the last car in the train, so they can add more in next loop
+ 		}
+ 	} while (v->type == VEH_Train && (v = GetNextVehicle(v)) != NULL);
+ 
+-	if (flags & DC_EXEC) {
+-		v = v_front;
+-		w = w_front;
+-		if (v->type == VEH_Train) {
+-			_new_train_id = w_front->index;  // _new_train_id needs to be the front engine due to the callback function
+-
+-			while (w != NULL && v != NULL) { // checking both just in case something went wrong
+-				w->spritenum = v->spritenum; // makes sure that multiheaded engines are facing the correct way
+-				w = w->next;
+-				v = v->next;
+-			}
+-		}
++	if (flags & DC_EXEC && v_front->type == VEH_Train) {
++		// _new_train_id needs to be the front engine due to the callback function
++		_new_train_id = w_front->index;
+ 	}
+ 	return total_cost;
+ }
+@@ -1679,7 +1679,7 @@
+ 			 * We add the new engine after the old one instead of replacing it. It will give the same result anyway when we
+ 			 * sell the old engine in a moment
+ 			 */
+-			DoCommand(0, 0, (old_v->index << 16) | new_v->index, 1, DC_EXEC, CMD_MOVE_RAIL_VEHICLE);
++			DoCommand(0, 0, (GetPrevVehicleInChain(old_v)->index << 16) | new_v->index, 1, DC_EXEC, CMD_MOVE_RAIL_VEHICLE);
+ 		} else {
+ 			// copy/clone the orders
+ 			DoCommand(0, 0, (old_v->index << 16) | new_v->index, IsOrderListShared(old_v) ? CO_SHARE : CO_COPY, DC_EXEC, CMD_CLONE_ORDER);
+@@ -2116,8 +2116,9 @@
+ 	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,pbs_end_trackdir), SLE_UINT8, 2, 255),
+ 	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,shortest_platform[0]), SLE_UINT8, 2, 255),	// added with 16.1, but was blank since 2
+ 	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,shortest_platform[1]), SLE_UINT8, 2, 255),	// added with 16.1, but was blank since 2
+-	// reserve extra space in savegame here. (currently 5 bytes)
+-	SLE_CONDARR(NullStruct,null,SLE_FILE_U8 | SLE_VAR_NULL, 5, 2, 255),
++	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,other_multiheaded_part), REF_VEHICLE, 2, 255),	// added with 16.2, but was blank since 2
++	// reserve extra space in savegame here. (currently 4 bytes)
++	SLE_CONDARR(NullStruct,null,SLE_FILE_U8 | SLE_VAR_NULL, 4, 2, 255),
+ 
+ 	SLE_END()
+ };
+@@ -2269,6 +2270,105 @@
+ 	}
+ }
+ 
++/*
++ *  Converts all trains to the new subtype format introduced in savegame 16.2
++ *  It also links multiheaded engines or make them forget they are multiheaded if no suitable partner is found
++ */
++static inline void ConvertOldMultiheadToNew(void)
++{
++	Vehicle *v;
++	FOR_ALL_VEHICLES(v) {
++		if (v->type == VEH_Train) {
++			v->u.rail.other_multiheaded_part = NULL;
++			SETBIT(v->subtype, 7);	// indicates that it's the old format and needs to be converted in the next loop
++		}
++	}
++
++	FOR_ALL_VEHICLES(v) {
++		if (v->type == VEH_Train) {
++			if (HASBIT(v->subtype, 7) && ((v->subtype & ~0x80) == 0 || (v->subtype & ~0x80) == 4)) {
++				Vehicle *u = v;
++
++				BEGIN_ENUM_WAGONS(u)
++					const RailVehicleInfo *rvi = RailVehInfo(u->engine_type);
++				CLRBIT(u->subtype, 7);
++				switch (u->subtype) {
++					case 0:	/* TS_Front_Engine */
++						if (rvi->flags & RVI_MULTIHEAD) {
++							SETBIT(u->subtype, TS_Multiheaded);
++						}
++						SETBIT(u->subtype, TS_Front);
++						SETBIT(u->subtype, TS_Engine);
++						break;
++					case 1:	/* TS_Artic_Part */
++						u->subtype = 0;
++						SETBIT(u->subtype, TS_Artic_Part);
++						break;
++					case 2:	/* TS_Not_First */
++						u->subtype = 0;
++						if (rvi->flags & RVI_WAGON) {
++							// normal wagon
++							SETBIT(u->subtype, TS_Wagon);
++							break;
++						}
++							if (rvi->flags & RVI_MULTIHEAD && rvi->image_index == u->spritenum - 1) {
++								// rear end of a multiheaded engine
++								SETBIT(u->subtype, TS_Multiheaded);
++								break;
++							}
++							if (rvi->flags & RVI_MULTIHEAD) {
++								SETBIT(u->subtype, TS_Multiheaded);
++							}
++							SETBIT(u->subtype, TS_Engine);
++						break;
++					case 4:	/* TS_Free_Car */
++						u->subtype = 0;
++						SETBIT(u->subtype, TS_Wagon);
++						SETBIT(u->subtype, TS_Free_Car);
++						break;
++					default: NOT_REACHED(); break;
++				}
++				END_ENUM_WAGONS(u)
++					u = v;
++				BEGIN_ENUM_WAGONS(u)
++					const RailVehicleInfo *rvi = RailVehInfo(u->engine_type);
++
++				if (u->u.rail.other_multiheaded_part != NULL) continue;
++
++				if (rvi->flags & RVI_MULTIHEAD) {
++					if (!HASBIT(u->subtype, TS_Engine)) {
++						/* we got a rear car without a front car. We will convert it to a front one */
++						SETBIT(u->subtype, TS_Engine);
++						u->spritenum--;
++					}
++
++					{
++						Vehicle *w;
++
++						for(w = u->next; w != NULL && (w->engine_type != u->engine_type || w->u.rail.other_multiheaded_part != NULL); w = GetNextVehicle(w));
++						if (w != NULL) {
++							/* we found a car to partner with this engine. Now we will make sure it face the right way */
++							if (HASBIT(w->subtype, TS_Engine)) {
++								CLRBIT(w->subtype, TS_Engine);
++								w->spritenum++;
++							}
++						}
++
++						if (w != NULL) {
++							w->u.rail.other_multiheaded_part = u;
++							u->u.rail.other_multiheaded_part = w;
++						} else {
++							/* we got a front car and no rear cars. We will fake this one for forget that it should have been multiheaded */
++							CLRBIT(u->subtype, TS_Multiheaded);
++						}
++					}
++				}
++				END_ENUM_WAGONS(u)
++			}
++		}
++	}
++}
++
+ // Will be called when vehicles need to be loaded.
+ static void Load_VEHS(void)
+ {
+@@ -2290,7 +2390,7 @@
+ 
+ 		if (_sl_version < 5) {
+ 			/* Convert the current_order.type (which is a mix of type and flags, because
+-			    in those versions, they both were 4 bits big) to type and flags */
++			in those versions, they both were 4 bits big) to type and flags */
+ 			v->current_order.flags = (v->current_order.type & 0xF0) >> 4;
+ 			v->current_order.type  =  v->current_order.type & 0x0F;
+ 		}
+@@ -2309,7 +2409,7 @@
+ 					continue;
+ 
+ 				/* If a vehicle has the same orders, add the link to eachother
+-				    in both vehicles */
++				in both vehicles */
+ 				if (v->orders == u->orders) {
+ 					v->next_shared = u;
+ 					u->prev_shared = v;
+@@ -2318,6 +2418,11 @@
+ 			}
+ 		}
+ 	}
++
++	/* Connect front and rear engines of multiheaded trains and converts subtype to the new format */
++	if (_sl_full_version < 0x1002) {
++		ConvertOldMultiheadToNew();
++	}
+ }
+ 
+ const ChunkHandler _veh_chunk_handlers[] = {
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 3159)
++++ vehicle.h	(working copy)
+@@ -27,12 +27,13 @@
+ 	VS_CRASHED = 0x80,
+ };
+ 
+-// 1 and 3 do not appear to be used
+ typedef enum TrainSubtypes {
+-	TS_Front_Engine = 0, // Leading engine of a train
+-	TS_Artic_Part = 1,   // Articulated part of an engine
+-	TS_Not_First = 2,    // Wagon or additional engine
+-	TS_Free_Car = 4,     // First in a wagon chain (in depot)
++	TS_Front       = 0, // Leading engine of a train
++	TS_Artic_Part  = 1, // Articulated part of an engine
++	TS_Wagon       = 2, // Wagon
++	TS_Engine      = 3, // Engine, that can be front engines, but might be placed behind another engine
++	TS_Free_Car    = 4, // First in a wagon chain (in depot)
++	TS_Multiheaded = 5, // Rear engine in a multiheaded train
+ } TrainSubtype;
+ 
+ /* Effect vehicle types */
+@@ -93,6 +94,9 @@
+ 	  *   skip station and alike by setting it to 0. That way we will ensure that a complete loop is used to find the shortest station
+ 	  */
+ 	byte shortest_platform[2];
++
++	// Link between the two ends of a multiheaded engine
++	Vehicle *other_multiheaded_part;
+ } VehicleRail;
+ 
+ enum {
+@@ -336,7 +340,6 @@
+ void CheckVehicleBreakdown(Vehicle *v);
+ void AgeVehicle(Vehicle *v);
+ void VehicleEnteredDepotThisTick(Vehicle *v);
+-Vehicle *GetRearEngine(const Vehicle *v, EngineID engine);
+ 
+ void BeginVehicleMove(Vehicle *v);
+ void EndVehicleMove(Vehicle *v);
+@@ -432,7 +435,7 @@
+ static inline Vehicle *GetNextVehicle(const Vehicle *v)
+ {
+ 	Vehicle *u = v->next;
+-	while (u != NULL && u->subtype == TS_Artic_Part) {
++	while (u != NULL && HASBIT(u->subtype, TS_Artic_Part)) {
+ 		u = u->next;
+ 	}
+ 	return u;
+@@ -445,7 +448,7 @@
+  */
+ static inline bool EngineHasArticPart(const Vehicle *v)
+ {
+-	return (v->next != NULL && v->next->subtype == TS_Artic_Part);
++	return (v->next != NULL && HASBIT(v->next->subtype, TS_Artic_Part));
+ }
+ 
+ /**
+Index: player_gui.c
+===================================================================
+--- player_gui.c	(revision 3159)
++++ player_gui.c	(working copy)
+@@ -431,7 +431,7 @@
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->owner == player) {
+ 			if (v->type == VEH_Train) {
+-				if (v->subtype == TS_Front_Engine)
++				if (HASBIT(v->subtype, TS_Front))
+ 					train++;
+ 			} else if (v->type == VEH_Road) {
+ 				road++;
+Index: water_cmd.c
+===================================================================
+--- water_cmd.c	(revision 3159)
++++ water_cmd.c	(working copy)
+@@ -597,7 +597,7 @@
+ 
+ 			v = GetFirstVehicleInChain(v);
+ 			u = v;
+-			if (v->subtype == TS_Front_Engine) pass = 4; // driver
++			if (HASBIT(v->subtype, TS_Front)) pass = 4; // driver
+ 
+ 			// crash all wagons, and count passangers
+ 			BEGIN_ENUM_WAGONS(v)
+Index: economy.c
+===================================================================
+--- economy.c	(revision 3159)
++++ economy.c	(working copy)
+@@ -129,7 +129,7 @@
+ 		FOR_ALL_VEHICLES(v) {
+ 			if (v->owner != owner)
+ 				continue;
+-			if ((v->type == VEH_Train && v->subtype == TS_Front_Engine) ||
++			if ((v->type == VEH_Train && HASBIT(v->subtype, TS_Front)) ||
+ 					v->type == VEH_Road ||
+ 					(v->type == VEH_Aircraft && v->subtype<=2) ||
+ 					v->type == VEH_Ship) {
+@@ -313,7 +313,7 @@
+ 			if (v->owner == new_player) {
+ 				switch (v->type) {
+ 					case VEH_Train:
+-						if (v->subtype == TS_Front_Engine) num_train++;
++						if (HASBIT(v->subtype, TS_Front)) num_train++;
+ 						break;
+ 					case VEH_Road:
+ 						num_road++;
+@@ -338,7 +338,7 @@
+ 					DeleteVehicle(v);
+ 				} else {
+ 					v->owner = new_player;
+-					if (v->type == VEH_Train && v->subtype == TS_Front_Engine)
++					if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front))
+ 						v->unitnumber = ++num_train;
+ 					else if (v->type == VEH_Road)
+ 						v->unitnumber = ++num_road;
+@@ -1292,7 +1292,7 @@
+ 	}
+ 
+ 	FOR_ALL_VEHICLES(x) {
+-		if ((x->type != VEH_Train || x->subtype == TS_Front_Engine) && // for all locs
++		if ((x->type != VEH_Train || HASBIT(x->subtype, TS_Front)) && // for all locs
+ 				u->last_station_visited == x->last_station_visited && // at the same station
+ 				!(x->vehstatus & VS_STOPPED) && // not stopped
+ 				x->current_order.type == OT_LOADING && // loading
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 3159)
++++ main_gui.c	(working copy)
+@@ -825,7 +825,7 @@
+ 	Vehicle *v;
+ 	int dis = -1;
+ 	FOR_ALL_VEHICLES(v)
+-		if (v->type == VEH_Train && v->subtype == TS_Front_Engine) CLRBIT(dis, v->owner);
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front)) CLRBIT(dis, v->owner);
+ 	PopupMainPlayerToolbMenu(w, 310, 13, dis);
+ }
+ 
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 3159)
++++ train_gui.c	(working copy)
+@@ -128,7 +128,7 @@
+ 	// find a locomotive in the depot.
+ 	found = NULL;
+ 	FOR_ALL_VEHICLES(v) {
+-		if (v->type == VEH_Train && v->subtype == TS_Front_Engine &&
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front) &&
+ 				v->tile == tile &&
+ 				v->u.rail.track == 0x80) {
+ 			if (found != NULL) // must be exactly one.
+@@ -397,12 +397,12 @@
+ 	hnum = 8;
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->type == VEH_Train &&
+-			  (v->subtype == TS_Front_Engine || v->subtype == TS_Free_Car) &&
++			  (HASBIT(v->subtype, TS_Front) || HASBIT(v->subtype, TS_Free_Car)) &&
+ 				v->tile == tile &&
+ 				v->u.rail.track == 0x80) {
+ 			num++;
+ 			// determine number of items in the X direction.
+-			if (v->subtype == TS_Front_Engine) {
++			if (HASBIT(v->subtype, TS_Front)) {
+ 				hnum = max(hnum, v->u.rail.cached_total_length);
+ 			}
+ 		}
+@@ -427,7 +427,7 @@
+ 
+ 	// draw all trains
+ 	FOR_ALL_VEHICLES(v) {
+-		if (v->type == VEH_Train && v->subtype == TS_Front_Engine &&
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Front) &&
+ 				v->tile == tile && v->u.rail.track == 0x80 &&
+ 				--num < 0 && num >= -w->vscroll.cap) {
+ 			DrawTrainImage(v, x+21, y, w->hscroll.cap, w->hscroll.pos, WP(w,traindepot_d).sel);
+@@ -448,7 +448,7 @@
+ 
+ 	// draw all remaining vehicles
+ 	FOR_ALL_VEHICLES(v) {
+-		if (v->type == VEH_Train && v->subtype == TS_Free_Car &&
++		if (v->type == VEH_Train && HASBIT(v->subtype, TS_Free_Car) &&
+ 				v->tile == tile && v->u.rail.track == 0x80 &&
+ 				--num < 0 && num >= -w->vscroll.cap) {
+ 			DrawTrainImage(v, x+50, y, w->hscroll.cap - 1, 0, WP(w,traindepot_d).sel);
+@@ -487,7 +487,7 @@
+ 	/* go through all the locomotives */
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->type == VEH_Train &&
+-				v->subtype == TS_Front_Engine &&
++				HASBIT(v->subtype, TS_Front) &&
+ 				v->tile == w->window_number &&
+ 				v->u.rail.track == 0x80 &&
+ 				--row < 0) {
+@@ -501,7 +501,7 @@
+ 	/* and then the list of free wagons */
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->type == VEH_Train &&
+-				v->subtype == TS_Free_Car &&
++				HASBIT(v->subtype, TS_Free_Car) &&
+ 				v->tile == w->window_number &&
+ 				v->u.rail.track == 0x80 &&
+ 				--row < 0)
+@@ -518,7 +518,7 @@
+ 	d->head = d->wagon = v;
+ 
+ 	/* either pressed the flag or the number, but only when it's a loco */
+-	if (x < 0 && v->subtype == TS_Front_Engine)
++	if (x < 0 && HASBIT(v->subtype, TS_Front))
+ 		return (x >= -10) ? -2 : -1;
+ 
+ 	// skip vehicles that are scrolled off the left side
+@@ -531,7 +531,7 @@
+ 	}
+ 
+ 	// if an articulated part was selected, find its parent
+-	while (v != NULL && v->subtype == TS_Artic_Part) v = GetPrevVehicleInChain(v);
++	while (v != NULL && HASBIT(v->subtype, TS_Artic_Part)) v = GetPrevVehicleInChain(v);
+ 
+ 	d->wagon = v;
+ 
+@@ -544,7 +544,7 @@
+ 
+ 	v = GetVehicle(sel);
+ 
+-	if (/*v->subtype == TS_Front_Engine ||*/ v == wagon)
++	if (v == wagon)
+ 		return;
+ 
+ 	if (wagon == NULL) {
+@@ -610,10 +610,10 @@
+ 	if (v == NULL || v->type != VEH_Train) return;
+ 
+ 	// for train vehicles: subtype 0 for locs and not zero for others
+-	if (v->subtype != TS_Front_Engine) {
++	if (!HASBIT(v->subtype, TS_Front)) {
+ 		v = GetFirstVehicleInChain(v);
+ 		// Do nothing when clicking on a train in depot with no loc attached
+-		if (v->subtype != TS_Front_Engine) return;
++		if (!HASBIT(v->subtype, TS_Front)) return;
+ 	}
+ 
+ 	DoCommandP(w->window_number, v->index, _ctrl_pressed ? 1 : 0, CcCloneTrain,
+@@ -712,7 +712,7 @@
+ 
+ 			sell_cmd = (e->click.widget == 5 || _ctrl_pressed) ? 1 : 0;
+ 
+-			if (v->subtype != TS_Front_Engine) {
++			if (!HASBIT(v->subtype, TS_Front)) {
+ 				DoCommandP(v->tile, v->index, sell_cmd, NULL, CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE));
+ 			} else {
+ 				_backup_orders_tile = v->tile;
+@@ -733,7 +733,7 @@
+ 						sel != INVALID_VEHICLE) {
+ 					if (gdvp.wagon == NULL || gdvp.wagon->index != sel) {
+ 						TrainDepotMoveVehicle(gdvp.wagon, sel, gdvp.head);
+-					} else if (gdvp.head != NULL && gdvp.head->subtype == TS_Front_Engine) {
++					} else if (gdvp.head != NULL && HASBIT(gdvp.head->subtype, TS_Front)) {
+ 						ShowTrainViewWindow(gdvp.head);
+ 					}
+ 				}
+@@ -1206,7 +1206,7 @@
+ 					DrawTrainImage(u, x + WagonLengthToPixels(dx), y, 1, 0, INVALID_VEHICLE);
+ 					dx += u->u.rail.cached_veh_length;
+ 					u = u->next;
+-				} while (u != NULL && u->subtype == TS_Artic_Part);
++				} while (u != NULL && HASBIT(u->subtype, TS_Artic_Part));
+ 				_train_details_drawer_proc[WP(w,traindetails_d).tab](v, x + WagonLengthToPixels(dx) + 2, y + 2);
+ 				y += 14;
+ 			}
+@@ -1469,7 +1469,7 @@
+ 
+ 				v = GetVehicle(vl->sort_list[id_v].index);
+ 
+-				assert(v->type == VEH_Train && v->subtype == TS_Front_Engine && v->owner == owner);
++				assert(v->type == VEH_Train && HASBIT(v->subtype, TS_Front) && v->owner == owner);
+ 
+ 				ShowTrainViewWindow(v);
+ 			}
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 3159)
++++ network_server.c	(working copy)
+@@ -1271,7 +1271,7 @@
+ 		if (v->owner < MAX_PLAYERS)
+ 			switch (v->type) {
+ 				case VEH_Train:
+-					if (v->subtype == TS_Front_Engine)
++					if (HASBIT(v->subtype, TS_Front))
+ 						_network_player_info[v->owner].num_vehicle[0]++;
+ 					break;
+ 				case VEH_Road:
+Index: order_gui.c
+===================================================================
+--- order_gui.c	(revision 3159)
++++ order_gui.c	(working copy)
+@@ -280,9 +280,9 @@
+ {
+ 	if (u->type != v->type) return false;
+ 
+-	if (u->type == VEH_Train && u->subtype != TS_Front_Engine) {
++	if (u->type == VEH_Train && !HASBIT(u->subtype, TS_Front)) {
+ 		u = GetFirstVehicleInChain(u);
+-		if (u->subtype != TS_Front_Engine) return false;
++		if (!HASBIT(u->subtype, TS_Front)) return false;
+ 	}
+ 
+ 	// v is vehicle getting orders. Only copy/clone orders if vehicle doesn't have any orders yet

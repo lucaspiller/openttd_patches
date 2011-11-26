@@ -1,0 +1,25 @@
+Index: sound.c
+===================================================================
+--- sound.c	(revision 2889)
++++ sound.c	(working copy)
+@@ -126,7 +126,10 @@
+ 		if (mc == NULL)
+ 			return;
+ 		if (SetBankSource(mc, sound)) {
+-			MxSetChannelVolume(mc, volume << 8, volume << 8);
++			/* Implement 4 levels of audio panning */
++			uint left_vol = (volume * 4) - (volume * (panning - 4));
++			uint right_vol = (volume * 4) + (volume * (panning - 4));
++			MxSetChannelVolume(mc, left_vol << 5, right_vol << 5);
+ 			MxActivateChannel(mc);
+ 		}
+ 	}
+@@ -178,7 +181,7 @@
+ 			left = ((x - vp->virtual_left) >> vp->zoom) + vp->left;
+ 			StartSound(
+ 				_sound_idx[sound],
+-				clamp(left / 71, 0, 8),
++				clamp(left / (vp->virtual_width / 9), 0, 8),
+ 				(_sound_base_vol[sound] * msf.effect_vol * _vol_factor_by_zoom[vp->zoom]) >> 15
+ 			);
+ 			return;

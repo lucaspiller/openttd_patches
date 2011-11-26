@@ -1,0 +1,22 @@
+Index: player_gui.c
+===================================================================
+--- player_gui.c	(revision 2493)
++++ player_gui.c	(working copy)
+@@ -39,7 +39,7 @@
+ 		x = 215;
+ 		tbl = p->yearly_expenses + 2;
+ 		do {
+-			if (year >= p->inaugurated_year) {
++			//if (year >= p->inaugurated_year) {
+ 				SetDParam(0, year + 1920);
+ 				DrawStringCenterUnderline(x-17, 15, STR_7010, 0);
+ 				sum = 0;
+@@ -63,7 +63,7 @@
+ 
+ 				GfxFillRect(x - 75, 27 + 10*13, x, 27 + 10*13, 215);
+ 				x += 95;
+-			}
++			//}
+ 			year++;
+ 			tbl--;
+ 		} while (--j != 0);

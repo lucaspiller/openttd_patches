@@ -1,0 +1,1148 @@
+Index: network.c
+===================================================================
+--- network.c	(revision 2809)
++++ network.c	(working copy)
+@@ -31,6 +31,7 @@
+ #include "console.h" /* IConsoleCmdExec */
+ #include <stdarg.h> /* va_list */
+ #include "md5.h"
++#include "network_auth.h"
+ 
+ #ifdef __MORPHOS__
+ // the library base is required here
+@@ -52,6 +53,7 @@
+ /* Some externs / forwards */
+ extern void ShowJoinStatusWindow(void);
+ extern void StateGameLoop(void);
++extern void GetPlayerKey(void);
+ 
+ // Function that looks up the CI for a given client-index
+ NetworkClientInfo *NetworkFindClientInfoFromIndex(uint16 client_index)
+@@ -966,10 +968,16 @@
+ 	IConsoleCmdExec("exec scripts/on_server.scr 0");
+ 	// if the server is dedicated ... add some other script
+ 	if (_network_dedicated) IConsoleCmdExec("exec scripts/on_dedicated.scr 0");
+-
+-	/* Try to register us to the master server */
+-	_network_last_advertise_date = 0;
+-	NetworkUDPAdvertise();
++	
++	if (_network_login_enabled)
++		_network_login_status = LOGIN_STAT_NONE;
++		
++	if (!_network_login_enabled || _network_login_status == LOGIN_STAT_AUTHED) {
++		/* Try to register us to the master server */
++		_network_last_advertise_date = 0;
++		NetworkUDPAdvertise();
++	}	
++	
+ 	return true;
+ }
+ 
+@@ -1194,6 +1202,12 @@
+ 		if (_network_udp_broadcast > 0)
+ 			_network_udp_broadcast--;
+ 	}
++	
++	if (_udp_login_socket != INVALID_SOCKET) {
++		NetworkUDPReceive(_udp_login_socket);
++	}
++	
++	NetworkAuth_LoginLoop();
+ }
+ 
+ // The main loop called from ttd.c
+@@ -1204,6 +1218,8 @@
+ 
+ 	if (!NetworkReceive()) return;
+ 
++	_network_tick_counter++;
++
+ 	if (_network_server) {
+ 		bool send_frame = false;
+ 
+@@ -1303,11 +1319,15 @@
+ 	}
+ 	#endif // __MORPHOS__ / __AMIGA__
+ 
+-    // Network is available
++	// Network is available
+ 	_network_available = true;
+ 	_network_dedicated = false;
+ 	_network_last_advertise_date = 0;
+ 	_network_advertise_retries = 0;
++	
++	_network_tick_counter = 0;
++	_network_login_enabled = !_network_login_explicit_disable;
++	_network_login_status = LOGIN_STAT_NOLOGIN;
+ 
+ 	/* Load the ip from the openttd.cfg */
+ 	_network_server_bind_ip = inet_addr(_network_server_bind_ip_host);
+Index: network.h
+===================================================================
+--- network.h	(revision 2809)
++++ network.h	(working copy)
+@@ -33,20 +33,21 @@
+ 
+ /* Stuff for the master-server */
+ #define NETWORK_MASTER_SERVER_PORT 3978
+-#define NETWORK_MASTER_SERVER_HOST "master.openttd.org"
++#define NETWORK_MASTER_SERVER_HOST "127.0.0.1"
+ #define NETWORK_MASTER_SERVER_WELCOME_MESSAGE "OpenTTDRegister"
+ 
+ #define NETWORK_DEFAULT_PORT 3979
+ 
+ #define MAX_INTERFACES 9
+ 
+-
+ // How many vehicle/station types we put over the network
+ #define NETWORK_VEHICLE_TYPES 5
+ #define NETWORK_STATION_TYPES 5
+ 
+ enum {
+ 	NETWORK_NAME_LENGTH        = 80,
++  	NETWORK_KEY_LENGTH         = 17,
++	NETWORK_PASS_LENGTH        = 20,
+ 	NETWORK_HOSTNAME_LENGTH    = 80,
+ 	NETWORK_REVISION_LENGTH    = 10,
+ 	NETWORK_PASSWORD_LENGTH    = 20,
+@@ -80,6 +81,7 @@
+ 	byte map_set;																		// Graphical set
+ 	bool dedicated;																	// Is this a dedicated server?
+ 	char rcon_password[NETWORK_PASSWORD_LENGTH];		// RCon password for the server. "" if rcon is disabled
++	byte use_login;                                     // Whether or not the login system is enabled on the server
+ } NetworkGameInfo;
+ 
+ typedef struct NetworkPlayerInfo {
+@@ -142,6 +144,9 @@
+ VARDEF NetworkClientInfo _network_client_info[MAX_CLIENT_INFO];
+ 
+ VARDEF char _network_player_name[NETWORK_NAME_LENGTH];
++VARDEF char _network_player_pass[NETWORK_PASS_LENGTH];
++// See network_auth.h for login stuff
++
+ VARDEF char _network_default_ip[NETWORK_HOSTNAME_LENGTH];
+ 
+ VARDEF uint16 _network_own_client_index;
+@@ -222,10 +227,13 @@
+ VARDEF bool _network_dedicated; // are we a dedicated server?
+ VARDEF byte _network_playas; // an id to play as..
+ 
++VARDEF uint32 _network_tick_counter;
++
+ void ParseConnectionString(const char **player, const char **port, char *connection_string);
+ void NetworkUpdateClientInfo(uint16 client_index);
+ void NetworkAddServer(const char *b);
+ void NetworkRebuildHostList(void);
+ bool NetworkChangeCompanyPassword(byte argc, char *argv[]);
++void NetworkGetHash(char text[NETWORK_PASSWORD_LENGTH], char* hash);
+ 
+ #endif /* NETWORK_H */
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2809)
++++ lang/english.txt	(working copy)
+@@ -1204,6 +1204,7 @@
+ STR_NETWORK_START_DATE                                          :{SILVER}Start date:  {WHITE}{DATE_SHORT}
+ STR_NETWORK_CURRENT_DATE                                        :{SILVER}Current date:  {WHITE}{DATE_SHORT}
+ STR_NETWORK_PASSWORD                                            :{SILVER}Password protected!
++STR_NETWORK_LOGIN                                               :{SILVER}Login system enabled
+ STR_NETWORK_SERVER_OFFLINE                                      :{SILVER}SERVER OFFLINE
+ STR_NETWORK_SERVER_FULL                                         :{SILVER}SERVER FULL
+ STR_NETWORK_VERSION_MISMATCH                                    :{SILVER}VERSION MISMATCH
+@@ -1280,6 +1281,8 @@
+ STR_NETWORK_CONNECTING                                          :{WHITE}Connecting...
+ 
+ ############ Leave those lines in this order!!
++STR_NETWORK_CONNECTING_LOGIN                                :{BLACK}Logging in..
++
+ STR_NETWORK_CONNECTING_1                                        :{BLACK}(1/6) Connecting..
+ STR_NETWORK_CONNECTING_2                                        :{BLACK}(2/6) Authorising..
+ STR_NETWORK_CONNECTING_3                                        :{BLACK}(3/6) Waiting..
+@@ -1317,6 +1320,8 @@
+ STR_NETWORK_ERR_SERVER_BANNED                                   :{WHITE} You are banned from this server
+ STR_NETWORK_ERR_KICKED                                          :{WHITE} You were kicked out of the game
+ STR_NETWORK_ERR_CHEATER                                         :{WHITE} Cheating is not allowed on this server
++STR_NETWORK_ERR_NOKEY						:{WHITE} Your key is invalid
++STR_NETWORK_LOGIN_CONNECT_ERR						:{WHITE} There was an error processing your account
+ 
+ STR_NETWORK_ERR_LEFT                                            :has left the game
+ ############ Leave those lines in this order!!
+Index: network_udp.c
+===================================================================
+--- network_udp.c	(revision 2809)
++++ network_udp.c	(working copy)
+@@ -4,6 +4,8 @@
+ #include "debug.h"
+ #include "string.h"
+ #include "network_data.h"
++#include "network_auth.h"
++#include "network_client.h"
+ 
+ #ifdef ENABLE_NETWORK
+ 
+@@ -11,6 +13,9 @@
+ #include "network_gamelist.h"
+ #include "network_udp.h"
+ #include "variables.h"
++#include "network_auth.h"
++#include "network_server.h"
++#include "table/strings.h"
+ 
+ extern void UpdateNetworkGameWindow(bool unselect);
+ extern void NetworkPopulateCompanyInfo(void);
+@@ -21,25 +26,6 @@
+ //   - UDP search over the network
+ //
+ 
+-typedef enum {
+-	PACKET_UDP_CLIENT_FIND_SERVER,
+-	PACKET_UDP_SERVER_RESPONSE,
+-	PACKET_UDP_CLIENT_DETAIL_INFO,
+-	PACKET_UDP_SERVER_DETAIL_INFO, // Is not used in OpenTTD itself, only for external querying
+-	PACKET_UDP_SERVER_REGISTER, // Packet to register itself to the master server
+-	PACKET_UDP_MASTER_ACK_REGISTER, // Packet indicating registration has succedeed
+-	PACKET_UDP_CLIENT_GET_LIST, // Request for serverlist from master server
+-	PACKET_UDP_MASTER_RESPONSE_LIST, // Response from master server with server ip's + port's
+-	PACKET_UDP_SERVER_UNREGISTER, // Request to be removed from the server-list
+-	PACKET_UDP_END
+-} PacketUDPType;
+-
+-enum {
+-	ADVERTISE_NORMAL_INTERVAL = 450,	// interval between advertising in days
+-	ADVERTISE_RETRY_INTERVAL = 5,			// readvertise when no response after this amount of days
+-	ADVERTISE_RETRY_TIMES = 3					// give up readvertising after this much failed retries
+-};
+-
+ #define DEF_UDP_RECEIVE_COMMAND(type) void NetworkPacketReceive_ ## type ## _command(Packet *p, struct sockaddr_in *client_addr)
+ void NetworkSendUDP_Packet(SOCKET udp, Packet *p, struct sockaddr_in *recv);
+ 
+@@ -75,6 +61,7 @@
+ 	NetworkSend_uint16(packet, _network_game_info.map_height);
+ 	NetworkSend_uint8 (packet, _network_game_info.map_set);
+ 	NetworkSend_uint8 (packet, _network_game_info.dedicated);
++	NetworkSend_uint8 (packet, _network_login_enabled);
+ 
+ 	// Let the client know that we are here
+ 	NetworkSendUDP_Packet(_udp_server_socket, packet, client_addr);
+@@ -103,7 +90,7 @@
+ 	// Find next item
+ 	item = NetworkGameListAddItem(inet_addr(inet_ntoa(client_addr->sin_addr)), ntohs(client_addr->sin_port));
+ 
+-	if (game_info_version == 1) {
++	if (game_info_version >= 1) {
+ 		NetworkRecv_string(&_udp_cs, p, item->info.server_name, sizeof(item->info.server_name));
+ 		NetworkRecv_string(&_udp_cs, p, item->info.server_revision, sizeof(item->info.server_revision));
+ 		item->info.server_lang   = NetworkRecv_uint8(&_udp_cs, p);
+@@ -118,11 +105,14 @@
+ 		item->info.map_height    = NetworkRecv_uint16(&_udp_cs, p);
+ 		item->info.map_set       = NetworkRecv_uint8(&_udp_cs, p);
+ 		item->info.dedicated     = NetworkRecv_uint8(&_udp_cs, p);
+-
+ 		if (item->info.hostname[0] == '\0')
+ 			snprintf(item->info.hostname, sizeof(item->info.hostname), "%s", inet_ntoa(client_addr->sin_addr));
+ 	}
+-
++	
++	if (game_info_version >= 2) {
++		item->info.use_login = NetworkRecv_uint8(&_udp_cs, p);
++	}
++	
+ 	item->online = true;
+ 
+ 	UpdateNetworkGameWindow(false);
+@@ -277,6 +267,86 @@
+ }
+ 
+ 
++DEF_UDP_RECEIVE_COMMAND(PACKET_UDP_LOGIN_SER_SALT) {
++	NetworkRecv_string(&_udp_cs, p, _network_player_key, 17);
++	_network_login_status = LOGIN_STAT_GOT_SALT;
++	_network_login_last_success = _network_login_status;
++}
++
++DEF_UDP_RECEIVE_COMMAND(PACKET_UDP_LOGIN_SER_KEY) {
++	// We have got the key
++	NetworkRecv_string(&_udp_cs, p, _network_player_key, 17);
++	_network_login_status = LOGIN_STAT_GOT_KEY;
++	_network_login_last_success = _network_login_status;
++	if (strncmp(_network_player_key, "error", 5) == 0) {
++		DEBUG(net, 1)("[NET][UDP] There was an error processing your login");
++		_switch_mode = SM_MENU;
++		_switch_mode_errorstr = STR_NETWORK_LOGIN_CONNECT_ERR;
++	} else {
++		DEBUG(net, 2)("[NET][UDP] Login success");
++	}
++}
++
++DEF_UDP_RECEIVE_COMMAND(PACKET_UDP_LOGIN_SER_KEY_RES) {
++	byte result =  NetworkRecv_uint8(&_udp_cs, p);
++	uint16 userid = NetworkRecv_uint16(&_udp_cs, p);
++	NetworkAuth_HandleSerResult(result, userid);
++}
++
++DEF_UDP_RECEIVE_COMMAND(PACKET_UDP_LOGIN_SERG_SALT) {
++	Packet *pa;
++	struct sockaddr_in out_addr;
++	char hash[17];
++	char salt[17];
++	char tmp[33];
++	char *sptr = salt;
++	char *hptr = hash;
++	char *key = tmp;
++	
++	NetworkRecv_string(&_udp_cs, p, sptr, 17);
++
++	assert(_network_server);
++	assert(_network_login_status == LOGIN_STAT_WAIT_SALT);
++
++	/* Check For Socket */
++	if (_udp_login_socket == INVALID_SOCKET) {
++		DEBUG(net, 1)("[NET][UDP] There was an error contacting the login server");
++		return;
++	}
++
++	/*  Generate all the hashes */
++	hash[0] = 0;	
++	NetworkAuth_CreateHash(_network_player_pass, hptr);
++	key[0] = 0;
++	sprintf(key, "%s%s", hptr, sptr);
++	hash[0] = 0;
++	NetworkAuth_CreateHash(tmp, hptr);
++
++	/* Find somewhere to send */
++	out_addr.sin_family = AF_INET;
++	out_addr.sin_port = htons(NETWORK_LOGIN_SERVER_PORT);
++	out_addr.sin_addr.s_addr = NetworkResolveHost(NETWORK_LOGIN_SERVER_HOST);
++
++	/* Send the packet */
++	pa = NetworkSend_Init(PACKET_UDP_LOGIN_GSER_VERIFY);
++	/* Packet is: WELCOME_MESSAGE, version, username, password */
++	NetworkSend_string(pa, hptr);
++	
++	NetworkSendUDP_Packet(_udp_login_socket, pa, &out_addr);
++
++	_network_login_status = LOGIN_STAT_WAIT_KEY;
++	_network_login_last_success = _network_login_status;
++	
++	DEBUG(net, 2)("[NET][UDP] Sending request to login server");	
++
++	free(pa);
++}
++
++DEF_UDP_RECEIVE_COMMAND(PACKET_UDP_LOGIN_GSER_VERIFY_RES) {
++	byte result =  NetworkRecv_uint8(&_udp_cs, p);
++	NetworkAuth_HandleSerLoginResult(result);
++}
++
+ // The layout for the receive-functions by UDP
+ typedef void NetworkUDPPacket(Packet *p, struct sockaddr_in *client_addr);
+ 
+@@ -289,7 +359,17 @@
+ 	RECEIVE_COMMAND(PACKET_UDP_MASTER_ACK_REGISTER),
+ 	NULL,
+ 	RECEIVE_COMMAND(PACKET_UDP_MASTER_RESPONSE_LIST),
+-	NULL
++	NULL,
++	NULL,
++	RECEIVE_COMMAND(PACKET_UDP_LOGIN_SER_SALT),
++	NULL,
++	RECEIVE_COMMAND(PACKET_UDP_LOGIN_SER_KEY),
++	NULL,
++	RECEIVE_COMMAND(PACKET_UDP_LOGIN_SER_KEY_RES),
++	NULL,
++	RECEIVE_COMMAND(PACKET_UDP_LOGIN_SERG_SALT),
++	NULL,
++	RECEIVE_COMMAND(PACKET_UDP_LOGIN_GSER_VERIFY_RES),
+ };
+ 
+ 
+@@ -593,6 +673,9 @@
+ 	/* Check if we should send an advertise */
+ 	if (!_networking || !_network_server || !_network_udp_server || !_network_advertise)
+ 		return;
++		
++	if (_network_login_enabled && _network_login_status != LOGIN_STAT_AUTHED)
++		return;
+ 
+ 	/* check for socket */
+ 	if (_udp_master_socket == INVALID_SOCKET)
+@@ -630,11 +713,44 @@
+ 	free(p);
+ }
+ 
++void NetworkUDPGetSalt(void)
++{
++	struct sockaddr_in out_addr;
++	Packet *p;
++
++	assert(_network_login_status == LOGIN_STAT_NONE);
++
++	if (_udp_login_socket == INVALID_SOCKET)
++		if (!NetworkUDPListen(&_udp_login_socket, 0, 0, true))
++			return;
++
++	p = NetworkSend_Init(PACKET_UDP_LOGIN_CLI_SALT);
++
++	out_addr.sin_family = AF_INET;
++	out_addr.sin_port = htons(NETWORK_LOGIN_SERVER_PORT);
++	out_addr.sin_addr.s_addr = NetworkResolveHost(NETWORK_LOGIN_SERVER_HOST);
++
++	// packet contains welcome message, protocol version, and player name
++	NetworkSend_string(p, NETWORK_LOGIN_SERVER_WELCOME_MESSAGE);
++	NetworkSend_uint8(p, NETWORK_LOGIN_SERVER_VERSION);
++	NetworkSend_string(p, _network_player_name);
++
++	NetworkSendUDP_Packet(_udp_login_socket, p, &out_addr);
++
++	_network_login_status = LOGIN_STAT_WAIT_SALT;
++	_network_login_last_success = _network_login_status;
++
++	DEBUG(net, 2)("[NET][UDP] Queried login server at %s:%d", inet_ntoa(out_addr.sin_addr),ntohs(out_addr.sin_port));
++
++	free(p);
++}
++
+ void NetworkUDPInitialize(void)
+ {
+ 	_udp_client_socket = INVALID_SOCKET;
+ 	_udp_server_socket = INVALID_SOCKET;
+ 	_udp_master_socket = INVALID_SOCKET;
++	_udp_login_socket = INVALID_SOCKET;
+ 
+ 	_network_udp_server = false;
+ 	_network_udp_broadcast = 0;
+Index: network_udp.h
+===================================================================
+--- network_udp.h	(revision 2809)
++++ network_udp.h	(working copy)
+@@ -13,7 +13,37 @@
+ NetworkGameList *NetworkUDPQueryServer(const char* host, unsigned short port);
+ void NetworkUDPAdvertise(void);
+ void NetworkUDPRemoveAdvertise(void);
++void NetworkSendUDP_Packet(SOCKET udp, Packet *p, struct sockaddr_in *recv);
+ 
++typedef enum {
++	PACKET_UDP_CLIENT_FIND_SERVER,
++	PACKET_UDP_SERVER_RESPONSE,
++	PACKET_UDP_CLIENT_DETAIL_INFO,
++	PACKET_UDP_SERVER_DETAIL_INFO, // Is not used in OpenTTD itself, only for external querying
++	PACKET_UDP_SERVER_REGISTER, // Packet to register itself to the master server
++	PACKET_UDP_MASTER_ACK_REGISTER, // Packet indicating registration has succedeed
++	PACKET_UDP_CLIENT_GET_LIST, // Request for serverlist from master server
++	PACKET_UDP_MASTER_RESPONSE_LIST, // Response from master server with server ip's + port's
++	PACKET_UDP_SERVER_UNREGISTER, // Request to be removed from the server-list
++	PACKET_UDP_LOGIN_CLI_SALT,
++	PACKET_UDP_LOGIN_SER_SALT,
++	PACKET_UDP_LOGIN_CLI_GETKEY,
++	PACKET_UDP_LOGIN_SER_KEY,
++	PACKET_UDP_LOGIN_GSER_CHECK_KEY,
++	PACKET_UDP_LOGIN_SER_KEY_RES,
++	PACKET_UDP_LOGIN_GSER_SALT,
++	PACKET_UDP_LOGIN_SERG_SALT,
++	PACKET_UDP_LOGIN_GSER_VERIFY,
++	PACKET_UDP_LOGIN_GSER_VERIFY_RES,
++	PACKET_UDP_END
++} PacketUDPType;
++
++enum {
++	ADVERTISE_NORMAL_INTERVAL = 450,	// interval between advertising in days
++	ADVERTISE_RETRY_INTERVAL = 5,			// readvertise when no response after this amount of days
++	ADVERTISE_RETRY_TIMES = 3					// give up readvertising after this much failed retries
++};
++
+ #endif
+ 
+ #endif /* NETWORK_LAN_H */
+Index: network_auth.c
+===================================================================
+--- network_auth.c	(revision 0)
++++ network_auth.c	(revision 0)
+@@ -0,0 +1,278 @@
++/* $Id */
++
++#include "stdafx.h"
++#include "debug.h"
++#include "string.h"
++#include "network_data.h"
++#include "network_auth.h"
++#include "network_udp.h"
++#include "network_client.h"
++#include "network_server.h"
++#include "variables.h"
++
++#ifdef ENABLE_NETWORK
++
++// Client-side
++void NetworkAuth_StartClientAuth(void) {
++	struct sockaddr_in out_addr;
++	Packet *p;
++
++	p = NetworkSend_Init(PACKET_UDP_LOGIN_CLI_SALT);
++
++	out_addr.sin_family = AF_INET;
++	out_addr.sin_port = htons(NETWORK_LOGIN_SERVER_PORT);
++	out_addr.sin_addr.s_addr = NetworkResolveHost(NETWORK_LOGIN_SERVER_HOST);
++
++	// packet contains welcome message, protocol version, and player name
++	NetworkSend_string(p, NETWORK_LOGIN_SERVER_WELCOME_MESSAGE);
++	NetworkSend_uint8(p, NETWORK_LOGIN_SERVER_VERSION);
++	NetworkSend_string(p, _network_player_name);
++
++	NetworkSendUDP_Packet(_udp_login_socket, p, &out_addr);
++
++	_network_login_status = LOGIN_STAT_WAIT_SALT;
++	_network_login_last_success = _network_login_status;
++
++	DEBUG(net, 2)("[NET][UDP] Queried login server at %s:%d", inet_ntoa(out_addr.sin_addr),ntohs(out_addr.sin_port));
++
++	free(p);
++}
++
++void NetworkAuth_ProcessSalt(void) {
++	Packet *pa;
++	struct sockaddr_in out_addr;
++	char hash[17];
++	char tmp[33];
++	char *sptr = _network_player_key;
++	char *hptr = hash;
++	char *key = tmp;
++
++	/*  Generate all the hashes */
++	hash[0] = 0;	
++	NetworkAuth_CreateHash(_network_player_pass, hptr);
++	key[0] = 0;
++	sprintf(key, "%s%s", hptr, sptr);
++	hash[0] = 0;
++	NetworkAuth_CreateHash(tmp, hptr);
++
++	/* Find somewhere to send */
++	out_addr.sin_family = AF_INET;
++	out_addr.sin_port = htons(NETWORK_LOGIN_SERVER_PORT);
++	out_addr.sin_addr.s_addr = NetworkResolveHost(NETWORK_LOGIN_SERVER_HOST);
++
++	/* Send the packet */
++	pa = NetworkSend_Init(PACKET_UDP_LOGIN_CLI_GETKEY);
++	/* Packet is: WELCOME_MESSAGE, version, username, password */
++	NetworkSend_string(pa, hptr);
++	
++	NetworkSendUDP_Packet(_udp_login_socket, pa, &out_addr);
++
++	_network_login_status = LOGIN_STAT_WAIT_KEY;
++	
++	DEBUG(net, 1)("[NET][UDP] Requested key from login server");	
++
++	free(pa);
++}
++
++// Server-side
++void NetworkAuth_StartServerAuth(void) {
++	struct sockaddr_in out_addr;
++	Packet *p;
++	
++	//_network_login_retries--;
++	//_network_login_last_date = _date;
++	_network_login_status = LOGIN_STAT_NONE;
++
++	p = NetworkSend_Init(PACKET_UDP_LOGIN_GSER_SALT);
++
++	out_addr.sin_family = AF_INET;
++	out_addr.sin_port = htons(NETWORK_LOGIN_SERVER_PORT);
++	out_addr.sin_addr.s_addr = NetworkResolveHost(NETWORK_LOGIN_SERVER_HOST);
++
++	// packet contains welcome message, protocol version, and player name
++	NetworkSend_string(p, NETWORK_LOGIN_SERVER_WELCOME_MESSAGE);
++	NetworkSend_uint8(p, NETWORK_LOGIN_SERVER_VERSION);
++	NetworkSend_string(p, _network_player_name);
++
++	NetworkSendUDP_Packet(_udp_login_socket, p, &out_addr);
++
++	_network_login_status = LOGIN_STAT_WAIT_SALT;
++	_network_login_last_success = _network_login_status;	
++
++	DEBUG(net, 2)("[NET][UDP] Queried login server at %s:%d", inet_ntoa(out_addr.sin_addr),ntohs(out_addr.sin_port));
++
++	free(p);
++}
++
++void NetworkAuth_CheckPlayerKey(char name[NETWORK_NAME_LENGTH], char key[NETWORK_KEY_LENGTH], uint16 index)
++{
++	struct sockaddr_in out_addr;
++	Packet *p;
++			
++	p = NetworkSend_Init(PACKET_UDP_LOGIN_GSER_CHECK_KEY);
++
++	out_addr.sin_family = AF_INET;
++	out_addr.sin_port = htons(NETWORK_LOGIN_SERVER_PORT);
++	out_addr.sin_addr.s_addr = NetworkResolveHost(NETWORK_LOGIN_SERVER_HOST);
++
++	// packet contains welcome message, protocol version, player name, key,
++	// and client ID (so that we know who we are talking about)
++	NetworkSend_string(p, NETWORK_LOGIN_SERVER_WELCOME_MESSAGE);
++	NetworkSend_uint8(p, NETWORK_LOGIN_SERVER_VERSION);
++	NetworkSend_string(p, name);
++	NetworkSend_string(p, key);
++	NetworkSend_uint16(p, index);
++
++	NetworkSendUDP_Packet(_udp_login_socket, p, &out_addr);
++
++	DEBUG(net, 2)("[NET][UDP] Queried login server at %s:%d", inet_ntoa(out_addr.sin_addr),ntohs(out_addr.sin_port));
++
++	free(p);
++
++}
++
++void NetworkAuth_HandleSerResult(byte result, uint16 index) {
++	NetworkClientState *cs;
++	
++	// Find the info about the client
++	FOR_ALL_CLIENTS(cs)
++		if (cs->index == index)
++			break;
++			
++	switch (result) {
++		case LR_NOAUTH:
++		// send the client the result and kick it
++		SEND_COMMAND(PACKET_SERVER_ERROR)(cs, NETWORK_ERROR_NOTAUTHED);
++		
++		case LR_AUTHED:
++		// send the client the all clear
++		NetworkServer_AuthClient(index);
++		
++		default:
++			return;
++		
++	}
++}
++
++void NetworkAuth_HandleSerLoginResult(byte result) {
++	
++	switch (result) {
++		case LR_NOAUTH: {
++		// we were not logged in :(
++		//SEND_COMMAND(PACKET_SERVER_ERROR)(cs, NETWORK_ERROR_NOTAUTHED);
++		DEBUG(net,0)("[NET][UDP] There was an error logging in to the login server - disabling logins");
++		_network_login_enabled = false;
++		_network_login_status = LOGIN_STAT_NOLOGIN;
++		} break;
++
++		case LR_AUTHED: {
++		// send the client the all clear
++		DEBUG(net,1)("[NET][UDP] We are logged in to the login server");
++		_network_login_status = LOGIN_STAT_AUTHED;
++		_network_login_last_success = _network_login_status;
++
++		/* Try to register us to the master server */
++		_network_last_advertise_date = 0;
++		NetworkUDPAdvertise();
++		} break;
++		
++		default:
++			return;
++
++	}
++
++}
++
++// General stuff
++void NetworkAuth_LoginLoop(void) {
++	byte status_old = _network_login_last_success;
++	
++	if (!_network_login_enabled || _network_login_status == LOGIN_STAT_NOLOGIN)
++		return;
++
++	// Make sure we are listening, otherwise create a socket and listen
++	if (_udp_login_socket == INVALID_SOCKET)
++		if (!NetworkUDPListen(&_udp_login_socket, 0, 0, true))
++			return;
++			
++	if (_network_login_status == LOGIN_STAT_AUTHED)
++		return;
++		
++	if (_network_server) {
++	// Handle server logins
++		if (_network_login_status == LOGIN_STAT_NONE)
++			NetworkAuth_StartServerAuth();
++	} else {
++	// Handle client logins
++		switch (_network_login_status) {
++			case LOGIN_STAT_NONE: {
++				NetworkAuth_StartClientAuth();
++			} break;
++		
++			case LOGIN_STAT_GOT_SALT: {
++				NetworkAuth_ProcessSalt();
++			} break;
++		
++			case LOGIN_STAT_GOT_KEY: {
++				NetworkClient_Connected();
++			} break;
++			
++			default:
++				break;
++		}
++	}
++	
++	if (status_old != _network_login_last_success) { // We did something new, so reset the timeout
++		_network_login_last_date = _network_tick_counter;
++		_network_login_retries = LOGIN_RETRY_TIMES;
++	} else if (_network_login_status < LOGIN_STAT_GOT_KEY) { // We are still waiting :(
++		if ((_network_login_last_date + LOGIN_RETRY_INTERVAL) <= _network_tick_counter) { // Timeout, so do whatever we did again
++			_network_login_status = _network_login_last_success;
++			_network_login_retries--;
++			_network_login_last_date = _network_tick_counter;
++			DEBUG(net, 1)("[NET][UDP] A timeout occured try to access the login server (%d)", _network_login_status);
++		}
++		if (_network_login_retries == 0) { // We have had 3 goes, and each one has timed-out
++			_network_login_status = LOGIN_STAT_NOLOGIN;
++			_network_login_enabled = false;
++			if (!_network_server) {
++				NetworkClient_Connected();
++			}
++			DEBUG(net,0)("[NET][UDP] 3 timeouts occured try to access the login server - disabling the login system");
++		}
++		
++	}
++}
++
++#include <math.h>
++
++void NetworkAuth_CreateHash(char text[NETWORK_PASSWORD_LENGTH], char* hash)
++{
++	int i = 0, y;
++	uint h = 0;
++	char temp[16];
++	for (y = 0; y < 16; y++)
++	{
++		if (text[i] == '\0') i = 0;
++		if (y % 2 == 0) // even
++			h = (h << 2) + (int) text[i];
++		else // odd
++			h = (h >> 2) + (int) text[i];
++		i+= 2;
++	}
++
++	i = 1;
++	for (y = 0; y < 16; y++)
++	{
++		if (text[i] == '\0') i = 0;
++		if (y % 2 == 0) // even
++			h = (h << 2) + (int) text[i];
++		else // odd
++			h = (h >> 2) + (int) text[i];
++		sprintf(temp, "%x", (char) ((h & 0x7FFFFFFF) % 16));
++		strcat(hash, temp);
++		i+= 2;
++	}
++}
++
++#endif /* ENABLE_NETWORK */
+Index: network_auth.h
+===================================================================
+--- network_auth.h	(revision 0)
++++ network_auth.h	(revision 0)
+@@ -0,0 +1,56 @@
++/* $Id */
++
++#ifndef NETWORK_AUTH_H
++#define NETWORK_AUTH_H
++
++#include "network.h"
++
++// Is the network enabled?
++#ifdef ENABLE_NETWORK
++
++#define NETWORK_LOGIN_SERVER_PORT 3977
++#define NETWORK_LOGIN_SERVER_HOST _network_login_server
++#define NETWORK_LOGIN_SERVER_WELCOME_MESSAGE "OpenTTDLogin"
++
++void NetworkAuth_CreateHash(char text[NETWORK_PASSWORD_LENGTH], char* hash);
++void NetworkAuth_CheckPlayerKey(char name[NETWORK_NAME_LENGTH], char key[NETWORK_KEY_LENGTH], uint16 index);
++void NetworkAuth_HandleSerResult(byte result, uint16 index);
++void NetworkAuth_HandleSerLoginResult(byte result);
++void NetworkAuth_LoginLoop(void);
++
++typedef enum {
++	LR_NOAUTH = 0,
++	LR_AUTHED = 2
++} LoginAuthResult;
++// TODO: Report whether the client is not verified, so some servers can allow it
++
++char _network_player_key[NETWORK_KEY_LENGTH];
++bool _network_login_enabled;
++bool _network_login_explicit_disable;
++char _network_login_server[NETWORK_HOSTNAME_LENGTH];
++
++typedef enum {
++	LOGIN_STAT_NONE = 0,
++	LOGIN_STAT_WAIT_SALT = 1,
++	LOGIN_STAT_GOT_SALT= 2,
++	LOGIN_STAT_WAIT_KEY = 3,
++	LOGIN_STAT_GOT_KEY = 4,
++	LOGIN_STAT_WAIT_GSER = 5,
++	LOGIN_STAT_AUTHED = 6,
++	LOGIN_STAT_NOLOGIN = 255,
++} NetworkLoginStatus;
++
++byte _network_login_status;
++byte _network_login_last_success;
++uint32 _network_login_last_date;
++int _network_login_retries;
++
++enum {
++	LOGIN_NORMAL_INTERVAL = 30,		// interval between advertising in network ticks
++	LOGIN_RETRY_INTERVAL = 50,		// readvertise when no response after this amount of network ticks
++	LOGIN_RETRY_TIMES = 3,			// give up readvertising after this much failed retries
++};
++
++#endif /* ENABLE_NETWORK */
++
++#endif // NETWORK_AUTH_H
+Index: network_data.h
+===================================================================
+--- network_data.h	(revision 2809)
++++ network_data.h	(working copy)
+@@ -18,11 +18,13 @@
+ #define NETWORK_EMPTY_INDEX 0
+ 
+ // What version of game-info do we use?
+-#define NETWORK_GAME_INFO_VERSION 1
++#define NETWORK_GAME_INFO_VERSION 2
+ // What version of company info is this?
+ #define NETWORK_COMPANY_INFO_VERSION 3
+ // What version of master-server-protocol do we use?
+ #define NETWORK_MASTER_SERVER_VERSION 1
++// What version of login-server-protocol do we use?
++#define NETWORK_LOGIN_SERVER_VERSION 1
+ 
+ typedef uint16 PacketSize;
+ 
+@@ -92,6 +94,7 @@
+ 	NETWORK_ERROR_PLAYER_MISMATCH, // Happens in CLIENT_COMMAND
+ 	NETWORK_ERROR_KICKED,
+ 	NETWORK_ERROR_CHEATER,
++	NETWORK_ERROR_NOTAUTHED,
+ } NetworkErrorCode;
+ 
+ // Actions that can be used for NetworkTextMessage
+@@ -179,6 +182,7 @@
+ SOCKET _udp_client_socket; // udp client socket
+ SOCKET _udp_server_socket; // udp server socket
+ SOCKET _udp_master_socket; // udp master socket
++SOCKET _udp_login_socket; // udp login socket
+ 
+ // Here we keep track of the clients
+ //  (and the client uses [0] for his own communication)
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2809)
++++ table/sprites.h	(working copy)
+@@ -74,6 +74,7 @@
+ 	SPR_SQUARE = SPR_OPENTTD_BASE + 23,     // colored square (used for newgrf compatibility)
+ 	SPR_LOCK = SPR_OPENTTD_BASE + 22,       // lock icon (for password protected servers)
+ 	SPR_FLAGS_BASE = SPR_OPENTTD_BASE + 90, // start of the flags block (in same order as enum NetworkLanguage)
++	SPR_SHIELD = SPR_OPENTTD_BASE + 101,       // shield icon (for login protected servers)
+ 
+ 	/* Manager face sprites */
+ 	SPR_GRADIENT = 874, // background gradient behind manager face
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2809)
++++ Makefile	(working copy)
+@@ -621,6 +621,7 @@
+ C_SOURCES += music_gui.c
+ C_SOURCES += namegen.c
+ C_SOURCES += network.c
++C_SOURCES += network_auth.c
+ C_SOURCES += network_client.c
+ C_SOURCES += network_data.c
+ C_SOURCES += network_gamelist.c
+@@ -802,7 +803,6 @@
+ $(ENDIAN_CHECK): endian_check.c
+ 	$(call cmd,compile_link)
+ 
+-
+ $(TTD): table/strings.h $(OBJS) $(MAKE_CONFIG)
+ 	$(call cmd,ttd_link)
+ 
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2809)
++++ settings.c	(working copy)
+@@ -12,6 +12,7 @@
+ #include "table/currency.h"
+ #include "network.h"
+ #include "settings.h"
++#include "network_auth.h"
+ 
+ typedef struct IniFile IniFile;
+ typedef struct IniItem IniItem;
+@@ -775,6 +776,7 @@
+ 	{"server_advertise",SDT_BOOL, (void*)false, &_network_advertise, NULL},
+ 	{"lan_internet",		SDT_UINT8, (void*)0, &_network_lan_internet, NULL},
+ 	{"player_name",			SDT_STRINGBUF | (lengthof(_network_player_name) << 16), NULL, &_network_player_name, NULL},
++	{"player_pass",     SDT_STRINGBUF | (lengthof(_network_player_pass) << 16), NULL, &_network_player_pass, NULL},
+ 	{"server_password",	SDT_STRINGBUF | (lengthof(_network_server_password) << 16), NULL, &_network_server_password, NULL},
+ 	{"rcon_password",		SDT_STRINGBUF | (lengthof(_network_rcon_password) << 16), NULL, &_network_rcon_password, NULL},
+ 	{"server_name",			SDT_STRINGBUF | (lengthof(_network_server_name) << 16), NULL, &_network_server_name, NULL},
+@@ -784,6 +786,8 @@
+ 	{"autoclean_unprotected", SDT_UINT8, (void*)12, &_network_autoclean_unprotected, NULL},
+ 	{"autoclean_protected", SDT_UINT8, (void*)36, &_network_autoclean_protected, NULL},
+ 	{"restart_game_date", SDT_UINT16, (void*)0, &_network_restart_game_date, NULL},
++	{"login_explicit_disable",   SDT_BOOL, (void*)false, &_network_login_explicit_disable, NULL},
++	{"login_server",   SDT_STRINGBUF | (lengthof(_network_login_server) << 16), NULL, &_network_login_server, NULL},	
+ 	{NULL,							0,											NULL,					NULL,										NULL}
+ };
+ #endif /* ENABLE_NETWORK */
+Index: network_client.c
+===================================================================
+--- network_client.c	(revision 2809)
++++ network_client.c	(working copy)
+@@ -12,6 +12,7 @@
+ #include "functions.h"
+ #include "network_client.h"
+ #include "network_gamelist.h"
++#include "network.h"
+ #include "saveload.h"
+ #include "command.h"
+ #include "gfx.h"
+@@ -19,8 +20,8 @@
+ #include "settings.h"
+ #include "console.h"
+ #include "variables.h"
++#include "network_auth.h"
+ 
+-
+ // This file handles all the client-commands
+ 
+ 
+@@ -65,6 +66,7 @@
+ 	//    uint8:  Play as Player id (1..MAX_PLAYERS)
+ 	//    uint8:  Language ID
+ 	//    String: Unique id to find the player back in server-listing
++	//    String: Player's key for authing
+ 	//
+ 
+ 	Packet *p;
+@@ -77,6 +79,7 @@
+ 	NetworkSend_uint8(p, _network_playas); // PlayAs
+ 	NetworkSend_uint8(p, NETLANG_ANY); // Language
+ 	NetworkSend_string(p, _network_unique_id);
++	NetworkSend_string(p, _network_player_key);
+ 	NetworkSend_Packet(p, MY_CLIENT);
+ }
+ 
+@@ -399,6 +402,9 @@
+ 		_switch_mode_errorstr = STR_NETWORK_ERR_KICKED;
+ 	} else if (error == NETWORK_ERROR_CHEATER) {
+ 		_switch_mode_errorstr = STR_NETWORK_ERR_CHEATER;
++	} else if (error == NETWORK_ERROR_NOTAUTHED) {
++		// Incorrect key
++		_switch_mode_errorstr = STR_NETWORK_ERR_NOKEY;
+ 	}
+ 
+ 	DeleteWindowById(WC_NETWORK_STATUS_WINDOW, 0);
+@@ -832,8 +838,15 @@
+ 	_frame_counter = 0;
+ 	_frame_counter_server = 0;
+ 	last_ack_frame = 0;
+-	// Request the game-info
+-	SEND_COMMAND(PACKET_CLIENT_JOIN)();
++	if (_network_login_enabled && _network_login_status != LOGIN_STAT_GOT_KEY) {
++		// Login first
++		_network_login_status = LOGIN_STAT_NONE;
++	} else {
++		// Request the game-info	
++		_network_login_status = LOGIN_STAT_WAIT_GSER;
++		SEND_COMMAND(PACKET_CLIENT_JOIN)();
++	}
++	
+ }
+ 
+ // Reads the packets from the socket-stream, if available
+Index: network_gui.c
+===================================================================
+--- network_gui.c	(revision 2809)
++++ network_gui.c	(working copy)
+@@ -142,6 +142,10 @@
+ 					if(cur_item->info.use_password)
+ 						DrawSprite(SPR_LOCK, 186, y-1);
+ 
++					// draw a lock if the server requires you to use the login system
++					if(cur_item->info.use_login)
++						DrawSprite(SPR_SHIELD, 175, y-1);
++
+ 					// draw red or green icon, depending on compatibility with server.
+ 					DrawSprite(SPR_BLOT | (compatible ? PALETTE_TO_GREEN : PALETTE_TO_RED), 195, y);
+ 
+@@ -223,8 +227,11 @@
+ 			} else if (sel->info.clients_on == sel->info.clients_max) {
+ 				// Show: server full, when clients_on == clients_max
+ 				DrawStringMultiCenter(365, y, STR_NETWORK_SERVER_FULL, 2); // server full
+-			} else if (sel->info.use_password)
++			} else if (sel->info.use_login) {
++				DrawStringMultiCenter(365, y, STR_NETWORK_LOGIN, 2); // login system warning
++			} else if (sel->info.use_password) {
+ 				DrawStringMultiCenter(365, y, STR_NETWORK_PASSWORD, 2); // password warning
++			}
+ 
+ 			y+=10;
+ 		}
+@@ -356,8 +363,8 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,   BGC,   220,   230,    43,    52, STR_0225,										STR_NETWORK_CONNECTION_TIP},
+ 
+ {     WWT_IMGBTN,   RESIZE_NONE,   BTC,    10,   130,    62,    73, 0x0,													STR_NETWORK_GAME_NAME_TIP },
+-{     WWT_IMGBTN,   RESIZE_NONE,   BTC,   131,   180,    62,    73, 0x0,													STR_NETWORK_CLIENTS_CAPTION_TIP },
+-{     WWT_IMGBTN,   RESIZE_NONE,   BTC,   181,   219,    62,    73, 0x0,													STR_NETWORK_INFO_ICONS_TIP },
++{     WWT_IMGBTN,   RESIZE_NONE,   BTC,   131,   174,    62,    73, 0x0,													STR_NETWORK_CLIENTS_CAPTION_TIP },
++{     WWT_IMGBTN,   RESIZE_NONE,   BTC,   175,   219,    62,    73, 0x0,													STR_NETWORK_INFO_ICONS_TIP },
+ 
+ {     WWT_MATRIX,   RESIZE_NONE,   BGC,    10,   219,    74,   185, 0x801,												STR_NETWORK_CLICK_GAME_TO_SELECT},
+ {  WWT_SCROLLBAR,   RESIZE_NONE,   BGC,   220,   231,    62,   185, 0x0,													STR_0190_SCROLL_BAR_SCROLLS_LIST},
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2809)
++++ network_server.c	(working copy)
+@@ -5,6 +5,7 @@
+ #include "string.h"
+ #include "strings.h"
+ #include "network_data.h"
++#include "network_auth.h"
+ 
+ #ifdef ENABLE_NETWORK
+ 
+@@ -12,6 +13,7 @@
+ #include "functions.h"
+ #include "network_server.h"
+ #include "network_udp.h"
++#include "network.h"
+ #include "console.h"
+ #include "command.h"
+ #include "gfx.h"
+@@ -125,7 +127,7 @@
+ 			NetworkSend_string(p, "<none>");
+ 		else
+ 			NetworkSend_string(p, _network_player_info[player->index].players);
+-
++    
+ 		NetworkSend_Packet(p, cs);
+ 	}
+ 
+@@ -582,6 +584,7 @@
+ {
+ 	char name[NETWORK_NAME_LENGTH];
+ 	char unique_id[NETWORK_NAME_LENGTH];
++	char player_key[NETWORK_KEY_LENGTH];
+ 	NetworkClientInfo *ci;
+ 	char test_name[NETWORK_NAME_LENGTH];
+ 	byte playas;
+@@ -607,6 +610,7 @@
+ 	playas = NetworkRecv_uint8(cs, p);
+ 	client_lang = NetworkRecv_uint8(cs, p);
+ 	NetworkRecv_string(cs, p, unique_id, sizeof(unique_id));
++	NetworkRecv_string(cs, p, player_key, sizeof(player_key));
+ 
+ 	if (cs->quited)
+ 		return;
+@@ -632,22 +636,15 @@
+ 	ci->client_playas = playas;
+ 	ci->client_lang = client_lang;
+ 
+-	// We now want a password from the client
+-	//  else we do not allow him in!
+-	if (_network_game_info.use_password)
+-		SEND_COMMAND(PACKET_SERVER_NEED_PASSWORD)(cs, NETWORK_GAME_PASSWORD);
+-	else {
+-		if (ci->client_playas > 0 && ci->client_playas <= MAX_PLAYERS && _network_player_info[ci->client_playas - 1].password[0] != '\0') {
+-			SEND_COMMAND(PACKET_SERVER_NEED_PASSWORD)(cs, NETWORK_COMPANY_PASSWORD);
+-		}
+-		else {
+-			SEND_COMMAND(PACKET_SERVER_WELCOME)(cs);
+-		}
+-	}
+-
+ 	/* Make sure companies to who people try to join are not autocleaned */
+ 	if (playas >= 1 && playas <= MAX_PLAYERS)
+ 		_network_player_info[playas-1].months_empty = 0;
++	
++	if (_network_login_enabled) {
++		NetworkAuth_CheckPlayerKey(name, player_key, cs->index);
++		//SEND_COMMAND(PACKET_SERVER_ERROR)(cs, NETWORK_ERROR_NOKEY);
++	} else
++		NetworkServer_AuthClient(ci->client_index);
+ }
+ 
+ DEF_SERVER_RECEIVE_COMMAND(PACKET_CLIENT_PASSWORD)
+@@ -969,8 +966,31 @@
+ 	cs->last_frame_server = _frame_counter;
+ }
+ 
++void NetworkServer_AuthClient(uint16 index)
++{
++	NetworkClientState *cs;
++	NetworkClientInfo *ci;
++	
++	// Find the info about the client
++	FOR_ALL_CLIENTS(cs)
++		if (cs->index == index)
++			break;
++	ci = NetworkFindClientInfoFromIndex(index);
++	
++	// We now want a password from the client
++	//  else we do not allow him in!
++	if (_network_game_info.use_password)
++		SEND_COMMAND(PACKET_SERVER_NEED_PASSWORD)(cs, NETWORK_GAME_PASSWORD);
++	else {
++		if (ci->client_playas > 0 && ci->client_playas <= MAX_PLAYERS && _network_player_info[ci->client_playas - 1].password[0] != '\0') {
++			SEND_COMMAND(PACKET_SERVER_NEED_PASSWORD)(cs, NETWORK_COMPANY_PASSWORD);
++		}
++		else {
++			SEND_COMMAND(PACKET_SERVER_WELCOME)(cs);
++		}
++	}
++}
+ 
+-
+ void NetworkServer_HandleChat(NetworkAction action, DestType desttype, int dest, const char *msg, uint16 from_index)
+ {
+ 	NetworkClientState *cs;
+@@ -1563,6 +1583,9 @@
+ 
+ 	/* See if we need to advertise */
+ 	NetworkUDPAdvertise();
++	
++	/* See if we need to login again */
++	//NetworkAuth_CheckSeverAuth();
+ }
+ 
+ void NetworkServerYearlyLoop(void)
+Index: network_server.h
+===================================================================
+--- network_server.h	(revision 2809)
++++ network_server.h	(working copy)
+@@ -20,6 +20,8 @@
+ void NetworkServerMonthlyLoop(void);
+ void NetworkServerYearlyLoop(void);
+ 
++void NetworkServer_AuthClient(uint16 index);
++
+ #endif /* ENABLE_NETWORK */
+ 
+ #endif // NETWORK_SERVER_H
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2809)
++++ spritecache.c	(working copy)
+@@ -732,7 +732,7 @@
+ 	"cached_sprites.xx3",
+ };
+ 
+-#define OPENTTD_SPRITES_COUNT 100
++#define OPENTTD_SPRITES_COUNT 101
+ static const SpriteID _openttd_grf_indexes[] = {
+ 	SPR_OPENTTD_BASE + 0, SPR_OPENTTD_BASE + 7, // icons etc
+ 	134, 134,  // euro symbol medium size

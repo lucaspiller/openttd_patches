@@ -1,0 +1,85 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2598)
++++ station_cmd.c	(working copy)
+@@ -2486,7 +2486,7 @@
+ 
+ 				if (v->type != VEH_Road || v->u.road.slot != rs) {
+ 					DEBUG(ms, 0) (
+-						"Multistop: Orphaned %s slot at 0x%X of station %d (don't panic)",
++						"[Multistop] Orphaned %s slot at 0x%X of station %d (don't panic)",
+ 						(rst == RS_BUS) ? "bus" : "truck", rs->xy, st->index);
+ 					rs->slot[k] = INVALID_SLOT;
+ 				}
+Index: roadveh_cmd.c
+===================================================================
+--- roadveh_cmd.c	(revision 2598)
++++ roadveh_cmd.c	(working copy)
+@@ -221,7 +221,7 @@
+ 
+ void ClearSlot(Vehicle *v, RoadStop *rs)
+ {
+-	DEBUG(ms, 3) ("Multistop: Clearing slot %d at 0x%x", v->u.road.slotindex, rs->xy);
++	DEBUG(ms, 3) ("[Multistop] Clearing slot %d at 0x%x", v->u.road.slotindex, rs->xy);
+ 	v->u.road.slot = NULL;
+ 	v->u.road.slot_age = 0;
+ 	if (rs != NULL) {
+@@ -1483,7 +1483,7 @@
+ 			//we have arrived at the wrong station
+ 			//XXX The question is .. what to do? Actually we shouldn't be here
+ 			//but I guess we need to clear the slot
+- 			DEBUG(ms, 1) ("Multistop: Wrong station, force a slot clearing. Vehicle %d at 0x%x, should go to 0x%x of station %d (%x), destination 0x%x", v->unitnumber, v->tile, v->u.road.slot->xy, st->index, st->xy, v->dest_tile);
++ 			DEBUG(ms, 1) ("[Multistop] Wrong station, force a slot clearing. Vehicle %d at 0x%x, should go to 0x%x of station %d (%x), destination 0x%x", v->unitnumber, v->tile, v->u.road.slot->xy, st->index, st->xy, v->dest_tile);
+ 			ClearSlot(v, v->u.road.slot);
+ 		}
+ 
+@@ -1661,10 +1661,10 @@
+ 		if (v->u.road.slot == NULL && rs != NULL) {
+ 		//first we need to find out how far our stations are away.
+ 
+-			DEBUG(ms, 2) ("Multistop: Attempting to obtain a slot for vehicle %d at station %d (0x%x)", v->unitnumber, st->index, st->xy);
++			DEBUG(ms, 2) ("[Multistop] Attempting to obtain a slot for vehicle %d at station %d (0x%x)", v->unitnumber, st->index, st->xy);
+ 			do {
+ 				stop->dist = RoadFindPathToStation(v, rs->xy) / NPF_TILE_LENGTH;
+-				DEBUG(ms, 3) ("Multistop: Distance to stop at 0x%x is %d", rs->xy, stop->dist);
++				DEBUG(ms, 3) ("[Multistop] Distance to stop at 0x%x is %d", rs->xy, stop->dist);
+ 				stop->rs = rs;
+ 
+ 				if (stop->dist < mindist) {
+@@ -1687,7 +1687,7 @@
+ 						if ((stop->rs->slot[i] == INVALID_SLOT) && (stop->dist < 120)) {
+ 
+ 							//Hooray we found a free slot. Assign it
+-							DEBUG(ms, 1) ("Multistop: Slot %d at 0x%x assigned to vehicle %d", i, stop->rs->xy, v->unitnumber);
++							DEBUG(ms, 1) ("[Multistop] Slot %d at 0x%x assigned to vehicle %d", i, stop->rs->xy, v->unitnumber);
+ 							stop->rs->slot[i] = v->index;
+ 							v->u.road.slot = stop->rs;
+ 
+@@ -1708,8 +1708,8 @@
+ 		//now we couldn't assign a slot for one reason or another.
+ 		//so we just go to the nearest station
+ 			if (v->u.road.slot == NULL) {
+-				DEBUG(ms, 1) ("Multistop: No free slot found for vehicle %d, going to default station", v->unitnumber);
+-				v->dest_tile = firststop->rs->xy;
++				DEBUG(ms, 1) ("[Multistop] No free slot found for vehicle %d, going to default station", v->unitnumber);
++				//v->dest_tile = firststop->rs->xy;
+ 			}
+ 		}
+ 
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2598)
++++ misc.c	(working copy)
+@@ -518,7 +518,7 @@
+ 
+ void IncreaseDate(void)
+ {
+-	uint32 total_vehicles = (1 << _vehicle_pool.block_size_bits) * _vehicle_pool.max_blocks;
++	uint32 total_vehicles = (1 << _vehicle_pool.block_size_bits) * _vehicle_pool.current_blocks;
+ 	YearMonthDay ymd;
+ 
+ 	if (_game_mode == GM_MENU) {
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream

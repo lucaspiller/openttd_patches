@@ -1,0 +1,1167 @@
+Index: screenshot.c
+===================================================================
+--- screenshot.c	(Revision 2517)
++++ screenshot.c	(Arbeitskopie)
+@@ -10,7 +10,7 @@
+ #include "screenshot.h"
+ 
+ // called by the ScreenShot proc to generate screenshot lines.
+-typedef void ScreenshotCallback(void *userdata, byte *buf, uint y, uint pitch, uint n);
++typedef void ScreenshotCallback(void *userdata, Colour *buf, uint y, uint pitch, uint n);
+ typedef bool ScreenshotHandlerProc(const char *name, ScreenshotCallback *callb, void *userdata, uint w, uint h, int pixelformat, const Colour *palette);
+ 
+ typedef struct {
+@@ -46,44 +46,38 @@
+ } BitmapInfoHeader;
+ assert_compile(sizeof(BitmapInfoHeader) == 40);
+ 
+-typedef struct RgbQuad {
+-	byte blue, green, red, reserved;
+-} RgbQuad;
+-assert_compile(sizeof(RgbQuad) == 4);
+-
+ // generic .BMP writer
+ static bool MakeBmpImage(const char *name, ScreenshotCallback *callb, void *userdata, uint w, uint h, int pixelformat, const Colour *palette)
+ {
+ 	BitmapFileHeader bfh;
+ 	BitmapInfoHeader bih;
+-	RgbQuad rq[256];
+-	byte *buff;
++	Colour *buff;
++	byte *line;
+ 	FILE *f;
+-	uint i, padw;
++	uint padw;
+ 	uint n, maxlines;
+ 
+ 	// only implemented for 8bit images so far.
+-	if (pixelformat != 8)
+-		return false;
++	if (pixelformat != 24) return false;
+ 
+ 	f = fopen(name, "wb");
+ 	if (f == NULL) return false;
+ 
+ 	// each scanline must be aligned on a 32bit boundary
+-	padw = (w + 3) & ~3;
++	padw = (w * 3 + 3) & ~3;
+ 
+ 	// setup the file header
+ 	bfh.type = TO_LE16('MB');
+-	bfh.size = TO_LE32(sizeof(bfh) + sizeof(bih) + sizeof(RgbQuad) * 256 + padw * h);
++	bfh.size = TO_LE32(sizeof(bfh) + sizeof(bih) + padw * h);
+ 	bfh.reserved = 0;
+-	bfh.off_bits = TO_LE32(sizeof(bfh) + sizeof(bih) + sizeof(RgbQuad) * 256);
++	bfh.off_bits = TO_LE32(sizeof(bfh) + sizeof(bih));
+ 
+ 	// setup the info header
+ 	bih.size = TO_LE32(sizeof(BitmapInfoHeader));
+ 	bih.width = TO_LE32(w);
+ 	bih.height = TO_LE32(h);
+ 	bih.planes = TO_LE16(1);
+-	bih.bitcount = TO_LE16(8);
++	bih.bitcount = TO_LE16(24);
+ 	bih.compression = 0;
+ 	bih.sizeimage = 0;
+ 	bih.xpels = 0;
+@@ -91,30 +85,28 @@
+ 	bih.clrused = 0;
+ 	bih.clrimp = 0;
+ 
+-	// convert the palette to the windows format
+-	for (i = 0; i != 256; i++) {
+-		rq[i].red   = palette[i].r;
+-		rq[i].green = palette[i].g;
+-		rq[i].blue  = palette[i].b;
+-		rq[i].reserved = 0;
+-	}
+-
+ 	// write file header and info header and palette
+ 	if (fwrite(&bfh, sizeof(bfh), 1, f) != 1) return false;
+ 	if (fwrite(&bih, sizeof(bih), 1, f) != 1) return false;
+-	if (fwrite(rq, sizeof(rq), 1, f) != 1) return false;
+ 
+-	// use by default 64k temp memory
+-	maxlines = clamp(65536 / padw, 16, 128);
++	// use by default sizeof(Colour) * 64k temp memory
++	maxlines = clamp(65536 / w, 16, 128);
+ 
+ 	// now generate the bitmap bits
+-	buff = malloc(padw * maxlines); // by default generate 128 lines at a time.
++	buff = malloc(w * maxlines * sizeof(*buff)); // by default generate 128 lines at a time.
+ 	if (buff == NULL) {
+ 		fclose(f);
+ 		return false;
+ 	}
+-	memset(buff, 0, padw * maxlines); // zero the buffer to have the padding bytes set to 0
+ 
++	line = malloc(padw);
++	if (line == NULL) {
++		free(buff);
++		fclose(f);
++		return false;
++	}
++	memset(line, 0, padw); // zero the buffer to have the padding bytes set to 0
++
+ 	// start at the bottom, since bitmaps are stored bottom up.
+ 	do {
+ 		// determine # lines
+@@ -122,17 +114,31 @@
+ 		h -= n;
+ 
+ 		// render the pixels
+-		callb(userdata, buff, h, padw, n);
++		callb(userdata, buff, h, w, n);
+ 
+ 		// write each line
+-		while (n)
+-			if (fwrite(buff + (--n) * padw, padw, 1, f) != 1) {
++		while (n) {
++			uint i;
++
++			--n;
++
++			/* 4 bytes per pixel -> 3 bytes per pixel */
++			for (i = 0; i < w; i++) {
++				line[i * 3 + 0] = GetB(buff[w * n + i]);
++				line[i * 3 + 1] = GetG(buff[w * n + i]);
++				line[i * 3 + 2] = GetR(buff[w * n + i]);
++			}
++
++			if (fwrite(line, padw, 1, f) != 1) {
++				free(line);
+ 				free(buff);
+ 				fclose(f);
+ 				return false;
+ 			}
++		}
+ 	} while (h != 0);
+ 
++	free(line);
+ 	free(buff);
+ 	fclose(f);
+ 
+@@ -158,8 +164,7 @@
+ 
+ static bool MakePNGImage(const char *name, ScreenshotCallback *callb, void *userdata, uint w, uint h, int pixelformat, const Colour *palette)
+ {
+-	png_color rq[256];
+-	byte *buff;
++	Colour *buff;
+ 	FILE *f;
+ 	uint i, y, n;
+ 	uint maxlines;
+@@ -167,8 +172,7 @@
+ 	png_infop info_ptr;
+ 
+ 	// only implemented for 8bit images so far.
+-	if (pixelformat != 8)
+-		return false;
++	if (pixelformat != 24) return false;
+ 
+ 	f = fopen(name, "wb");
+ 	if (f == NULL) return false;
+@@ -197,31 +201,29 @@
+ 
+ 	png_set_filter(png_ptr, 0, PNG_FILTER_NONE);
+ 
+-	png_set_IHDR(png_ptr, info_ptr, w, h, pixelformat, PNG_COLOR_TYPE_PALETTE,
++	png_set_IHDR(png_ptr, info_ptr, w, h, 8, PNG_COLOR_TYPE_RGB,
+ 		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+ 
+-	// convert the palette to the .PNG format.
+-	for (i = 0; i != 256; i++) {
+-		rq[i].red   = palette[i].r;
+-		rq[i].green = palette[i].g;
+-		rq[i].blue  = palette[i].b;
+-	}
+-
+-	png_set_PLTE(png_ptr, info_ptr, rq, 256);
+ 	png_write_info(png_ptr, info_ptr);
++#ifdef TTD_BIG_ENDIAN
++	png_set_filler(png_ptr, 0, PNG_FILLER_BEFORE);
++#else
++	png_set_filler(png_ptr, 0, PNG_FILLER_AFTER);
++	png_set_bgr(png_ptr);
++#endif
+ 	png_set_flush(png_ptr, 512);
+ 
+-	// use by default 64k temp memory
++	// use by default sizeof(Colour) * 64k temp memory
+ 	maxlines = clamp(65536 / w, 16, 128);
+ 
+ 	// now generate the bitmap bits
+-	buff = malloc(w * maxlines); // by default generate 128 lines at a time.
++	buff = malloc(w * maxlines * sizeof(*buff)); // by default generate 128 lines at a time.
+ 	if (buff == NULL) {
+ 		png_destroy_write_struct(&png_ptr, &info_ptr);
+ 		fclose(f);
+ 		return false;
+ 	}
+-	memset(buff, 0, w * maxlines); // zero the buffer to have the padding bytes set to 0
++	memset(buff, 0, w * maxlines * sizeof(*buff)); // zero the buffer to have the padding bytes set to 0
+ 
+ 	y = 0;
+ 	do {
+@@ -234,7 +236,7 @@
+ 
+ 		// write them to png
+ 		for (i = 0; i != n; i++)
+-			png_write_row(png_ptr, buff + i * w);
++			png_write_row(png_ptr, (png_bytep)(buff + i * w));
+ 	} while (y != h);
+ 
+ 	png_write_end(png_ptr, info_ptr);
+@@ -272,14 +274,13 @@
+ 
+ static bool MakePCXImage(const char *name, ScreenshotCallback *callb, void *userdata, uint w, uint h, int pixelformat, const Colour *palette)
+ {
+-	byte *buff;
++	Colour *buff;
+ 	FILE *f;
+ 	uint maxlines;
+ 	uint y;
+ 	PcxHeader pcx;
+ 
+-	if (pixelformat != 8 || w == 0)
+-		return false;
++	if (pixelformat != 24 || w == 0) return false;
+ 
+ 	f = fopen(name, "wb");
+ 	if (f == NULL) return false;
+@@ -296,7 +297,7 @@
+ 	pcx.hdpi = TO_LE16(320);
+ 	pcx.vdpi = TO_LE16(320);
+ 
+-	pcx.planes = 1;
++	pcx.planes = 3;
+ 	pcx.cpal = TO_LE16(1);
+ 	pcx.width = pcx.pitch = TO_LE16(w);
+ 	pcx.height = TO_LE16(h);
+@@ -307,16 +308,15 @@
+ 		return false;
+ 	}
+ 
+-	// use by default 64k temp memory
++	// use by default sizeof(Colour) * 64k temp memory
+ 	maxlines = clamp(65536 / w, 16, 128);
+ 
+ 	// now generate the bitmap bits
+-	buff = malloc(w * maxlines); // by default generate 128 lines at a time.
++	buff = malloc(w * maxlines * sizeof(*buff)); // by default generate 128 lines at a time.
+ 	if (buff == NULL) {
+ 		fclose(f);
+ 		return false;
+ 	}
+-	memset(buff, 0, w * maxlines); // zero the buffer to have the padding bytes set to 0
+ 
+ 	y = 0;
+ 	do {
+@@ -330,22 +330,23 @@
+ 
+ 		// write them to pcx
+ 		for (i = 0; i != n; i++) {
+-			const byte* bufp = buff + i * w;
+-			byte runchar = bufp[0];
++			const Colour* bufp = buff + i * w;
++			byte runchar = buff[0];
+ 			uint runcount = 1;
+ 			uint j;
+ 
+ 			// for each pixel...
+ 			for (j = 1; j < w; j++) {
+-				byte ch = bufp[j];
++				byte ch = GetR(bufp[j]);
+ 
+ 				if (ch != runchar || runcount >= 0x3f) {
+-					if (runcount > 1 || (runchar & 0xC0) == 0xC0)
++					if (runcount > 1 || (runchar & 0xC0) == 0xC0) {
+ 						if (fputc(0xC0 | runcount, f) == EOF) {
+ 							free(buff);
+ 							fclose(f);
+ 							return false;
+ 						}
++					}
+ 					if (fputc(runchar, f) == EOF) {
+ 						free(buff);
+ 						fclose(f);
+@@ -357,6 +358,50 @@
+ 				runcount++;
+ 			}
+ 
++			for (j = 0; j < w; j++) {
++				byte ch = GetG(bufp[j]);
++
++				if (ch != runchar || runcount >= 0x3f) {
++					if (runcount > 1 || (runchar & 0xC0) == 0xC0) {
++						if (fputc(0xC0 | runcount, f) == EOF) {
++							free(buff);
++							fclose(f);
++							return false;
++						}
++					}
++					if (fputc(runchar, f) == EOF) {
++						free(buff);
++						fclose(f);
++						return false;
++					}
++					runcount = 0;
++					runchar = ch;
++				}
++				runcount++;
++			}
++
++			for (j = 0; j < w; j++) {
++				byte ch = GetB(bufp[j]);
++
++				if (ch != runchar || runcount >= 0x3f) {
++					if (runcount > 1 || (runchar & 0xC0) == 0xC0) {
++						if (fputc(0xC0 | runcount, f) == EOF) {
++							free(buff);
++							fclose(f);
++							return false;
++						}
++					}
++					if (fputc(runchar, f) == EOF) {
++						free(buff);
++						fclose(f);
++						return false;
++					}
++					runcount = 0;
++					runchar = ch;
++				}
++				runcount++;
++			}
++
+ 			// write remaining bytes..
+ 			if (runcount > 1 || (runchar & 0xC0) == 0xC0)
+ 				if (fputc(0xC0 | runcount, f) == EOF) {
+@@ -373,18 +418,6 @@
+ 	} while (y != h);
+ 
+ 	free(buff);
+-
+-	// write 8-bit color palette
+-	if (fputc(12, f) == EOF) {
+-		fclose(f);
+-		return false;
+-	}
+-
+-	{assert_compile(sizeof(*palette) == 3);}
+-	if (fwrite(palette, 256 * sizeof(*palette), 1, f) != 1) {
+-		fclose(f);
+-		return false;
+-	}
+ 	fclose(f);
+ 
+ 	return true;
+@@ -426,17 +459,17 @@
+ }
+ 
+ // screenshot generator that dumps the current video buffer
+-static void CurrentScreenCallback(void *userdata, byte *buf, uint y, uint pitch, uint n)
++static void CurrentScreenCallback(void *userdata, Colour *buf, uint y, uint pitch, uint n)
+ {
+ 	for (; n > 0; --n) {
+-		memcpy(buf, _screen.dst_ptr + y * _screen.pitch, _screen.width);
++		memcpy(buf, _screen.dst_ptr + y * _screen.pitch, _screen.width * sizeof(*_screen.dst_ptr));
+ 		++y;
+ 		buf += pitch;
+ 	}
+ }
+ 
+ // generate a large piece of the world
+-static void LargeWorldCallback(void *userdata, byte *buf, uint y, uint pitch, uint n)
++static void LargeWorldCallback(void *userdata, Colour *buf, uint y, uint pitch, uint n)
+ {
+ 	ViewPort *vp = (ViewPort *)userdata;
+ 	DrawPixelInfo dpi, *old_dpi;
+@@ -502,7 +535,7 @@
+ bool MakeScreenshot(void)
+ {
+ 	const ScreenshotFormat *sf = _screenshot_formats + _cur_screenshot_format;
+-	return sf->proc(MakeScreenshotName(sf->extension), CurrentScreenCallback, NULL, _screen.width, _screen.height, 8, _cur_palette);
++	return sf->proc(MakeScreenshotName(sf->extension), CurrentScreenCallback, NULL, _screen.width, _screen.height, 24, _cur_palette);
+ }
+ 
+ bool MakeWorldScreenshot(int left, int top, int width, int height, int zoom)
+Index: gfx.c
+===================================================================
+--- gfx.c	(Revision 2517)
++++ gfx.c	(Arbeitskopie)
+@@ -11,7 +11,7 @@
+ static void GfxMainBlitter(const Sprite *sprite, int x, int y, int mode);
+ 
+ static int _stringwidth_out;
+-static byte _cursor_backup[64*64];
++static Colour _cursor_backup[64 * 64];
+ static Rect _invalid_rect;
+ static const byte *_color_remap_ptr;
+ static byte _string_colorremap[3];
+@@ -36,7 +36,8 @@
+ 
+ 
+ void GfxScroll(int left, int top, int width, int height, int xo, int yo) {
+-	byte *src, *dst;
++	Colour *src;
++	Colour *dst;
+ 	int p;
+ 	int ht;
+ 
+@@ -70,7 +71,7 @@
+ 		}
+ 
+ 		for (ht = height; ht > 0; --ht) {
+-			memcpy(dst, src, width);
++			memcpy(dst, src, width * sizeof(*dst));
+ 			src -= p;
+ 			dst -= p;
+ 		}
+@@ -96,7 +97,7 @@
+ 		// the y-displacement may be 0 therefore we have to use memmove,
+ 		// because source and destination may overlap
+ 		for (ht = height; ht > 0; --ht) {
+-			memmove(dst, src, width);
++			memmove(dst, src, width * sizeof(*dst));
+ 			src += p;
+ 			dst += p;
+ 		}
+@@ -108,7 +109,7 @@
+ 
+ void GfxFillRect(int left, int top, int right, int bottom, int color) {
+ 	DrawPixelInfo *dpi = _cur_dpi;
+-	byte *dst;
++	Colour *dst;
+ 	const int otop = top;
+ 	const int oleft = left;
+ 
+@@ -140,40 +141,43 @@
+ 
+ 	if (!(color & 0x8000)) {
+ 		if (!(color & 0x4000)) {
++			Colour c = _cur_palette[color];
++
+ 			do {
+-				memset(dst, color, right);
++				int i;
++				for (i = 0; i != right; i++) dst[i] = c;
+ 				dst += dpi->pitch;
+ 			} while (--bottom);
+ 		} else {
+-			/* use colortable mode */
+-			const byte* ctab = GetNonSprite(color & 0x3FFF) + 1;
+-
+ 			do {
+ 				int i;
+-				for (i = 0; i != right; i++) dst[i] = ctab[dst[i]];
++				for (i = 0; i != right; i++) dst[i] = (dst[i] & 0xFCFCFCFC) / 4 * 3;
+ 				dst += dpi->pitch;
+ 			} while (--bottom);
+ 		}
+ 	} else {
++		Colour c = _cur_palette[color & 0xFF];
++
+ 		byte bo = (oleft - left + dpi->left + otop - top + dpi->top) & 1;
+ 		do {
+ 			int i;
+-			for (i = (bo ^= 1); i < right; i += 2) dst[i] = (byte)color;
++			for (i = (bo ^= 1); i < right; i += 2) dst[i] = c;
+ 			dst += dpi->pitch;
+ 		} while (--bottom > 0);
+ 	}
+ }
+ 
+-static void GfxSetPixel(int x, int y, int color)
++static void GfxSetPixel(int x, int y, Colour c)
+ {
+ 	DrawPixelInfo *dpi = _cur_dpi;
+ 	if ((x-=dpi->left) < 0 || x>=dpi->width || (y-=dpi->top)<0 || y>=dpi->height)
+ 		return;
+-	dpi->dst_ptr[y*dpi->pitch+x] = color;
++	dpi->dst_ptr[y * dpi->pitch + x] = c;
+ }
+ 
+ void GfxDrawLine(int x, int y, int x2, int y2, int color)
+ {
++	Colour c = _cur_palette[color];
+ 	int dy;
+ 	int dx;
+ 	int stepx, stepy;
+@@ -205,7 +209,7 @@
+ 	dx = (x2 - x) * 2;
+ 	if (dx < 0) { dx = -dx;  stepx = -1; } else { stepx = 1; }
+ 
+-	GfxSetPixel(x, y, color);
++	GfxSetPixel(x, y, c);
+ 	if (dx > dy) {
+ 		frac = dy - (dx >> 1);
+ 		while (x != x2) {
+@@ -215,7 +219,7 @@
+ 			}
+ 			x += stepx;
+ 			frac += dy;
+-			GfxSetPixel(x, y, color);
++			GfxSetPixel(x, y, c);
+ 		}
+ 	} else {
+ 		frac = dx - (dy >> 1);
+@@ -226,7 +230,7 @@
+ 			}
+ 			y += stepy;
+ 			frac += dx;
+-			GfxSetPixel(x, y, color);
++			GfxSetPixel(x, y, c);
+ 		}
+ 	}
+ }
+@@ -570,7 +574,7 @@
+ 	int start_x, start_y;
+ 	const byte* sprite;
+ 	const byte* sprite_org;
+-	byte *dst;
++	Colour *dst;
+ 	int mode;
+ 	int width, height;
+ 	int width_org, height_org;
+@@ -584,7 +588,7 @@
+ 	const byte* src;
+ 	int num, skip;
+ 	byte done;
+-	byte *dst;
++	Colour *dst;
+ 	const byte* ctab;
+ 
+ 	if (bp->mode & 1) {
+@@ -620,14 +624,14 @@
+ 				ctab = _color_remap_ptr;
+ 
+ 				for (; num >= 4; num -=4) {
+-					dst[3] = ctab[src[3]];
+-					dst[2] = ctab[src[2]];
+-					dst[1] = ctab[src[1]];
+-					dst[0] = ctab[src[0]];
++					dst[3] = _cur_palette[ctab[src[3]]];
++					dst[2] = _cur_palette[ctab[src[2]]];
++					dst[1] = _cur_palette[ctab[src[1]]];
++					dst[0] = _cur_palette[ctab[src[0]]];
+ 					dst += 4;
+ 					src += 4;
+ 				}
+-				for (; num != 0; num--) *dst++ = ctab[*src++];
++				for (; num != 0; num--) *dst++ = _cur_palette[ctab[*src++]];
+ 			} while (!(done & 0x80));
+ 
+ 			bp->dst += bp->pitch;
+@@ -659,9 +663,8 @@
+ 						continue;
+ 				}
+ 
+-				ctab = _color_remap_ptr;
+ 				for (; num != 0; num--) {
+-					*dst = ctab[*dst];
++					*dst = (*dst & 0xFCFCFCFC) / 4 * 3;
+ 					dst++;
+ 				}
+ 			} while (!(done & 0x80));
+@@ -697,19 +700,11 @@
+ 					if (num <= 0)
+ 						continue;
+ 				}
+-#if defined(_WIN32)
+-				if (num & 1) *dst++ = *src++;
+-				if (num & 2) { *(uint16*)dst = *(uint16*)src; dst += 2; src += 2; }
+-				if (num >>= 2) {
+-					do {
+-						*(uint32*)dst = *(uint32*)src;
+-						dst += 4;
+-						src += 4;
+-					} while (--num);
++
++				{
++					int i;
++					for (i = 0; i < num; i++) dst[i] = _cur_palette[src[i]];
+ 				}
+-#else
+-				memcpy(dst, src, num);
+-#endif
+ 			} while (!(done & 0x80));
+ 
+ 			bp->dst += bp->pitch;
+@@ -720,7 +715,7 @@
+ static void GfxBlitZoomInUncomp(BlitterParams *bp)
+ {
+ 	const byte *src = bp->sprite;
+-	byte *dst = bp->dst;
++	Colour *dst = bp->dst;
+ 	int height = bp->height;
+ 	int width = bp->width;
+ 	int i;
+@@ -736,7 +731,7 @@
+ 				for (i = 0; i != width; i++) {
+ 					byte b = ctab[src[i]];
+ 
+-					if (b != 0) dst[i] = b;
++					if (b != 0) dst[i] = _cur_palette[b];
+ 				}
+ 				src += bp->width_org;
+ 				dst += bp->pitch;
+@@ -744,11 +739,9 @@
+ 		}
+ 	} else if (bp->mode & 2) {
+ 		if (bp->info & 1) {
+-			const byte *ctab = _color_remap_ptr;
+-
+ 			do {
+ 				for (i = 0; i != width; i++)
+-					if (src[i] != 0) dst[i] = ctab[dst[i]];
++					if (src[i] != 0) dst[i] = (dst[i] & 0xFCFCFCFC) / 4 * 3;
+ 				src += bp->width_org;
+ 				dst += bp->pitch;
+ 			} while (--height);
+@@ -756,7 +749,8 @@
+ 	} else {
+ 		if (!(bp->info & 1)) {
+ 			do {
+-				memcpy(dst, src, width);
++				int i;
++				for (i = 0; i < width; i++) dst[i] = _cur_palette[src[i]];
+ 				src += bp->width_org;
+ 				dst += bp->pitch;
+ 			} while (--height);
+@@ -765,17 +759,17 @@
+ 				int n = width;
+ 
+ 				for (; n >= 4; n -= 4) {
+-					if (src[0] != 0) dst[0] = src[0];
+-					if (src[1] != 0) dst[1] = src[1];
+-					if (src[2] != 0) dst[2] = src[2];
+-					if (src[3] != 0) dst[3] = src[3];
++					if (src[0] != 0) dst[0] = _cur_palette[src[0]];
++					if (src[1] != 0) dst[1] = _cur_palette[src[1]];
++					if (src[2] != 0) dst[2] = _cur_palette[src[2]];
++					if (src[3] != 0) dst[3] = _cur_palette[src[3]];
+ 
+ 					dst += 4;
+ 					src += 4;
+ 				}
+ 
+ 				for (; n != 0; n--) {
+-					if (src[0] != 0) dst[0] = src[0];
++					if (src[0] != 0) dst[0] = _cur_palette[src[0]];
+ 					src++;
+ 					dst++;
+ 				}
+@@ -793,7 +787,7 @@
+ 	const byte* src;
+ 	int num, skip;
+ 	byte done;
+-	byte *dst;
++	Colour *dst;
+ 	const byte* ctab;
+ 
+ 	if (bp->mode & 1) {
+@@ -834,7 +828,7 @@
+ 				ctab = _color_remap_ptr;
+ 				num = (num + 1) >> 1;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*src];
++						*dst = _cur_palette[ctab[*src]];
+ 						dst++;
+ 						src += 2;
+ 				}
+@@ -879,10 +873,9 @@
+ 						continue;
+ 				}
+ 
+-				ctab = _color_remap_ptr;
+ 				num = (num + 1) >> 1;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*dst];
++						*dst = (*dst & 0xFCFCFCFC) / 4 * 3;
+ 						dst++;
+ 				}
+ 			} while (!(done & 0x80));
+@@ -933,7 +926,7 @@
+ 				num = (num + 1) >> 1;
+ 
+ 				for (; num != 0; num--) {
+-						*dst = *src;
++						*dst = _cur_palette[*src];
+ 						dst++;
+ 						src += 2;
+ 				}
+@@ -955,7 +948,7 @@
+ static void GfxBlitZoomMediumUncomp(BlitterParams *bp)
+ {
+ 	const byte *src = bp->sprite;
+-	byte *dst = bp->dst;
++	Colour *dst = bp->dst;
+ 	int height = bp->height;
+ 	int width = bp->width;
+ 	int i;
+@@ -971,7 +964,7 @@
+ 				for (i = 0; i != width >> 1; i++) {
+ 					byte b = ctab[src[i * 2]];
+ 
+-					if (b != 0) dst[i] = b;
++					if (b != 0) dst[i] = _cur_palette[b];
+ 				}
+ 				src += bp->width_org * 2;
+ 				dst += bp->pitch;
+@@ -979,11 +972,9 @@
+ 		}
+ 	} else if (bp->mode & 2) {
+ 		if (bp->info & 1) {
+-			const byte *ctab = _color_remap_ptr;
+-
+ 			for (height >>= 1; height != 0; height--) {
+ 				for (i = 0; i != width >> 1; i++)
+-					if (src[i * 2] != 0) dst[i] = ctab[dst[i]];
++					if (src[i * 2] != 0) dst[i] = (dst[i] & 0xFCFCFCFC) / 4 * 3;
+ 				src += bp->width_org * 2;
+ 				dst += bp->pitch;
+ 			}
+@@ -992,7 +983,7 @@
+ 		if (bp->info & 1) {
+ 			for (height >>= 1; height != 0; height--) {
+ 				for (i = 0; i != width >> 1; i++)
+-					if (src[i * 2] != 0) dst[i] = src[i * 2];
++					if (src[i * 2] != 0) dst[i] = _cur_palette[src[i * 2]];
+ 				src += bp->width_org * 2;
+ 				dst += bp->pitch;
+ 			}
+@@ -1006,7 +997,7 @@
+ 	const byte* src;
+ 	int num, skip;
+ 	byte done;
+-	byte *dst;
++	Colour *dst;
+ 	const byte* ctab;
+ 
+ 	if (bp->mode & 1) {
+@@ -1052,7 +1043,7 @@
+ 				ctab = _color_remap_ptr;
+ 				num = (num + 3) >> 2;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*src];
++						*dst = _cur_palette[ctab[*src]];
+ 						dst++;
+ 						src += 4;
+ 				}
+@@ -1114,10 +1105,9 @@
+ 					if (num <= 0) continue;
+ 				}
+ 
+-				ctab = _color_remap_ptr;
+ 				num = (num + 3) >> 2;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*dst];
++						*dst = (*dst & 0xFCFCFCFC) / 4 * 3;
+ 						dst++;
+ 				}
+ 
+@@ -1186,7 +1176,7 @@
+ 				num = (num + 3) >> 2;
+ 
+ 				for (; num != 0; num--) {
+-						*dst = *src;
++						*dst = _cur_palette[*src];
+ 						dst++;
+ 						src += 4;
+ 				}
+@@ -1219,7 +1209,7 @@
+ static void GfxBlitZoomOutUncomp(BlitterParams *bp)
+ {
+ 	const byte* src = bp->sprite;
+-	byte *dst = bp->dst;
++	Colour *dst = bp->dst;
+ 	int height = bp->height;
+ 	int width = bp->width;
+ 	int i;
+@@ -1235,7 +1225,7 @@
+ 				for (i = 0; i != width >> 2; i++) {
+ 					byte b = ctab[src[i * 4]];
+ 
+-					if (b != 0) dst[i] = b;
++					if (b != 0) dst[i] = _cur_palette[b];
+ 				}
+ 				src += bp->width_org * 4;
+ 				dst += bp->pitch;
+@@ -1243,11 +1233,9 @@
+ 		}
+ 	} else if (bp->mode & 2) {
+ 		if (bp->info & 1) {
+-			const byte *ctab = _color_remap_ptr;
+-
+ 			for (height >>= 2; height != 0; height--) {
+ 				for (i = 0; i != width >> 2; i++)
+-					if (src[i * 4] != 0) dst[i] = ctab[dst[i]];
++					if (src[i * 4] != 0) dst[i] = (dst[i] & 0xFCFCFCFC) / 4 * 3;
+ 				src += bp->width_org * 4;
+ 				dst += bp->pitch;
+ 			}
+@@ -1256,7 +1244,7 @@
+ 		if (bp->info & 1) {
+ 			for (height >>= 2; height != 0; height--) {
+ 				for (i = 0; i != width >> 2; i++)
+-					if (src[i * 4] != 0) dst[i] = src[i * 4];
++					if (src[i * 4] != 0) dst[i] = _cur_palette[src[i * 4]];
+ 				src += bp->width_org * 4;
+ 				dst += bp->pitch;
+ 			}
+@@ -1512,19 +1500,13 @@
+ 		(v = 255, i < 0x3f) ||
+ 		(v = 128, i < 0x4A || i >= 0x75) ||
+ 		(v = 20);
+-		d->r = v;
+-		d->g = 0;
+-		d->b = 0;
+-		d++;
++		*d++ = GetRGB(v, 0, 0);
+ 
+ 		i ^= 0x40;
+ 		(v = 255, i < 0x3f) ||
+ 		(v = 128, i < 0x4A || i >= 0x75) ||
+ 		(v = 20);
+-		d->r = v;
+-		d->g = 0;
+-		d->b = 0;
+-		d++;
++		*d++ = GetRGB(v, 0, 0);
+ 	}
+ 
+ 	// Handle lighthouse and stadium animation
+@@ -1600,7 +1582,8 @@
+ 		memcpy_pitch(
+ 			_screen.dst_ptr + _cursor.draw_pos.x + _cursor.draw_pos.y * _screen.pitch,
+ 			_cursor_backup,
+-			_cursor.draw_size.x, _cursor.draw_size.y, _cursor.draw_size.x, _screen.pitch);
++			_cursor.draw_size.x * sizeof(*_screen.dst_ptr), _cursor.draw_size.y,
++			_cursor.draw_size.x * sizeof(*_cursor_backup), _screen.pitch * sizeof(*_screen.dst_ptr));
+ 
+ 		_video_driver->make_dirty(_cursor.draw_pos.x, _cursor.draw_pos.y, _cursor.draw_size.x, _cursor.draw_size.y);
+ 	}
+@@ -1633,13 +1616,14 @@
+ 	_cursor.draw_pos.y = y;
+ 	_cursor.draw_size.y = h;
+ 
+-	assert(w*h < (int) sizeof(_cursor_backup));
++	assert(w * h < (int)lengthof(_cursor_backup));
+ 
+ 	// Make backup of stuff below cursor
+ 	memcpy_pitch(
+ 		_cursor_backup,
+ 		_screen.dst_ptr + _cursor.draw_pos.x + _cursor.draw_pos.y * _screen.pitch,
+-		_cursor.draw_size.x, _cursor.draw_size.y, _screen.pitch, _cursor.draw_size.x);
++		_cursor.draw_size.x * sizeof(*_cursor_backup), _cursor.draw_size.y,
++		_screen.pitch * sizeof(*_screen.dst_ptr), _cursor.draw_size.x * sizeof(*_cursor_backup));
+ 
+ 	// Draw cursor on screen
+ 	_cur_dpi = &_screen;
+Index: gfx.h
+===================================================================
+--- gfx.h	(Revision 2517)
++++ gfx.h	(Arbeitskopie)
+@@ -1,7 +1,18 @@
+ #ifndef GFX_H
+ #define GFX_H
+ 
++typedef uint32 Colour;
+ 
++static inline byte GetR(Colour c) { return GB(c, 16, 8); }
++static inline byte GetG(Colour c) { return GB(c,  8, 8); }
++static inline byte GetB(Colour c) { return GB(c,  0, 8); }
++static inline byte GetA(Colour c) { return GB(c, 24, 8); }
++static inline Colour GetRGB(byte r, byte g, byte b)
++{
++	return (r << 16) | (g << 8) | (b << 0);
++}
++
++
+ typedef struct ColorList {
+ 	byte unk0, unk1, unk2;
+ 	byte window_color_1a, window_color_1b;
+@@ -10,7 +21,7 @@
+ } ColorList;
+ 
+ struct DrawPixelInfo {
+-	byte *dst_ptr;
++	Colour *dst_ptr;
+ 	int left, top, width, height;
+ 	int pitch;
+ 	uint16 zoom;
+@@ -94,12 +105,6 @@
+ //enum { NUM_SPRITES = 0x1500 };
+ enum { NUM_SPRITES = 0x3500 }; // 1500 + space for custom GRF sets
+ 
+-typedef struct Colour {
+-	byte r;
+-	byte g;
+-	byte b;
+-} Colour;
+-
+ extern Colour _cur_palette[256];
+ 
+ 
+Index: texteff.c
+===================================================================
+--- texteff.c	(Revision 2517)
++++ texteff.c	(Arbeitskopie)
+@@ -43,7 +43,7 @@
+ const int _textmessage_box_bottom = 30; // Pixels from bottom
+ const int _textmessage_box_max_width = 400; // Max width of box
+ 
+-static byte _textmessage_backup[150*400]; // (y * max_width)
++static Colour _textmessage_backup[150 * 400]; // (y * max_width)
+ 
+ extern void memcpy_pitch(void *d, void *s, int w, int h, int spitch, int dpitch);
+ 
+@@ -129,7 +129,8 @@
+ 		memcpy_pitch(
+ 			_screen.dst_ptr + _textmessage_box_left + (_screen.height-_textmessage_box_bottom-_textmessage_box_y) * _screen.pitch,
+ 			_textmessage_backup,
+-			_textmessage_width, _textmessage_box_y, _textmessage_width, _screen.pitch);
++			_textmessage_width * sizeof(*_textmessage_backup), _textmessage_box_y,
++			_textmessage_width * sizeof(*_textmessage_backup), _screen.pitch * sizeof(*_screen.dst_ptr));
+ 
+ 		// And make sure it is updated next time
+ 		_video_driver->make_dirty(_textmessage_box_left, _screen.height-_textmessage_box_bottom-_textmessage_box_y, _textmessage_width, _textmessage_box_y);
+@@ -191,7 +192,8 @@
+ 	memcpy_pitch(
+ 		_textmessage_backup,
+ 		_screen.dst_ptr + _textmessage_box_left + (_screen.height-_textmessage_box_bottom-_textmessage_box_y) * _screen.pitch,
+-		_textmessage_width, _textmessage_box_y, _screen.pitch, _textmessage_width);
++		_textmessage_width * sizeof(*_textmessage_backup), _textmessage_box_y,
++		_screen.pitch * sizeof(*_screen.dst_ptr), _textmessage_width * sizeof(*_textmessage_backup));
+ 
+ 	// Switch to _screen painting
+ 	_cur_dpi = &_screen;
+Index: table/palettes.h
+===================================================================
+--- table/palettes.h	(Revision 2517)
++++ table/palettes.h	(Arbeitskopie)
+@@ -1,4 +1,5 @@
+-#define M(r, g, b) { r, g, b }
++#define M(r, g, b) ((r << 16) | (g << 8) | (b << 0))
++
+ static Colour _palettes[][256] = {
+ 	/* palette 1 (TTD Windows) */
+ 	{
+Index: smallmap_gui.c
+===================================================================
+--- smallmap_gui.c	(Revision 2517)
++++ smallmap_gui.c	(Arbeitskopie)
+@@ -189,44 +189,24 @@
+ 	_legend_industries_candy,
+ };
+ 
+-#if defined(TTD_ALIGNMENT_4)
+-	static inline void WRITE_PIXELS(void *dst, uint32 val)
+-	{
+-		byte *d = (byte*)dst;
+-#	if defined(TTD_BIG_ENDIAN)
+-		d[0] = (byte)(val >> 24);
+-		d[1] = (byte)(val >> 16);
+-		d[2] = (byte)(val >> 8);
+-		d[3] = (byte)(val >> 0);
+-#	elif defined(TTD_LITTLE_ENDIAN)
+-		d[0] = (byte)(val >> 0);
+-		d[1] = (byte)(val >> 8);
+-		d[2] = (byte)(val >> 16);
+-		d[3] = (byte)(val >> 24);
+-#	endif
+-	}
+ 
+-/* need to use OR, otherwise we will overwrite the wrong pixels at the edges :( */
+-	static inline void WRITE_PIXELS_OR(void *dst, uint32 val)
+-	{
+-		byte *d = (byte*)dst;
+-#	if defined(TTD_BIG_ENDIAN)
+-		d[0] |= (byte)(val >> 24);
+-		d[1] |= (byte)(val >> 16);
+-		d[2] |= (byte)(val >> 8);
+-		d[3] |= (byte)(val >> 0);
+-#	elif defined(TTD_LITTLE_ENDIAN)
+-		d[0] |= (byte)(val >> 0);
+-		d[1] |= (byte)(val >> 8);
+-		d[2] |= (byte)(val >> 16);
+-		d[3] |= (byte)(val >> 24);
+-#	endif
+-	}
+-#else
+-#	define WRITE_PIXELS(dst, val)		*(uint32*)(dst) = (val);
+-#	define WRITE_PIXELS_OR(dst,val)	*(uint32*)(dst) |= (val);
+-#endif
++static inline void WRITE_PIXELS(Colour* dst, uint32 val)
++{
++	dst[0] = _cur_palette[GB(val,  0, 8)];
++	dst[1] = _cur_palette[GB(val,  8, 8)];
++	dst[2] = _cur_palette[GB(val, 16, 8)];
++	dst[3] = _cur_palette[GB(val, 24, 8)];
++}
+ 
++static inline void WRITE_PIXELS_OR(Colour* dst, uint32 val)
++{
++	dst[0] |= _cur_palette[GB(val,  0, 8)];
++	dst[1] |= _cur_palette[GB(val,  8, 8)];
++	dst[2] |= _cur_palette[GB(val, 16, 8)];
++	dst[3] |= _cur_palette[GB(val, 24, 8)];
++}
++
++
+ #if defined(TTD_BIG_ENDIAN)
+ #	define MKCOLOR(x) BSWAP32(x)
+ #elif defined(TTD_LITTLE_ENDIAN)
+@@ -324,9 +304,9 @@
+  * @param proc Pointer to the colour function
+  * @see GetSmallMapPixels(TileIndex)
+  */
+-static void DrawSmallMapStuff(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc)
++static void DrawSmallMapStuff(Colour *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc)
+ {
+-	byte *dst_ptr_end = _screen.dst_ptr + _screen.width * _screen.height - _screen.width;
++	Colour *dst_ptr_end = _screen.dst_ptr + _screen.width * _screen.height - _screen.width;
+ 
+ 	do {
+ 		// check if the tile (xc,yc) is within the map range
+@@ -589,7 +569,7 @@
+ {
+ 	DrawPixelInfo *old_dpi;
+ 	int dx,dy, x, y, x2, y2;
+-	byte *ptr;
++	Colour *ptr;
+ 	int tile_x;
+ 	int tile_y;
+ 	ViewPort *vp;
+Index: win32.c
+===================================================================
+--- win32.c	(Revision 2517)
++++ win32.c	(Arbeitskopie)
+@@ -21,9 +21,9 @@
+ static struct {
+ 	HWND main_wnd;
+ 	HBITMAP dib_sect;
+-	void *bitmap_bits;
+-	void *buffer_bits;
+-	void *alloced_bits;
++	Colour *bitmap_bits;
++	Colour *buffer_bits;
++	Colour *alloced_bits;
+ 	HPALETTE gdi_palette;
+ 	int width,height;
+ 	int width_org, height_org;
+@@ -57,9 +57,9 @@
+ 	pal->palNumEntries = 256;
+ 
+ 	for (i = 0; i != 256; i++) {
+-		pal->palPalEntry[i].peRed   = _cur_palette[i].r;
+-		pal->palPalEntry[i].peGreen = _cur_palette[i].g;
+-		pal->palPalEntry[i].peBlue  = _cur_palette[i].b;
++		pal->palPalEntry[i].peRed   = GetR(_cur_palette[i]);
++		pal->palPalEntry[i].peGreen = GetG(_cur_palette[i]);
++		pal->palPalEntry[i].peBlue  = GetB(_cur_palette[i]);
+ 		pal->palPalEntry[i].peFlags = 0;
+ 
+ 	}
+@@ -74,9 +74,9 @@
+ 	uint i;
+ 
+ 	for (i = 0; i != count; i++) {
+-		rgb[i].rgbRed   = _cur_palette[start + i].r;
+-		rgb[i].rgbGreen = _cur_palette[start + i].g;
+-		rgb[i].rgbBlue  = _cur_palette[start + i].b;
++		rgb[i].rgbRed   = GetR(_cur_palette[start + i]);
++		rgb[i].rgbGreen = GetG(_cur_palette[start + i]);
++		rgb[i].rgbBlue  = GetB(_cur_palette[start + i]);
+ 		rgb[i].rgbReserved = 0;
+ 	}
+ 
+@@ -538,7 +538,7 @@
+ 		return false;
+ 
+ 	_screen.width = w;
+-	_screen.pitch = (w + 3) & ~0x3;
++	_screen.pitch = w;
+ 	_screen.height = h;
+ 
+ 	if (_wnd.alloced_bits) {
+@@ -551,8 +551,7 @@
+ 	bi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+ 
+ 	if (_wnd.double_size) {
+-		w = (w + 3) & ~0x3;
+-		_wnd.alloced_bits = _wnd.buffer_bits = malloc(w * h);
++		_wnd.alloced_bits = _wnd.buffer_bits = malloc(w * sizeof(*_wnd.alloced_bits) * h);
+ 		w *= 2;
+ 		h *= 2;
+ 	}
+@@ -561,14 +560,14 @@
+ 	bi->bmiHeader.biHeight = -(_wnd.height = h);
+ 
+ 	bi->bmiHeader.biPlanes = 1;
+-	bi->bmiHeader.biBitCount = 8;
++	bi->bmiHeader.biBitCount = 32;
+ 	bi->bmiHeader.biCompression = BI_RGB;
+ 
+ 	if (_wnd.dib_sect)
+ 		DeleteObject(_wnd.dib_sect);
+ 
+ 	dc = GetDC(0);
+-	_wnd.dib_sect = CreateDIBSection(dc, bi, DIB_RGB_COLORS, &_wnd.bitmap_bits, NULL, 0);
++	_wnd.dib_sect = CreateDIBSection(dc, bi, DIB_RGB_COLORS, (void**)&_wnd.bitmap_bits, NULL, 0);
+ 	if (_wnd.dib_sect == NULL)
+ 		error("CreateDIBSection failed");
+ 	ReleaseDC(0, dc);
+@@ -599,7 +598,7 @@
+ 	DEVMODE dm;
+ 
+ 	while (EnumDisplaySettings(NULL, i++, &dm) != 0) {
+-		if (dm.dmBitsPerPel == 8 && IS_INT_INSIDE(dm.dmPelsWidth, 640, MAX_SCREEN_WIDTH + 1) &&
++		if (dm.dmBitsPerPel == 32 && IS_INT_INSIDE(dm.dmPelsWidth, 640, MAX_SCREEN_WIDTH + 1) &&
+ 				IS_INT_INSIDE(dm.dmPelsHeight, 480, MAX_SCREEN_HEIGHT + 1)){
+ 			int j;
+ 			for (j = 0; j < n; j++) {
+@@ -665,8 +664,8 @@
+ static void filter(int left, int top, int width, int height)
+ {
+ 	uint p = _screen.pitch;
+-	byte *s = (byte*)_wnd.buffer_bits + top * p + left;
+-	byte *d = (byte*)_wnd.bitmap_bits + top * p * 4 + left * 2;
++	const Colour *s = _wnd.buffer_bits + top * p + left;
++	Colour *d = _wnd.bitmap_bits + top * p * 4 + left * 2;
+ 
+ 	for (; height > 0; height--) {
+ 		int i;
+Index: sdl.c
+===================================================================
+--- sdl.c	(Revision 2517)
++++ sdl.c	(Arbeitskopie)
+@@ -197,9 +197,9 @@
+ 	uint i;
+ 
+ 	for (i = start; i != end; i++) {
+-		pal[i].r = _cur_palette[i].r;
+-		pal[i].g = _cur_palette[i].g;
+-		pal[i].b = _cur_palette[i].b;
++		pal[i].r = GetR(_cur_palette[i]);
++		pal[i].g = GetG(_cur_palette[i]);
++		pal[i].b = GetB(_cur_palette[i]);
+ 		pal[i].unused = 0;
+ 	}
+ 
+@@ -328,13 +328,13 @@
+ 	DEBUG(misc, 1) ("sdl: using mode %dx%d", w, h);
+ 
+ 	// DO NOT CHANGE TO HWSURFACE, IT DOES NOT WORK
+-	newscreen = SDL_CALL SDL_SetVideoMode(w, h, 8, SDL_SWSURFACE | SDL_HWPALETTE | (_fullscreen ? SDL_FULLSCREEN : SDL_RESIZABLE));
++	newscreen = SDL_CALL SDL_SetVideoMode(w, h, 32, SDL_SWSURFACE | SDL_HWPALETTE | (_fullscreen ? SDL_FULLSCREEN : SDL_RESIZABLE));
+ 	if (newscreen == NULL)
+ 		return false;
+ 
+ 	_screen.width = newscreen->w;
+ 	_screen.height = newscreen->h;
+-	_screen.pitch = newscreen->pitch;
++	_screen.pitch = newscreen->pitch / 4;
+ 
+ 	_sdl_screen = newscreen;
+ 	InitPalette();

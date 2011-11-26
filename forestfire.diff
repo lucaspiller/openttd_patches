@@ -1,0 +1,231 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2234)
++++ lang/english.txt	(working copy)
+@@ -2726,6 +2726,7 @@
+ STR_B004_UFO_LANDS_NEAR                                         :{BLACK}{BIGFONT}'UFO' lands near {TOWN}!
+ STR_B005_COAL_MINE_SUBSIDENCE_LEAVES                            :{BLACK}{BIGFONT}Coal mine subsidence leaves trail of destruction near {TOWN}!
+ STR_B006_FLOOD_VEHICLE_DESTROYED                                :{BLACK}{BIGFONT}Floods!{}At least {COMMA16} missing, presumed dead after significant flooding!
++STR_B007_FOREST_FIRE                                            :{BLACK}{BIGFONT}FIRE!{}Flames burn forest near {TOWN} to ashes!
+ 
+ STR_BRIBE_FAILED                                                :{WHITE}Your attempted bribe has been
+ STR_BRIBE_FAILED_2                                              :{WHITE}discovered by a regional investigator
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2234)
++++ table/sprites.h	(working copy)
+@@ -806,6 +806,11 @@
+ 	SPR_BREAKDOWN_SMOKE_1 = 3738,
+ 	SPR_BREAKDOWN_SMOKE_2 = 3739,
+ 	SPR_BREAKDOWN_SMOKE_3 = 3740,
++	
++	SPR_FOREST_FIRE_0 = SPR_OPENTTD_BASE + 99,
++	SPR_FOREST_FIRE_1 = SPR_OPENTTD_BASE + 100,
++	SPR_FOREST_FIRE_2 = SPR_OPENTTD_BASE + 101,
++	SPR_FOREST_FIRE_3 = SPR_OPENTTD_BASE + 102,
+ 
+ 	SPR_BUBBLE_0 = 4748,
+ 	SPR_BUBBLE_1 = 4749,
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2234)
++++ vehicle.c	(working copy)
+@@ -1081,7 +1081,29 @@
+ 	EndVehicleMove(v);
+ }
+ 
++static void ForestFireInit(Vehicle *v)
++{
++	v->cur_image = SPR_FOREST_FIRE_1;
++	v->progress = 0;
++}
+ 
++static void ForestFireTick(Vehicle *v)
++{
++	v->progress++;
++  BeginVehicleMove(v);
++  
++  if (v->progress == 65)
++  	v->cur_image = SPR_FOREST_FIRE_2;
++  else if (v->progress == 130)
++  	v->cur_image = SPR_FOREST_FIRE_3;
++  else if (v->progress == 195)
++  	v->cur_image = SPR_FOREST_FIRE_0; // Yes, I'm aware this looks weird. Not hard to fix later though. Want to get it working first :p
++  else if (v->progress == 255) {
++  	EndVehicleMove(v);
++  	DeleteVehicle(v);
++	}
++}
++
+ typedef void EffectInitProc(Vehicle *v);
+ typedef void EffectTickProc(Vehicle *v);
+ 
+@@ -1096,6 +1118,7 @@
+ 	ExplosionSmallInit,
+ 	BulldozerInit,
+ 	BubbleInit,
++	ForestFireInit
+ };
+ 
+ static EffectTickProc * const _effect_tick_procs[] = {
+@@ -1109,6 +1132,7 @@
+ 	ExplosionSmallTick,
+ 	BulldozerTick,
+ 	BubbleTick,
++	ForestFireTick,
+ };
+ 
+ 
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2234)
++++ vehicle.h	(working copy)
+@@ -237,7 +237,8 @@
+ 	EV_BREAKDOWN_SMOKE = 6,
+ 	EV_EXPLOSION_SMALL = 7,
+ 	EV_BULLDOZER       = 8,
+-	EV_BUBBLE          = 9
++	EV_BUBBLE          = 9,
++	EV_FOREST_FIRE     = 10,
+ } EffectVehicle;
+ 
+ typedef void VehicleTickProc(Vehicle *v);
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2234)
++++ disaster_cmd.c	(working copy)
+@@ -13,6 +13,8 @@
+ #include "player.h"
+ #include "airport_movement.h"
+ #include "sound.h"
++#include "console.h"
++#include "debug.h"
+ 
+ static void DisasterClearSquare(TileIndex tile)
+ {
+@@ -930,15 +932,40 @@
+ 	} while (--maxloop != 0);
+ }
+ 
++// Forest Fire
++static void Disaster8_Init(void)
++{
++	Industry *i;
++	int maxloop = 15;
++	int index = Random() & 0xF;
++	do {
++		FOR_ALL_INDUSTRIES(i) {
++			if (i->xy != 0 && i->type == IT_FOREST && --index < 0) {
++
++				uint tile = i->xy;
++				DestructIndustry(i);
++
++				SetDParam(0, i->town->index);
++				AddNewsItem(STR_B007_FOREST_FIRE, NEWS_FLAGS(NM_THIN,NF_VIEWPORT|NF_TILE,NT_ACCIDENT,0), i->xy, 0);
++				CreateEffectVehicleAbove(TileX(tile) * 16 + 6, TileY(tile) * 16 + 6, 0, EV_FOREST_FIRE);
++				SndPlayTileFx(SND_12_EXPLOSION, i->xy);
++
++				return;
++			}
++		}
++	} while (--maxloop != 0);
++}
++
+ static DisasterInitProc * const _disaster_initprocs[] = {
+-	Disaster0_Init,
+-	Disaster1_Init,
+-	Disaster2_Init,
+-	Disaster3_Init,
+-	Disaster4_Init,
+-	Disaster5_Init,
+-	Disaster6_Init,
+-	Disaster7_Init,
++	Disaster0_Init,	// Zeppeliner crash
++	Disaster1_Init,	// UFO (small)
++	Disaster2_Init,	// Oil refinary explosion
++	Disaster3_Init,	// Factory explosion
++	Disaster4_Init,	// UFO (large)
++	Disaster5_Init,	// Submarine
++	Disaster6_Init,	// Submarine
++	Disaster7_Init,	// Coal mine subsidence
++	Disaster8_Init, // Forest Fire
+ };
+ 
+ typedef struct {
+@@ -946,7 +973,7 @@
+ } DisasterYears;
+ 
+ #define MK(a,b) {a-20,b-20}
+-static const DisasterYears _dis_years[8] = {
++static const DisasterYears _dis_years[9] = {
+ 	MK(30,55),
+ 	MK(40,70),
+ 	MK(60,90),
+@@ -955,24 +982,25 @@
+ 	MK(40,65),
+ 	MK(75,110),
+ 	MK(50,85),
++	MK(30,80),
+ };
+ 
+ 
+ static void DoDisaster(void)
+ {
+-	byte buf[8];
++	byte buf[9];
+ 	byte year = _cur_year;
+ 	int i,j;
+-
++	
+ 	for(i=j=0; i!=lengthof(_dis_years); i++) {
+-		if (year >= _dis_years[i].min &&
+-				year < _dis_years[i].max)
++		//if (year >= _dis_years[i].min &&
++		//		year < _dis_years[i].max)
+ 					buf[j++] = i;
+ 	}
+ 
+ 	if (j == 0)
+ 		return;
+-
++	IConsoleError("Doing disaster!");
+ 	_disaster_initprocs[buf[(uint16)Random() * j >> 16]]();
+ }
+ 
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 2234)
++++ console_cmds.c	(working copy)
+@@ -15,7 +15,6 @@
+ #include "settings.h"
+ #include "hal.h" /* for file list */
+ 
+-
+ // ** scriptfile handling ** //
+ static FILE * _script_file;
+ static bool _script_running;
+@@ -116,6 +115,7 @@
+ DEF_CONSOLE_CMD(ConResetEngines)
+ {
+ 	StartupEngines();
++	_disaster_delay = 1;
+ 	return 0;
+ }
+ 
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2234)
++++ spritecache.c	(working copy)
+@@ -726,7 +726,7 @@
+ 	"cached_sprites.xx3",
+ };
+ 
+-#define OPENTTD_SPRITES_COUNT 98
++#define OPENTTD_SPRITES_COUNT 102
+ static const uint16 _openttd_grf_indexes[] = {
+ 	SPR_OPENTTD_BASE+0,	SPR_OPENTTD_BASE+7, // icons etc
+ 	134, 134,  // euro symbol medium size

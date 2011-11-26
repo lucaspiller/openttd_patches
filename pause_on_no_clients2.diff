@@ -1,0 +1,103 @@
+Index: network.c
+===================================================================
+--- network.c	(revision 2387)
++++ network.c	(working copy)
+@@ -547,10 +547,19 @@
+ 
+ 	if (_network_server) {
+ 		// We just lost one client :(
+-		if (cs->status > STATUS_INACTIVE)
++		_network_clients_connected--;
++		if (cs->status > STATUS_INACTIVE) {
+ 			_network_game_info.clients_on--;
+-		_network_clients_connected--;
+ 
++			if (cs->status == STATUS_ACTIVE && _network_game_info.clients_on == 0 &&
++					_network_pause_on_no_clients &&	_network_dedicated) {
++				// Pause game as now no active clients connected
++				DoCommandP(0, 1, 0, NULL, CMD_PAUSE);
++			
++				NetworkServer_HandleChat(NETWORK_ACTION_CHAT, DESTTYPE_BROADCAST, 0, "Game paused (no clients)", NETWORK_SERVER_INDEX);
++			}
++		}
++
+ 		while ((cs + 1) != DEREF_CLIENT(MAX_CLIENTS) && (cs + 1)->socket != INVALID_SOCKET) {
+ 			*cs = *(cs + 1);
+ 			*ci = *(ci + 1);
+@@ -979,6 +988,14 @@
+ 	/* Try to register us to the master server */
+ 	_network_last_advertise_date = 0;
+ 	NetworkUDPAdvertise();
++
++	// Possible not the correct place for this
++	if (_network_dedicated && _network_pause_on_no_clients) {
++		// Pause server as there are no clients connected yet
++		DoCommandP(0, 1, 0, NULL, CMD_PAUSE);
++		
++		NetworkServer_HandleChat(NETWORK_ACTION_CHAT, DESTTYPE_BROADCAST, 0, "Game paused (no clients)", NETWORK_SERVER_INDEX);
++	}
+ 	return true;
+ }
+ 
+Index: network.h
+===================================================================
+--- network.h	(revision 2387)
++++ network.h	(working copy)
+@@ -163,6 +163,7 @@
+ 
+ VARDEF uint16 _network_max_join_time;             //! Time a client can max take to join
+ VARDEF bool _network_pause_on_join;               //! Pause the game when a client tries to join (more chance of succeeding join)
++VARDEF bool _network_pause_on_no_clients; ///< Pause the game if there are no clients connected
+ 
+ VARDEF uint16 _redirect_console_to_client;
+ 
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2387)
++++ settings.c	(working copy)
+@@ -763,6 +763,7 @@
+ 	{"frame_freq",			SDT_UINT8 | SDT_NOSAVE,	(void*)0,			&_network_frame_freq,		NULL},
+ 	{"max_join_time",		SDT_UINT16,	(void*)500,	&_network_max_join_time,	NULL},
+ 	{"pause_on_join",		SDT_BOOL, (void*)false, &_network_pause_on_join, NULL},
++	{"pause_on_no_clients", SDT_BOOL, (void*)false, &_network_pause_on_no_clients, NULL},
+ 	{"server_bind_ip",	SDT_STRINGBUF | (lengthof(_network_server_bind_ip_host) << 16),	"0.0.0.0",	&_network_server_bind_ip_host,	NULL},
+ 	{"server_port",			SDT_UINT,	(void*)NETWORK_DEFAULT_PORT,	&_network_server_port,	NULL},
+ 	{"server_advertise",SDT_BOOL, (void*)false, &_network_advertise, NULL},
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 2387)
++++ console_cmds.c	(working copy)
+@@ -1331,6 +1331,9 @@
+ 	IConsoleVarRegister("pause_on_join",         &_network_pause_on_join, ICONSOLE_VAR_BOOLEAN, "Set if the server should pause gameplay while a client is joining. This might help slow users");
+ 	IConsoleVarHookAdd("pause_on_join",          ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
+ 
++	IConsoleVarRegister("pause_on_no_clients",   &_network_pause_on_no_clients, ICONSOLE_VAR_BOOLEAN, "Set if the server should pause gameplay when there are no clients connected.");
++	IConsoleVarHookAdd("pause_on_no_clients",    ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
++
+ 	IConsoleVarRegister("autoclean_companies",   &_network_autoclean_companies, ICONSOLE_VAR_BOOLEAN, "Automatically shut down inactive companies to free them up for other players. Customize with 'autoclean_(un)protected'");
+ 	IConsoleVarHookAdd("autoclean_companies",    ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
+ 
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2387)
++++ network_server.c	(working copy)
+@@ -753,8 +753,9 @@
+ 			}
+ 		}
+ 
+-		if (_network_pause_on_join) {
++		if (_network_pause_on_join && !(_network_pause_on_no_clients && _network_dedicated && _network_game_info.clients_on == 1)) {
+ 			/* Now pause the game till the client is in sync */
++			/* If pause on no clients is enabled and this is the first client, then it will already be paused */
+ 			DoCommandP(0, 1, 0, NULL, CMD_PAUSE);
+ 
+ 			NetworkServer_HandleChat(NETWORK_ACTION_CHAT, DESTTYPE_BROADCAST, 0, "Game paused (incoming client)", NETWORK_SERVER_INDEX);
+@@ -960,7 +961,7 @@
+ 		/* Now he is! Unpause the game */
+ 		cs->status = STATUS_ACTIVE;
+ 
+-		if (_network_pause_on_join) {
++		if (_network_pause_on_join || (_network_pause_on_no_clients && _network_dedicated && _network_game_info.clients_on == 1)) {
+ 			DoCommandP(0, 0, 0, NULL, CMD_PAUSE);
+ 			NetworkServer_HandleChat(NETWORK_ACTION_CHAT, DESTTYPE_BROADCAST, 0, "Game unpaused", NETWORK_SERVER_INDEX);
+ 		}

@@ -1,0 +1,13 @@
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2500)
++++ openttd.h	(working copy)
+@@ -64,7 +64,7 @@
+ typedef struct NewsItem NewsItem;
+ typedef struct Industry Industry;
+ typedef struct DrawPixelInfo DrawPixelInfo;
+-typedef uint16 VehicleID;
++typedef uint32 VehicleID;
+ typedef byte PlayerID;
+ typedef byte OrderID;
+ typedef byte CargoID;

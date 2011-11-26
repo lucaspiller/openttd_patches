@@ -1,0 +1,43 @@
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2900)
++++ disaster_cmd.c	(working copy)
+@@ -908,6 +908,9 @@
+ 	Industry *i;
+ 	int maxloop = 15;
+ 	int index = Random() & 0xF;
++	PlayerID old_player = _current_player;
++	
++	_current_player = OWNER_NONE;
+ 
+ 	do {
+ 		FOR_ALL_INDUSTRIES(i) {
+@@ -919,18 +922,27 @@
+ 
+ 				{
+ 					TileIndex tile = i->xy;
++					TileIndex tile2 = i->xy;
+ 					TileIndexDiff step = TileOffsByDir(Random() & 3);
+ 
+ 					int count = 30;
++					uint height;
+ 					do {
+ 						DisasterClearSquare(tile);
+-						tile = TILE_MASK(tile + step);
++						BEGIN_TILE_LOOP(tile2, 3, 3, tile - TileXY(1,1))
++							tile2 = TILE_MASK(tile2);
++							DisasterClearSquare(tile2);
++						END_TILE_LOOP(tile2, 3, 3, tile - TileXY(1,1))
++						DoCommandByTile(tile, 255, 0, DC_EXEC, CMD_TERRAFORM_LAND);
++  						tile = TILE_MASK(tile + step);						
+ 					} while (--count);
+ 				}
+ 				return;
+ 			}
+ 		}
+ 	} while (--maxloop != 0);
++	
++	_current_player = old_player;
+ }
+ 
+ static DisasterInitProc * const _disaster_initprocs[] = {

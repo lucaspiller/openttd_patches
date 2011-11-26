@@ -1,0 +1,373 @@
+Index: network.c
+===================================================================
+--- network.c	(revision 2198)
++++ network.c	(working copy)
+@@ -35,6 +35,9 @@
+ // The listen socket for the server
+ static SOCKET _listensocket;
+ 
++// Socket for HTTP connections
++static SOCKET _http_socket;
++
+ // Network copy of patches, so the patches of a client are not fucked up
+ //  after he joined a server
+ static Patches network_tmp_patches;
+@@ -47,6 +50,7 @@
+ /* Some externs / forwards */
+ extern void ShowJoinStatusWindow(void);
+ extern void StateGameLoop(void);
++extern void GetPlayerKey(void);
+ 
+ // Function that looks up the CI for a given client-index
+ NetworkClientInfo *NetworkFindClientInfoFromIndex(uint16 client_index)
+@@ -573,7 +577,7 @@
+ {
+ 	SOCKET s;
+ 	struct sockaddr_in sin;
+-
++	
+ 	DEBUG(net, 1) ("[NET] Connecting to %s %d", hostname, port);
+ 
+ 	s = socket(AF_INET, SOCK_STREAM, 0);
+@@ -882,6 +886,7 @@
+ 
+ 	NetworkDisconnect();
+ 	NetworkUDPClose();
++	GetPlayerKey();
+ 	NetworkInitialize();
+ 
+ 	// Try to connect
+@@ -1385,6 +1390,86 @@
+ 		SEND_COMMAND(PACKET_CLIENT_SET_PASSWORD)(_network_player_info[_local_player].password);
+ }
+ 
++bool HTTPConnect(const char *hostname)
++{
++	struct sockaddr_in sin;
++	
++	DEBUG(net, 1) ("[NET][HTTP] Connecting to %s %d", hostname, 80);
++	
++	_http_socket = socket(AF_INET, SOCK_STREAM, 0);
++	if (_http_socket == INVALID_SOCKET) {
++		ClientStartError("socket() failed");
++		return false;
++	} 
++	
++	sin.sin_family = AF_INET;
++	sin.sin_addr.s_addr = NetworkResolveHost(hostname);
++	sin.sin_port = htons(80);
++	_network_last_host_ip = sin.sin_addr.s_addr;
++	
++	if (connect(_http_socket, (struct sockaddr*) &sin, sizeof(sin)) != 0) {
++		// We failed to connect for which reason what so ever
++		return false;
++	}  
++	
++	return true;
++}
++
++char *HTTPGetUrl(const char *url)
++{
++	char buffer[200];
++	int t;
++	
++	sprintf(buffer, "GET %s\n", url);
++	
++	DEBUG(net, 1) ("[NET][HTTP] Requesting file %s", url);   
++	send(_http_socket, buffer, 200, 0);
++	
++	DEBUG(net, 1) ("[NET][HTTP] Attempting to recieve data");  
++	t = recv(_http_socket, buffer, 200, 0);
++	
++	DEBUG(net, 1) ("[NET][HTTP] Recieved %d character(s):", t);  
++	
++	buffer[t] = '\0';
++	DEBUG(net, 1) ("[NET][HTTP] %s", buffer);
++	
++	DEBUG(net, 1) ("[NET][HTTP] Closed socket", t);  
++	close(_http_socket);
++	
++	return buffer;
++}
++
++void GetPlayerKey()
++{
++	char url[150];
++  
++  if (_network_login_enabled) {
++	 sprintf(url, "%sgetkey.php?name=%s&pass=%s", _network_login_url, _network_player_name, _network_player_pass);
++	 HTTPConnect(_network_login_server);
++	 ttd_strlcpy(_network_player_key, HTTPGetUrl(url), 40);
++	 DEBUG(net, 0) ("[NET][LOGIN] Got key: %s", _network_player_key);
++  }
++}
++
++bool CheckPlayerKey(char *user, char *key)
++{
++	char url[150];
++	
++  if (_network_login_enabled) {
++	 sprintf(url, "%scheckkey.php?name=%s&key=%s", _network_login_url, user, key);
++	 HTTPConnect(_network_login_server);
++	 if (strncmp(HTTPGetUrl(url), "AUTHED", sizeof(url))) {
++  		DEBUG(net, 0) ("[NET][LOGIN] Incorrect key :(", url);
++		  return false;
++	 }else{
++  		DEBUG(net, 0) ("[NET][LOGIN] Key correct :D", url);
++		  return true;
++	 }
++  }else{
++    return false;
++  }
++}
++
+ #else
+ 
+ void ParseConnectionString(const char **player, const char **port, char *connection_string) {}
+Index: network.h
+===================================================================
+--- network.h	(revision 2198)
++++ network.h	(working copy)
+@@ -43,6 +43,8 @@
+ 
+ enum {
+ 	NETWORK_NAME_LENGTH        = 80,
++  NETWORK_KEY_LENGTH         = 40,
++  NETWORK_PASS_LENGTH        = 20,
+ 	NETWORK_HOSTNAME_LENGTH    = 80,
+ 	NETWORK_REVISION_LENGTH    = 10,
+ 	NETWORK_PASSWORD_LENGTH    = 20,
+@@ -74,6 +76,7 @@
+ 	byte map_set;																		// Graphical set
+ 	bool dedicated;																	// Is this a dedicated server?
+ 	char rcon_password[NETWORK_PASSWORD_LENGTH];		// RCon password for the server. "" if rcon is disabled
++  bool login;                                     // Whether or not the login system is enabled on the server
+ } NetworkGameInfo;
+ 
+ typedef struct NetworkPlayerInfo {
+@@ -136,6 +139,11 @@
+ VARDEF NetworkClientInfo _network_client_info[MAX_CLIENT_INFO];
+ 
+ VARDEF char _network_player_name[NETWORK_NAME_LENGTH];
++VARDEF char _network_player_key[NETWORK_KEY_LENGTH];
++VARDEF char _network_player_pass[NETWORK_PASS_LENGTH];
++VARDEF char _network_login_url[150];
++VARDEF char _network_login_server[50];
++VARDEF bool _network_login_enabled;
+ VARDEF char _network_default_ip[NETWORK_HOSTNAME_LENGTH];
+ 
+ VARDEF uint16 _network_own_client_index;
+@@ -218,5 +226,7 @@
+ void NetworkAddServer(const char *b);
+ void NetworkRebuildHostList(void);
+ void NetworkChangeCompanyPassword(const char *str);
++bool CheckPlayerKey(char *user, char *key);
++void GetPlayerKey(void);
+ 
+ #endif /* NETWORK_H */
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2198)
++++ lang/english.txt	(working copy)
+@@ -1246,6 +1246,7 @@
+ STR_NETWORK_START_DATE                                          :{SILVER}Start date:  {WHITE}{DATE_SHORT}
+ STR_NETWORK_CURRENT_DATE                                        :{SILVER}Current date:  {WHITE}{DATE_SHORT}
+ STR_NETWORK_PASSWORD                                            :{SILVER}Password protected!
++STR_NETWORK_LOGIN                                               :{SILVER}Login system enabled
+ STR_NETWORK_SERVER_OFFLINE                                      :{SILVER}SERVER OFFLINE
+ STR_NETWORK_SERVER_FULL                                         :{SILVER}SERVER FULL
+ STR_NETWORK_VERSION_MISMATCH                                    :{SILVER}VERSION MISMATCH
+@@ -1361,6 +1362,7 @@
+ STR_NETWORK_ERR_SERVER_BANNED                                   :{WHITE} You are banned from this server
+ STR_NETWORK_ERR_KICKED                                          :{WHITE} You were kicked out of the game
+ STR_NETWORK_ERR_CHEATER                                         :{WHITE} Cheating is not allowed on this server
++STR_NETWORK_ERR_NOKEY						:{WHITE} Your key is invalid
+ 
+ STR_NETWORK_ERR_LEFT                                            :has left the game
+ ############ Leave those lines in this order!!
+Index: network_udp.c
+===================================================================
+--- network_udp.c	(revision 2198)
++++ network_udp.c	(working copy)
+@@ -72,6 +72,7 @@
+ 	NetworkSend_uint16(packet, _network_game_info.map_height);
+ 	NetworkSend_uint8 (packet, _network_game_info.map_set);
+ 	NetworkSend_uint8 (packet, _network_game_info.dedicated);
++  NetworkSend_uint8 (packet, _network_login_enabled);
+ 
+ 	// Let the client know that we are here
+ 	NetworkSendUDP_Packet(_udp_server_socket, packet, client_addr);
+@@ -100,7 +101,7 @@
+ 	// Find next item
+ 	item = NetworkGameListAddItem(inet_addr(inet_ntoa(client_addr->sin_addr)), ntohs(client_addr->sin_port));
+ 
+-	if (game_info_version == 1) {
++	if (game_info_version >= 1) {
+ 		NetworkRecv_string(&_udp_cs, p, item->info.server_name, sizeof(item->info.server_name));
+ 		NetworkRecv_string(&_udp_cs, p, item->info.server_revision, sizeof(item->info.server_revision));
+ 		item->info.server_lang   = NetworkRecv_uint8(&_udp_cs, p);
+@@ -115,11 +116,14 @@
+ 		item->info.map_height    = NetworkRecv_uint16(&_udp_cs, p);
+ 		item->info.map_set       = NetworkRecv_uint8(&_udp_cs, p);
+ 		item->info.dedicated     = NetworkRecv_uint8(&_udp_cs, p);
+-
+ 		if (item->info.hostname[0] == '\0')
+ 			snprintf(item->info.hostname, sizeof(item->info.hostname), "%s", inet_ntoa(client_addr->sin_addr));
+-	}
+-
++  }
++      
++	if (game_info_version >= 2) {
++    item->info.login         = NetworkRecv_uint8(&_udp_cs, p);
++  }
++  
+ 	item->online = true;
+ 
+ 	UpdateNetworkGameWindow(false);
+Index: network_data.h
+===================================================================
+--- network_data.h	(revision 2198)
++++ network_data.h	(working copy)
+@@ -16,7 +16,7 @@
+ #define NETWORK_EMPTY_INDEX 0
+ 
+ // What version of game-info do we use?
+-#define NETWORK_GAME_INFO_VERSION 1
++#define NETWORK_GAME_INFO_VERSION 2
+ // What version of company info is this?
+ #define NETWORK_COMPANY_INFO_VERSION 3
+ // What version of master-server-protocol do we use?
+@@ -90,6 +90,7 @@
+ 	NETWORK_ERROR_PLAYER_MISMATCH, // Happens in CLIENT_COMMAND
+ 	NETWORK_ERROR_KICKED,
+ 	NETWORK_ERROR_CHEATER,
++  NETWORK_ERROR_NOKEY,
+ } NetworkErrorCode;
+ 
+ // Actions that can be used for NetworkTextMessage
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2198)
++++ settings.c	(working copy)
+@@ -768,6 +768,10 @@
+ 	{"server_advertise",SDT_BOOL, (void*)false, &_network_advertise, NULL},
+ 	{"lan_internet",		SDT_UINT8, (void*)0, &_network_lan_internet, NULL},
+ 	{"player_name",			SDT_STRINGBUF | (lengthof(_network_player_name) << 16), NULL, &_network_player_name, NULL},
++  {"player_pass",     SDT_STRINGBUF | (lengthof(_network_player_pass) << 16), NULL, &_network_player_pass, NULL},
++  {"login_url",       SDT_STRINGBUF | (lengthof(_network_login_url) << 16), NULL, &_network_login_url, NULL},
++  {"login_server",    SDT_STRINGBUF | (lengthof(_network_login_server) << 16), NULL, &_network_login_server, NULL},
++  {"login_enabled",   SDT_BOOL, (void*)false, &_network_login_enabled, NULL},
+ 	{"server_password",	SDT_STRINGBUF | (lengthof(_network_server_password) << 16), NULL, &_network_server_password, NULL},
+ 	{"rcon_password",		SDT_STRINGBUF | (lengthof(_network_rcon_password) << 16), NULL, &_network_rcon_password, NULL},
+ 	{"server_name",			SDT_STRINGBUF | (lengthof(_network_server_name) << 16), NULL, &_network_server_name, NULL},
+Index: network_client.c
+===================================================================
+--- network_client.c	(revision 2198)
++++ network_client.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include "table/strings.h"
+ #include "network_client.h"
+ #include "network_gamelist.h"
++#include "network.h"
+ #include "command.h"
+ #include "gfx.h"
+ #include "window.h"
+@@ -60,6 +61,7 @@
+ 	//    uint8:  Play as Player id (1..MAX_PLAYERS)
+ 	//    uint8:  Language ID
+ 	//    String: Unique id to find the player back in server-listing
++  //    String: Player's key for authing
+ 	//
+ 
+ 	Packet *p;
+@@ -72,6 +74,7 @@
+ 	NetworkSend_uint8(p, _network_playas); // PlayAs
+ 	NetworkSend_uint8(p, NETLANG_ANY); // Language
+ 	NetworkSend_string(p, _network_unique_id);
++  NetworkSend_string(p, _network_player_key);
+ 	NetworkSend_Packet(p, MY_CLIENT);
+ }
+ 
+@@ -404,7 +407,12 @@
+ 		_switch_mode_errorstr = STR_NETWORK_ERR_KICKED;
+ 	} else if (error == NETWORK_ERROR_CHEATER) {
+ 		_switch_mode_errorstr = STR_NETWORK_ERR_CHEATER;
+-	}
++	} else if (error == NETWORK_ERROR_NOKEY) {
++    // Incorrect key
++    // New key requested incase they try and steal ours >_<
++    GetPlayerKey();
++    _switch_mode_errorstr = STR_NETWORK_ERR_NOKEY;
++  }
+ 
+ 	DeleteWindowById(WC_NETWORK_STATUS_WINDOW, 0);
+ 
+Index: network_gui.c
+===================================================================
+--- network_gui.c	(revision 2198)
++++ network_gui.c	(working copy)
+@@ -240,9 +240,12 @@
+ 			} else if (_selected_item->info.clients_on == _selected_item->info.clients_max) {
+ 				// Show: server full, when clients_on == clients_max
+ 				DrawStringMultiCenter(365, y, STR_NETWORK_SERVER_FULL, 2); // server full
+-			} else if (_selected_item->info.use_password)
++      } else if (_selected_item->info.login) {
++        DrawStringMultiCenter(365, y, STR_NETWORK_LOGIN, 2); // login system warning
++			} else if (_selected_item->info.use_password) {
+ 				DrawStringMultiCenter(365, y, STR_NETWORK_PASSWORD, 2); // password warning
+-
++      }
++      
+ 			y+=10;
+ 		}
+ 	}	break;
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2198)
++++ network_server.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include "table/strings.h"
+ #include "network_server.h"
+ #include "network_udp.h"
++#include "network.h"
+ #include "console.h"
+ #include "command.h"
+ #include "gfx.h"
+@@ -122,7 +123,7 @@
+ 			NetworkSend_string(p, "<none>");
+ 		else
+ 			NetworkSend_string(p, _network_player_info[player->index].players);
+-
++    
+ 		NetworkSend_Packet(p, cs);
+ 	}
+ 
+@@ -595,6 +596,7 @@
+ {
+ 	char name[NETWORK_NAME_LENGTH];
+ 	char unique_id[NETWORK_NAME_LENGTH];
++  char player_key[NETWORK_KEY_LENGTH];
+ 	NetworkClientInfo *ci;
+ 	char test_name[NETWORK_NAME_LENGTH];
+ 	byte playas;
+@@ -620,6 +622,7 @@
+ 	playas = NetworkRecv_uint8(cs, p);
+ 	client_lang = NetworkRecv_uint8(cs, p);
+ 	NetworkRecv_string(cs, p, unique_id, sizeof(unique_id));
++  NetworkRecv_string(cs, p, player_key, sizeof(player_key));
+ 
+ 	if (cs->quited)
+ 		return;
+@@ -637,6 +640,12 @@
+ 		SEND_COMMAND(PACKET_SERVER_ERROR)(cs, NETWORK_ERROR_NAME_IN_USE);
+ 		return;
+ 	}
++  
++  if (!CheckPlayerKey(name,player_key) && _network_login_enabled) {
++    // Key cannot be verified
++    SEND_COMMAND(PACKET_SERVER_ERROR)(cs, NETWORK_ERROR_NOKEY);
++    return;
++  }
+ 
+ 	ci = DEREF_CLIENT_INFO(cs);
+ 

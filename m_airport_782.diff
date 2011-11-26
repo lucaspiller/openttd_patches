@@ -1,0 +1,921 @@
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 3031)
++++ aircraft_cmd.c	(working copy)
+@@ -17,6 +17,7 @@
+ #include "player.h"
+ #include "airport.h"
+ #include "vehicle_gui.h"
++#include "m_airport.h"
+ 
+ static bool AirportMove(Vehicle *v, const AirportFTAClass *Airport);
+ static bool AirportSetBlocks(Vehicle *v, AirportFTA *current_pos, const AirportFTAClass *Airport);
+@@ -1546,7 +1547,7 @@
+ 	// heliport/oilrig, etc --> no airplanes (HELICOPTERS_ONLY)
+ 	// runway busy or not allowed to use this airstation, circle
+ 	if (! (v->subtype == Airport->acc_planes ||
+-			st->airport_tile == 0 || (st->owner != OWNER_NONE && st->owner != v->owner) )) {
++			st->airport_tile == 0 || (st->owner != OWNER_NONE && st->owner != v->owner && !MA_OwnerHandler(st->owner)) )) {
+ 
+ 		// {32,FLYING,NOTHING_block,37}, {32,LANDING,N,33}, {32,HELILANDING,N,41},
+ 		// if it is an airplane, look for LANDING, for helicopter HELILANDING
+Index: economy.c
+===================================================================
+--- economy.c	(revision 3031)
++++ economy.c	(working copy)
+@@ -26,6 +26,7 @@
+ #include "variables.h"
+ #include "vehicle_gui.h"
+ #include "ai/ai.h"
++#include "m_airport.h"
+ 
+ // Score info
+ const ScoreInfo _score_info[] = {
+@@ -1236,6 +1237,8 @@
+ 
+ 	// Determine profit
+ 	profit = GetTransportedGoodsIncome(num_pieces, DistanceManhattan(s_from->xy, s_to->xy), days_in_transit, cargo_type);
++	profit -= MA_Tax(profit, s_from);
++	profit -= MA_Tax(profit, s_to);
+ 
+ 	// Modify profit if a subsidy is in effect
+ 	if (subsidised) {
+@@ -1347,7 +1350,7 @@
+ 				st->time_since_unload = 0;
+ 
+ 				unloading_time += v->cargo_count; /* TTDBUG: bug in original TTD */
+-				profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days);
++				profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days);				
+ 				result |= 1;
+ 				v->cargo_count = 0;
+ 			} else if (u->current_order.flags & ( OF_UNLOAD | OF_TRANSFER) ) {
+@@ -1362,7 +1365,6 @@
+ 
+ 				v_profit_total += v_profit;
+ 
+-
+ 				unloading_time += v->cargo_count;
+ 				t = GB(ge->waiting_acceptance, 0, 12);
+ 				if (t == 0) {
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3031)
++++ lang/english.txt	(working copy)
+@@ -977,6 +977,7 @@
+ STR_CONFIG_PATCHES_NEW_PATHFINDING_ALL                          :{LTBLUE}New global pathfinding (NPF, overrides NTP): {ORANGE}{STRING1}
+ 
+ STR_CONFIG_PATCHES_SMALL_AIRPORTS                               :{LTBLUE}Always allow small airports: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_MUNICIPAL_AIRPORTS				:{LTBLUE}Towns can build municipal airports: {ORANGE}{STRING1}
+ 
+ STR_CONFIG_PATCHES_LOST_TRAIN_DAYS                              :{LTBLUE}A train is lost if no progress is made for: {ORANGE}{STRING1} days
+ STR_CONFIG_PATCHES_LOST_TRAIN_DAYS_DISABLED                     :{LTBLUE}A train is lost if no progress is made for: {ORANGE}disabled
+@@ -2777,3 +2778,5 @@
+ STR_PURCHASE_INFO_COST_SPEED                                    :{BLACK}Cost: {GOLD}{CURRENCY}{BLACK} Speed: {GOLD}{VELOCITY}
+ STR_PURCHASE_INFO_AIRCRAFT_CAPACITY                             :{BLACK}Capacity: {GOLD}{COMMA} passengers, {COMMA} bags of mail
+ STR_PURCHASE_INFO_PWAGPOWER_PWAGWEIGHT                          :{BLACK}Powered Wagons: {GOLD}+{COMMA}hp{BLACK} Weight: {GOLD}+{COMMA}t
++
++STR_BUILT_MUNICIPAL_AIRPORT					:{BLACK}{BIGFONT}Mayor of {TOWN} opens new "Municipal" airport
+Index: m_airport.c
+===================================================================
+--- m_airport.c	(revision 0)
++++ m_airport.c	(revision 0)
+@@ -0,0 +1,135 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "functions.h"
++#include "variables.h"
++#include "town.h"
++#include "tile.h"
++#include "map.h"
++#include "console.h"
++#include "command.h"
++#include "airport.h"
++#include "station.h"
++#include "player.h"
++#include "news.h"
++#include "table\strings.h"
++
++const float PI = 3.141; // duuuuuuuuuuhhhhhh
++const int INT_AIRPORT_YEAR = 1990;
++const int MA_MIN_POPULATION = 15000;
++const int MA_MAX_DISTANCE_FROM_TOWN = 15;
++
++
++
++void MA_DestroyAirports()
++{
++	Station *st;
++
++	FOR_ALL_STATIONS(st)
++	{
++		if(IsValidStation(st) && st->owner == OWNER_TOWN) DoCommandByTile(st->xy,0,0,DC_EXEC,CMD_LANDSCAPE_CLEAR);
++	}
++}
++
++
++float D2R(int degrees)
++{
++	return degrees * (PI/180.0);
++}
++
++
++uint MA_Tax(int income, Station *station)
++{
++	if(station->owner == OWNER_TOWN && _patches.allow_municipal_airports && station->facilities == FACIL_AIRPORT)
++	{
++		float tax = 0;
++		tax = (income / 100.0) * _patches.municipal_airports_tax;
++		return tax;
++	}
++	else return 0;
++}
++
++bool MA_OwnerHandler(PlayerID owner)
++{
++	if(!_patches.allow_municipal_airports) return false;
++	return (owner == OWNER_TOWN);
++}
++
++
++TileIndex GetCandidate(int radius, int angle, TileIndex centre)
++{
++	return TileXY(TileX(centre) + (cos(D2R(angle))*radius),TileY(centre) + (sin(D2R(angle))*radius));
++}
++
++bool CheckCandidate(TileIndex candidatetile, Town *tn)
++{
++	candidatetile += TileDiffXY(-4,-4);
++
++	BEGIN_TILE_LOOP(tl,9,9,candidatetile)
++	{
++		if(GetTileZ(tl) != GetTileZ(candidatetile)) return false;
++		if(CmdFailed(DoCommandByTile(tl,0,0,~DC_EXEC,CMD_LANDSCAPE_CLEAR))) return false;
++	}
++	END_TILE_LOOP(tl,9,9,candidatetile)
++	
++	return true;
++}
++
++void AnnounceAirport(Town *tn, TileIndex tl)
++{
++	SetDParam(0,tn->index);
++	AddNewsItem(STR_BUILT_MUNICIPAL_AIRPORT,NEWS_FLAGS(NM_THIN, NF_VIEWPORT|NF_TILE, NT_ECONOMY,0),tl,0);
++}
++
++TileIndex FindSite(Town *tn)
++{
++	uint angle,radius;
++
++	for(radius = 0; (radius <= MA_MAX_DISTANCE_FROM_TOWN); radius++)
++	{
++		for(angle = 0; (angle <= 360); angle++)
++		{		
++			if(CheckCandidate(GetCandidate(radius,angle,tn->xy),tn)) return GetCandidate(radius,angle,tn->xy);
++		}
++	}
++	return INVALID_TILE;
++}
++
++void BuildAirport(TileIndex buildtile)
++{
++	buildtile += TileDiffXY(-3,-3);
++
++	BEGIN_TILE_LOOP(tl,7,7,buildtile)
++	{
++		DoCommandByTile(tl,0,0,DC_EXEC,CMD_LANDSCAPE_CLEAR);
++	}
++	END_TILE_LOOP(tl,7,7,buildtile)
++
++	DoCommandByTile(buildtile,AT_INTERNATIONAL,0,DC_EXEC,CMD_BUILD_AIRPORT);
++}
++
++void MunicipalAirport(Town *tn)
++{
++	Station *st;
++	TileIndex tl;
++	
++	PlayerID old_player = _current_player;
++	_current_player = OWNER_TOWN;
++
++	if(!_patches.allow_municipal_airports) MA_DestroyAirports();
++	if(!_patches.allow_municipal_airports || !_cur_year >= 1990 || !tn->population >= MA_MIN_POPULATION) return;
++
++	FOR_ALL_STATIONS(st)
++	{
++		if(IsValidStation(st) && st->owner == OWNER_TOWN && st->town == tn) return;
++	}
++
++	tl = FindSite(tn);
++	if(tl == INVALID_TILE) return;
++	BuildAirport(tl);
++	AnnounceAirport(tn, tl);
++	
++	_current_player = old_player;
++	
++	return;
++}
++
+Index: m_airport.h
+===================================================================
+--- m_airport.h	(revision 0)
++++ m_airport.h	(revision 0)
+@@ -0,0 +1,9 @@
++#include "stdafx.h"
++
++
++void MunicipalAirport(Town *tn);
++
++bool MA_OwnerHandler(PlayerID owner);
++
++int MA_Tax(int income, Station *station);
++
+Index: openttd.dsp
+===================================================================
+--- openttd.dsp	(revision 3031)
++++ openttd.dsp	(working copy)
+@@ -7,19 +7,19 @@
+ CFG=openttd - Win32 Debug
+ !MESSAGE This is not a valid makefile. To build this project using NMAKE,
+ !MESSAGE use the Export Makefile command and run
+-!MESSAGE
++!MESSAGE 
+ !MESSAGE NMAKE /f "openttd.mak".
+-!MESSAGE
++!MESSAGE 
+ !MESSAGE You can specify a configuration when running NMAKE
+ !MESSAGE by defining the macro CFG on the command line. For example:
+-!MESSAGE
++!MESSAGE 
+ !MESSAGE NMAKE /f "openttd.mak" CFG="openttd - Win32 Debug"
+-!MESSAGE
++!MESSAGE 
+ !MESSAGE Possible choices for configuration are:
+-!MESSAGE
++!MESSAGE 
+ !MESSAGE "openttd - Win32 Release" (based on "Win32 (x86) Console Application")
+ !MESSAGE "openttd - Win32 Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE
++!MESSAGE 
+ 
+ # Begin Project
+ # PROP AllowPerConfigDependencies 0
+@@ -80,7 +80,7 @@
+ # ADD LINK32 kernel32.lib user32.lib gdi32.lib winmm.lib ws2_32.lib libpng.lib zlibstat.lib dxguid.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
+ # SUBTRACT LINK32 /pdb:none
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # Begin Target
+ 
+@@ -92,58 +92,36 @@
+ # Begin Source File
+ 
+ SOURCE=.\ai\ai.c
++
+ !IF  "$(CFG)" == "openttd - Win32 Release"
++
+ # ADD CPP /Yu"../stdafx.h"
++
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+-!ENDIF
++
++!ENDIF 
++
+ # End Source File
+ # Begin Source File
+ 
+-SOURCE=.\ai\trolly\build.c
+-!IF  "$(CFG)" == "openttd - Win32 Release"
+-# ADD CPP /Yu"../../stdafx.h"
+-!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+-!ENDIF
++SOURCE=.\airport.c
+ # End Source File
+ # Begin Source File
+ 
+-SOURCE=.\ai\trolly\trolly.c
+-!IF  "$(CFG)" == "openttd - Win32 Release"
+-# ADD CPP /Yu"../../stdafx.h"
+-!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+-!ENDIF
++SOURCE=.\aystar.c
+ # End Source File
+ # Begin Source File
+ 
+-SOURCE=.\ai\default\default.c
++SOURCE=.\ai\trolly\build.c
++
+ !IF  "$(CFG)" == "openttd - Win32 Release"
+-# ADD CPP /Yu"../../stdafx.h"
+-!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+-!ENDIF
+-# End Source File
+-# Begin Source File
+ 
+-SOURCE=.\ai\trolly\pathfinder.c
+-!IF  "$(CFG)" == "openttd - Win32 Release"
+ # ADD CPP /Yu"../../stdafx.h"
+-!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+-!ENDIF
+-# End Source File
+-# Begin Source File
+ 
+-SOURCE=.\ai\trolly\shared.c
+-!IF  "$(CFG)" == "openttd - Win32 Release"
+-# ADD CPP /Yu"../../stdafx.h"
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+-!ENDIF
+-# End Source File
+-# Begin Source File
+ 
+-SOURCE=.\airport.c
+-# End Source File
+-# Begin Source File
++!ENDIF 
+ 
+-SOURCE=.\aystar.c
+ # End Source File
+ # Begin Source File
+ 
+@@ -175,11 +153,24 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\ai\default\default.c
++
++!IF  "$(CFG)" == "openttd - Win32 Release"
++
++# ADD CPP /Yu"../../stdafx.h"
++
++!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
++
++!ENDIF 
++
++# End Source File
++# Begin Source File
++
+ SOURCE=.\depot.c
+ # End Source File
+ # Begin Source File
+@@ -192,7 +183,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -229,6 +220,10 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\m_airport.c
++# End Source File
++# Begin Source File
++
+ SOURCE=.\map.c
+ # End Source File
+ # Begin Source File
+@@ -251,7 +246,7 @@
+ 
+ # SUBTRACT CPP /YX
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -288,7 +283,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -301,7 +296,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -314,7 +309,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -335,6 +330,19 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\ai\trolly\pathfinder.c
++
++!IF  "$(CFG)" == "openttd - Win32 Release"
++
++# ADD CPP /Yu"../../stdafx.h"
++
++!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
++
++!ENDIF 
++
++# End Source File
++# Begin Source File
++
+ SOURCE=.\pbs.c
+ # End Source File
+ # Begin Source File
+@@ -375,7 +383,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -388,7 +396,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -397,6 +405,19 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\ai\trolly\shared.c
++
++!IF  "$(CFG)" == "openttd - Win32 Release"
++
++# ADD CPP /Yu"../../stdafx.h"
++
++!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
++
++!ENDIF 
++
++# End Source File
++# Begin Source File
++
+ SOURCE=.\signs.c
+ # End Source File
+ # Begin Source File
+@@ -421,7 +442,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -446,6 +467,19 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\ai\trolly\trolly.c
++
++!IF  "$(CFG)" == "openttd - Win32 Release"
++
++# ADD CPP /Yu"../../stdafx.h"
++
++!ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
++
++!ENDIF 
++
++# End Source File
++# Begin Source File
++
+ SOURCE=.\unix.c
+ # PROP Exclude_From_Build 1
+ # End Source File
+@@ -483,7 +517,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -496,7 +530,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -509,7 +543,7 @@
+ 
+ !ELSEIF  "$(CFG)" == "openttd - Win32 Debug"
+ 
+-!ENDIF
++!ENDIF 
+ 
+ # End Source File
+ # Begin Source File
+@@ -522,10 +556,6 @@
+ # PROP Default_Filter "h;hpp;hxx;hm;inl"
+ # Begin Source File
+ 
+-SOURCE=.\ai\trolly\trolly.h
+-# End Source File
+-# Begin Source File
+-
+ SOURCE=.\ai\ai.h
+ # End Source File
+ # Begin Source File
+@@ -602,6 +632,10 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\m_airport.h
++# End Source File
++# Begin Source File
++
+ SOURCE=.\macros.h
+ # End Source File
+ # Begin Source File
+@@ -714,6 +748,10 @@
+ # End Source File
+ # Begin Source File
+ 
++SOURCE=.\ai\trolly\trolly.h
++# End Source File
++# Begin Source File
++
+ SOURCE=.\variables.h
+ # End Source File
+ # Begin Source File
+Index: order_cmd.c
+===================================================================
+--- order_cmd.c	(revision 3031)
++++ order_cmd.c	(working copy)
+@@ -15,6 +15,7 @@
+ #include "news.h"
+ #include "saveload.h"
+ #include "vehicle_gui.h"
++#include "m_airport.h"
+ 
+ enum {
+ 	/* Max orders: 64000 (64 * 1000) */
+@@ -175,7 +176,7 @@
+ 			st = GetStation(new_order.station);
+ 
+ 			if (!IsValidStation(st) ||
+-					(st->airport_type != AT_OILRIG && !(IsBuoy(st)) && !CheckOwnership(st->owner))) {
++					(st->airport_type != AT_OILRIG && !(IsBuoy(st)) && !CheckOwnership(st->owner) && !MA_OwnerHandler(st->owner)) ) {
+ 				return CMD_ERROR;
+ 			}
+ 
+Index: order_gui.c
+===================================================================
+--- order_gui.c	(revision 3031)
++++ order_gui.c	(working copy)
+@@ -17,6 +17,7 @@
+ #include "viewport.h"
+ #include "depot.h"
+ #include "waypoint.h"
++#include "m_airport.h"
+ 
+ static int OrderGetSel(Window *w)
+ {
+@@ -258,7 +259,7 @@
+ 	if (IsTileType(tile, MP_STATION)) {
+ 		st = GetStation(st_index = _m[tile].m2);
+ 
+-		if (st->owner == _current_player || st->owner == OWNER_NONE) {
++		if (st->owner == _current_player || st->owner == OWNER_NONE || MA_OwnerHandler(st->owner)) {
+ 			byte facil;
+ 			(facil=FACIL_DOCK, v->type == VEH_Ship) ||
+ 			(facil=FACIL_TRAIN, v->type == VEH_Train) ||
+Index: settings.c
+===================================================================
+--- settings.c	(revision 3031)
++++ settings.c	(working copy)
+@@ -830,119 +830,121 @@
+ static const SettingDesc patch_player_settings[] = {
+ 	{"vehicle_speed",				SDT_BOOL,		(void*)true,	&_patches.vehicle_speed,				NULL},
+ 
+-	{"lost_train_days",			SDT_UINT16, (void*)180,		&_patches.lost_train_days,			NULL},
+-	{"train_income_warn",		SDT_BOOL,		(void*)true,	&_patches.train_income_warn,		NULL},
+-	{"order_review_system", SDT_UINT8,	(void*)2,			&_patches.order_review_system,	NULL},
++	{"lost_train_days",				SDT_UINT16,		(void*)180,		&_patches.lost_train_days,			NULL},
++	{"train_income_warn",			SDT_BOOL,		(void*)true,	&_patches.train_income_warn,		NULL},
++	{"order_review_system",			SDT_UINT8,		(void*)2,		&_patches.order_review_system,	NULL},
+ 
+-	{"status_long_date",		SDT_BOOL,		(void*)true,	&_patches.status_long_date,			NULL},
++	{"status_long_date",			SDT_BOOL,		(void*)true,	&_patches.status_long_date,			NULL},
+ 	{"show_finances",				SDT_BOOL,		(void*)true,	&_patches.show_finances,				NULL},
+ 	{"autoscroll",					SDT_BOOL,		(void*)false,	&_patches.autoscroll,						NULL},
+-	{"errmsg_duration",			SDT_UINT8,	(void*)5,			&_patches.errmsg_duration,			NULL},
+-	{"toolbar_pos",					SDT_UINT8,	(void*)0,			&_patches.toolbar_pos,					NULL},
+-	{"keep_all_autosave",		SDT_BOOL,		(void*)false, &_patches.keep_all_autosave,		NULL},
+-	{"autosave_on_exit",		SDT_BOOL,		(void*)false, &_patches.autosave_on_exit,			NULL},
++	{"errmsg_duration",				SDT_UINT8,		(void*)5,		&_patches.errmsg_duration,			NULL},
++	{"toolbar_pos",					SDT_UINT8,		(void*)0,		&_patches.toolbar_pos,					NULL},
++	{"keep_all_autosave",			SDT_BOOL,		(void*)false,	&_patches.keep_all_autosave,		NULL},
++	{"autosave_on_exit",			SDT_BOOL,		(void*)false,	&_patches.autosave_on_exit,			NULL},
+ 
+-	{"bridge_pillars",			SDT_BOOL,		(void*)true,	&_patches.bridge_pillars,				NULL},
+-	{"invisible_trees",			SDT_BOOL,		(void*)false, &_patches.invisible_trees,			NULL},
+-	{"drag_signals_density",SDT_UINT8,	(void*)4,			&_patches.drag_signals_density, NULL},
++	{"bridge_pillars",				SDT_BOOL,		(void*)true,	&_patches.bridge_pillars,				NULL},
++	{"invisible_trees",				SDT_BOOL,		(void*)false,	&_patches.invisible_trees,			NULL},
++	{"drag_signals_density",		SDT_UINT8,		(void*)4,		&_patches.drag_signals_density, NULL},
+ 
+-	{"window_snap_radius",  SDT_UINT8,  (void*)10,    &_patches.window_snap_radius,   NULL},
++	{"window_snap_radius",			SDT_UINT8,		(void*)10,		&_patches.window_snap_radius,   NULL},
+ 
+-	{"autorenew",						SDT_BOOL,		(void*)false,	&_patches.autorenew,						NULL},
+-	{"autorenew_months",		SDT_INT16,	(void*)-6,		&_patches.autorenew_months,			NULL},
+-	{"autorenew_money",			SDT_INT32,	(void*)100000,&_patches.autorenew_money,			NULL},
++	{"autorenew",					SDT_BOOL,		(void*)false,	&_patches.autorenew,						NULL},
++	{"autorenew_months",			SDT_INT16,		(void*)-6,		&_patches.autorenew_months,			NULL},
++	{"autorenew_money",				SDT_INT32,		(void*)100000,	&_patches.autorenew_money,			NULL},
+ 
+-	{"population_in_label",	SDT_BOOL,		(void*)true,	&_patches.population_in_label,	NULL},
++	{"population_in_label",			SDT_BOOL,		(void*)true,	&_patches.population_in_label,	NULL},
+ 
+-	{NULL,									0,					NULL,					NULL,																						NULL}
++	{NULL,							0,				NULL,			NULL,																						NULL}
+ };
+ 
+ // Non-static, needed in network_server.c
+ const SettingDesc patch_settings[] = {
+-	{"build_on_slopes",			SDT_BOOL,		(void*)true,	&_patches.build_on_slopes,			NULL},
+-	{"auto_pbs_placement",	SDT_BOOL,		(void*)true,	&_patches.auto_pbs_placement,		NULL},
+-	{"mammoth_trains",			SDT_BOOL,		(void*)true,	&_patches.mammoth_trains,				NULL},
++	{"build_on_slopes",				SDT_BOOL,		(void*)true,	&_patches.build_on_slopes,			NULL},
++	{"auto_pbs_placement",			SDT_BOOL,		(void*)true,	&_patches.auto_pbs_placement,		NULL},
++	{"mammoth_trains",				SDT_BOOL,		(void*)true,	&_patches.mammoth_trains,				NULL},
+ 	{"join_stations",				SDT_BOOL,		(void*)true,	&_patches.join_stations,				NULL},
+-	{"station_spread",			SDT_UINT8,	(void*)12,		&_patches.station_spread,				NULL},
++	{"station_spread",				SDT_UINT8,		(void*)12,		&_patches.station_spread,				NULL},
+ 	{"full_load_any",				SDT_BOOL,		(void*)true,	&_patches.full_load_any,				NULL},
+-	{"modified_catchment", 	SDT_BOOL,		(void*)true,	&_patches.modified_catchment,		NULL},
++	{"modified_catchment", 			SDT_BOOL,		(void*)true,	&_patches.modified_catchment,		NULL},
+ 
+ 
+-	{"inflation",						SDT_BOOL,		(void*)true,	&_patches.inflation,						NULL},
++	{"inflation",					SDT_BOOL,		(void*)true,	&_patches.inflation,						NULL},
+ 	{"selectgoods",					SDT_BOOL,		(void*)true,	&_patches.selectgoods,					NULL},
+-	{"longbridges",					SDT_BOOL,		(void*)true, &_patches.longbridges,					NULL},
+-	{"gotodepot",						SDT_BOOL,		(void*)true,	&_patches.gotodepot,						NULL},
++	{"longbridges",					SDT_BOOL,		(void*)true,	&_patches.longbridges,					NULL},
++	{"gotodepot",					SDT_BOOL,		(void*)true,	&_patches.gotodepot,						NULL},
+ 
+-	{"build_rawmaterial_ind",	SDT_BOOL, (void*)false, &_patches.build_rawmaterial_ind,NULL},
+-	{"multiple_industry_per_town",SDT_BOOL, (void*)false, &_patches.multiple_industry_per_town, NULL},
+-	{"same_industry_close",	SDT_BOOL,		(void*)false, &_patches.same_industry_close,	NULL},
++	{"build_rawmaterial_ind",		SDT_BOOL,		(void*)false,	&_patches.build_rawmaterial_ind,NULL},
++	{"multiple_industry_per_town",	SDT_BOOL,		(void*)false,	&_patches.multiple_industry_per_town, NULL},
++	{"same_industry_close",			SDT_BOOL,		(void*)false,	&_patches.same_industry_close,	NULL},
+ 
+ 	{"signal_side",					SDT_BOOL,		(void*)true,	&_patches.signal_side,					NULL},
+ 
+ 	{"new_nonstop",					SDT_BOOL,		(void*)false,	&_patches.new_nonstop,					NULL},
+ 	{"roadveh_queue",				SDT_BOOL,		(void*)true,	&_patches.roadveh_queue,				NULL},
+ 
+-	{"snow_line_height",		SDT_UINT8,	(void*)7,			&_patches.snow_line_height,			NULL},
++	{"snow_line_height",			SDT_UINT8,		(void*)7,		&_patches.snow_line_height,			NULL},
+ 
+-	{"bribe",								SDT_BOOL,		(void*)true,	&_patches.bribe,								NULL},
++	{"bribe",						SDT_BOOL,		(void*)true,	&_patches.bribe,								NULL},
+ 
+-	{"nonuniform_stations",	SDT_BOOL,		(void*)true,	&_patches.nonuniform_stations,	NULL},
+-	{"always_small_airport",SDT_BOOL,		(void*)false,	&_patches.always_small_airport,	NULL},
+-	{"realistic_acceleration",SDT_BOOL, (void*)false,	&_patches.realistic_acceleration,	NULL},
+-	{"wagon_speed_limits",  SDT_BOOL,   (void*)true,  &_patches.wagon_speed_limits,   NULL},
+-	{"forbid_90_deg",				SDT_BOOL, 	(void*)false, &_patches.forbid_90_deg,					NULL},
+-	{"improved_load",				SDT_BOOL,		(void*)false,	&_patches.improved_load,				NULL},
++	{"nonuniform_stations",				SDT_BOOL,	(void*)true,	&_patches.nonuniform_stations,		NULL},
++	{"always_small_airport",			SDT_BOOL,	(void*)false,	&_patches.always_small_airport,		NULL},
++	{"allow_municipal_airports",		SDT_BOOL,	(void*)true,	&_patches.allow_municipal_airports, NULL},
++	{"municipal_airports_tax",			SDT_UINT16,	(void*)20,		&_patches.municipal_airports_tax,	NULL},
++	{"realistic_acceleration",			SDT_BOOL,	(void*)false,	&_patches.realistic_acceleration,	NULL},
++	{"wagon_speed_limits",				SDT_BOOL,	(void*)true,	&_patches.wagon_speed_limits,		NULL},
++	{"forbid_90_deg",					SDT_BOOL, 	(void*)false,	&_patches.forbid_90_deg,			NULL},
++	{"improved_load",					SDT_BOOL,	(void*)false,	&_patches.improved_load,			NULL},
+ 
+-	{"max_trains",					SDT_UINT16,	(void*)500,		&_patches.max_trains,						NULL},
+-	{"max_roadveh",					SDT_UINT16,	(void*)500,		&_patches.max_roadveh,					NULL},
+-	{"max_aircraft",				SDT_UINT16,	(void*)200,		&_patches.max_aircraft,					NULL},
+-	{"max_ships",						SDT_UINT16,	(void*)300,		&_patches.max_ships,						NULL},
++	{"max_trains",						SDT_UINT16,	(void*)500,		&_patches.max_trains,					NULL},
++	{"max_roadveh",						SDT_UINT16,	(void*)500,		&_patches.max_roadveh,					NULL},
++	{"max_aircraft",					SDT_UINT16,	(void*)200,		&_patches.max_aircraft,					NULL},
++	{"max_ships",						SDT_UINT16,	(void*)300,		&_patches.max_ships,					NULL},
+ 
+-	{"servint_ispercent",		SDT_BOOL,		(void*)false,	&_patches.servint_ispercent,		NULL},
+-	{"servint_trains",			SDT_UINT16, (void*)150,		&_patches.servint_trains,				NULL},
+-	{"servint_roadveh",			SDT_UINT16, (void*)150,		&_patches.servint_roadveh,			NULL},
+-	{"servint_ships",				SDT_UINT16, (void*)360,		&_patches.servint_ships,				NULL},
+-	{"servint_aircraft",		SDT_UINT16, (void*)100,		&_patches.servint_aircraft,			NULL},
+-	{"no_servicing_if_no_breakdowns", SDT_BOOL, (void*)0, &_patches.no_servicing_if_no_breakdowns, NULL},
++	{"servint_ispercent",				SDT_BOOL,	(void*)false,	&_patches.servint_ispercent,				NULL},
++	{"servint_trains",					SDT_UINT16, (void*)150,		&_patches.servint_trains,					NULL},
++	{"servint_roadveh",					SDT_UINT16, (void*)150,		&_patches.servint_roadveh,					NULL},
++	{"servint_ships",					SDT_UINT16, (void*)360,		&_patches.servint_ships,					NULL},
++	{"servint_aircraft",				SDT_UINT16, (void*)100,		&_patches.servint_aircraft,					NULL},
++	{"no_servicing_if_no_breakdowns",	SDT_BOOL,	(void*)0,		&_patches.no_servicing_if_no_breakdowns,	NULL},
+ 
+-	{"pf_maxlength",				SDT_UINT16, (void*)512,		&_patches.pf_maxlength,					NULL},
+-	{"pf_maxdepth",					SDT_UINT8,	(void*)16,		&_patches.pf_maxdepth,					NULL},
++	{"pf_maxlength",					SDT_UINT16, (void*)512,		&_patches.pf_maxlength,					NULL},
++	{"pf_maxdepth",						SDT_UINT8,	(void*)16,		&_patches.pf_maxdepth,					NULL},
+ 
+ 
+-	{"ai_disable_veh_train",SDT_BOOL,		(void*)false, &_patches.ai_disable_veh_train,	NULL},
+-	{"ai_disable_veh_roadveh",SDT_BOOL,	(void*)false, &_patches.ai_disable_veh_roadveh,	NULL},
+-	{"ai_disable_veh_aircraft",SDT_BOOL,(void*)false, &_patches.ai_disable_veh_aircraft,NULL},
+-	{"ai_disable_veh_ship",	SDT_BOOL,		(void*)false, &_patches.ai_disable_veh_ship,	NULL},
+-	{"starting_date",				SDT_UINT32, (void*)1950,	&_patches.starting_date,				NULL},
+-	{"ending_date",				  SDT_UINT32, (void*)2051,	&_patches.ending_date,				  NULL},
++	{"ai_disable_veh_train",			SDT_BOOL,	(void*)false,	&_patches.ai_disable_veh_train,	NULL},
++	{"ai_disable_veh_roadveh",			SDT_BOOL,	(void*)false,	&_patches.ai_disable_veh_roadveh,	NULL},
++	{"ai_disable_veh_aircraft",			SDT_BOOL,	(void*)false,	&_patches.ai_disable_veh_aircraft,NULL},
++	{"ai_disable_veh_ship",				SDT_BOOL,	(void*)false,	&_patches.ai_disable_veh_ship,	NULL},
++	{"starting_date",					SDT_UINT32, (void*)1950,	&_patches.starting_date,				NULL},
++	{"ending_date",						SDT_UINT32, (void*)2051,	&_patches.ending_date,				  NULL},
+ 
+-	{"colored_news_date",		SDT_UINT32, (void*)2000,	&_patches.colored_news_date,		NULL},
++	{"colored_news_date",				SDT_UINT32, (void*)2000,	&_patches.colored_news_date,		NULL},
+ 
+-	{"extra_dynamite",			SDT_BOOL,		(void*)false, &_patches.extra_dynamite,				NULL},
++	{"extra_dynamite",					SDT_BOOL,	(void*)false,	&_patches.extra_dynamite,				NULL},
+ 
+-	{"never_expire_vehicles",SDT_BOOL,	(void*)false, &_patches.never_expire_vehicles,NULL},
+-	{"extend_vehicle_life",	SDT_UINT8,	(void*)0,			&_patches.extend_vehicle_life,	NULL},
++	{"never_expire_vehicles",			SDT_BOOL,	(void*)false,	&_patches.never_expire_vehicles,NULL},
++	{"extend_vehicle_life",				SDT_UINT8,	(void*)0,		&_patches.extend_vehicle_life,	NULL},
+ 
+-	{"auto_euro",						SDT_BOOL,		(void*)true,	&_patches.auto_euro,						NULL},
++	{"auto_euro",						SDT_BOOL,	(void*)true,	&_patches.auto_euro,						NULL},
+ 
+-	{"serviceathelipad",		SDT_BOOL,		(void*)true,	&_patches.serviceathelipad,			NULL},
+-	{"smooth_economy",			SDT_BOOL,		(void*)true,	&_patches.smooth_economy,				NULL},
+-	{"allow_shares",				SDT_BOOL,		(void*)true,	&_patches.allow_shares,					NULL},
+-	{"dist_local_authority",SDT_UINT8,	(void*)20,		&_patches.dist_local_authority, NULL},
++	{"serviceathelipad",				SDT_BOOL,	(void*)true,	&_patches.serviceathelipad,			NULL},
++	{"smooth_economy",					SDT_BOOL,	(void*)true,	&_patches.smooth_economy,				NULL},
++	{"allow_shares",					SDT_BOOL,	(void*)true,	&_patches.allow_shares,					NULL},
++	{"dist_local_authority",			SDT_UINT8,	(void*)20,		&_patches.dist_local_authority, NULL},
+ 
+-	{"wait_oneway_signal",	SDT_UINT8,	(void*)15,		&_patches.wait_oneway_signal,		NULL},
+-	{"wait_twoway_signal",	SDT_UINT8,	(void*)41,		&_patches.wait_twoway_signal,		NULL},
++	{"wait_oneway_signal",				SDT_UINT8,	(void*)15,		&_patches.wait_oneway_signal,		NULL},
++	{"wait_twoway_signal",				SDT_UINT8,	(void*)41,		&_patches.wait_twoway_signal,		NULL},
+ 
+-	{"ainew_active",				SDT_BOOL,		(void*)false, &_patches.ainew_active,					NULL},
++	{"ainew_active",					SDT_BOOL,	(void*)false,	&_patches.ainew_active,					NULL},
+ 
+-	{"map_x", SDT_UINT32, (void*)8, &_patches.map_x, NULL},
+-	{"map_y", SDT_UINT32, (void*)8, &_patches.map_y, NULL},
++	{"map_x",							SDT_UINT32, (void*)8,		&_patches.map_x, NULL},
++	{"map_y",							SDT_UINT32, (void*)8,		&_patches.map_y, NULL},
+ 
+ 	/* New Path Finding */
+-	{"new_pathfinding_all",	SDT_BOOL,		(void*)false, &_patches.new_pathfinding_all,	NULL},
++	{"new_pathfinding_all",				SDT_BOOL,	(void*)false,	&_patches.new_pathfinding_all,	NULL},
+ 
+ 	/* The maximum number of nodes to search */
+-	{"npf_max_search_nodes",   SDT_UINT32, (void*)10000,  &_patches.npf_max_search_nodes,		NULL},
++	{"npf_max_search_nodes",			SDT_UINT32, (void*)10000,	&_patches.npf_max_search_nodes,		NULL},
+ 
+ 	/* When a red signal is encountered, a small detour can be made around
+ 	* it. This specifically occurs when a track is doubled, in which case
+@@ -959,15 +961,15 @@
+ 	* penalty will further prevent this.
+ 	* We give presignal exits (and combo's) a different (larger) penalty, because we really
+ 	* don't want trains waiting in front of a presignal exit. */
+-	{"npf_rail_firstred_penalty",   SDT_UINT32, (void*)(10 * NPF_TILE_LENGTH),  &_patches.npf_rail_firstred_penalty,    NULL},
+-	{"npf_rail_firstred_exit_penalty", SDT_UINT32, (void*)(100 * NPF_TILE_LENGTH), &_patches.npf_rail_firstred_exit_penalty, NULL},
++	{"npf_rail_firstred_penalty",		SDT_UINT32, (void*)(10 * NPF_TILE_LENGTH),  &_patches.npf_rail_firstred_penalty,    NULL},
++	{"npf_rail_firstred_exit_penalty",	SDT_UINT32, (void*)(100 * NPF_TILE_LENGTH), &_patches.npf_rail_firstred_exit_penalty, NULL},
+ 	/* This penalty is for when the last signal before the target is red.
+ 	 * This is useful for train stations, where there are multiple
+ 	 * platforms to choose from, which lie in different signal blocks.
+ 	 * Every target in a occupied signal block (ie an occupied platform)
+ 	 * will get this penalty.
+ 	 */
+-	{"npf_rail_lastred_penalty",    SDT_UINT32, (void*)(10 * NPF_TILE_LENGTH),  &_patches.npf_rail_lastred_penalty,		NULL},
++	{"npf_rail_lastred_penalty",		SDT_UINT32, (void*)(10 * NPF_TILE_LENGTH),  &_patches.npf_rail_lastred_penalty,		NULL},
+ 	/* When a train plans a route over a station tile, this penalty is
+ 	* applied. We want that trains plan a route around a typical, 4x5
+ 	* station, which means two tiles to the right, and two tiles back to
+@@ -975,25 +977,25 @@
+ 	* a penalty of 1 tile for every station tile passed, the route will
+ 	* be around it.
+ 	*/
+-	{"npf_rail_station_penalty",    SDT_UINT32, (void*)(1 * NPF_TILE_LENGTH),   &_patches.npf_rail_station_penalty,     NULL},
+-	{"npf_rail_slope_penalty",      SDT_UINT32, (void*)(1 * NPF_TILE_LENGTH),   &_patches.npf_rail_slope_penalty,       NULL},
++	{"npf_rail_station_penalty",		SDT_UINT32, (void*)(1 * NPF_TILE_LENGTH),   &_patches.npf_rail_station_penalty,     NULL},
++	{"npf_rail_slope_penalty",			SDT_UINT32, (void*)(1 * NPF_TILE_LENGTH),   &_patches.npf_rail_slope_penalty,       NULL},
+ 	/* This penalty is applied when a train makes a turn. Its value of 1 makes
+ 	 * sure that it has a minimal impact on the pathfinding, only when two
+ 	 * paths have equal length it will make a difference */
+-	{"npf_rail_curve_penalty",      SDT_UINT32, (void*)(1),                     &_patches.npf_rail_curve_penalty,       NULL},
++	{"npf_rail_curve_penalty",			SDT_UINT32, (void*)(1),                     &_patches.npf_rail_curve_penalty,       NULL},
+ 	/* Ths penalty is applied when a vehicle reverses inside a depot (doesn't
+ 	 * apply to ships, as they can just come out the other end). XXX: Is this a
+ 	 * good value? */
+-	{"npf_rail_depot_reverse_penalty", SDT_UINT32, (void*)(NPF_TILE_LENGTH * 50), &_patches.npf_rail_depot_reverse_penalty, NULL},
+-	{"npf_buoy_penalty",            SDT_UINT32, (void*)(2 * NPF_TILE_LENGTH),   &_patches.npf_buoy_penalty,             NULL},
++	{"npf_rail_depot_reverse_penalty",	SDT_UINT32, (void*)(NPF_TILE_LENGTH * 50),	&_patches.npf_rail_depot_reverse_penalty, NULL},
++	{"npf_buoy_penalty",				SDT_UINT32, (void*)(2 * NPF_TILE_LENGTH),	&_patches.npf_buoy_penalty,             NULL},
+ 	/* This penalty is applied when a ship makes a turn. It is bigger than the
+ 	 * rail curve penalty, since ships (realisticly) have more trouble with
+ 	 * making turns */
+-	{"npf_water_curve_penalty",     SDT_UINT32, (void*)(NPF_TILE_LENGTH / 4),   &_patches.npf_water_curve_penalty,      NULL},
++	{"npf_water_curve_penalty",			SDT_UINT32, (void*)(NPF_TILE_LENGTH / 4),   &_patches.npf_water_curve_penalty,      NULL},
+ 	/* This is the penalty for road, same as for rail. */
+-	{"npf_road_curve_penalty",      SDT_UINT32, (void*)(1),                     &_patches.npf_road_curve_penalty,       NULL},
++	{"npf_road_curve_penalty",			SDT_UINT32, (void*)(1),                     &_patches.npf_road_curve_penalty,       NULL},
+ 	/* This is the penalty for level crossings, for both road and rail vehicles */
+- 	{"npf_crossing_penalty",        SDT_UINT32, (void*)(3 * NPF_TILE_LENGTH),   &_patches.npf_crossing_penalty,         NULL},
++ 	{"npf_crossing_penalty",			SDT_UINT32,	(void*)(3 * NPF_TILE_LENGTH),   &_patches.npf_crossing_penalty,         NULL},
+ 
+ 	{NULL,                          0,          NULL,                           NULL,                                   NULL}
+ };
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 3031)
++++ settings_gui.c	(working copy)
+@@ -682,15 +682,15 @@
+ };
+ 
+ static const PatchEntry _patches_construction[] = {
+-	{PE_BOOL,		0, STR_CONFIG_PATCHES_BUILDONSLOPES,		"build_on_slopes",	&_patches.build_on_slopes,					0,  0,  0, NULL},
+-	{PE_BOOL,		0, STR_CONFIG_PATCHES_EXTRADYNAMITE,		"extra_dynamite",		&_patches.extra_dynamite,						0,  0,  0, NULL},
+-	{PE_BOOL,		0, STR_CONFIG_PATCHES_LONGBRIDGES,			"long_bridges",			&_patches.longbridges,							0,  0,  0, NULL},
+-	{PE_BOOL,		0, STR_CONFIG_PATCHES_SIGNALSIDE,				"signal_side",			&_patches.signal_side,							0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_BUILDONSLOPES,					"build_on_slopes",					&_patches.build_on_slopes,				0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_EXTRADYNAMITE,					"extra_dynamite",					&_patches.extra_dynamite,				0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_LONGBRIDGES,						"long_bridges",						&_patches.longbridges,					0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_SIGNALSIDE,						"signal_side",						&_patches.signal_side,					0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_MUNICIPAL_AIRPORTS,				"allow_municipal_airports",			&_patches.allow_municipal_airports,		0,	0,	0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_SMALL_AIRPORTS,					"always_small_airport",				&_patches.always_small_airport,			0,  0,  0, NULL},
++	{PE_UINT8,	PF_PLAYERBASED, STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY,	"drag_signals_density",				&_patches.drag_signals_density,			1, 20,  1, NULL},
++	{PE_BOOL,		0, STR_CONFIG_AUTO_PBS_PLACEMENT,						"auto_pbs_placement",				&_patches.auto_pbs_placement,			1, 20,  1, NULL},
+ 
+-	{PE_BOOL,		0, STR_CONFIG_PATCHES_SMALL_AIRPORTS,		"always_small_airport", &_patches.always_small_airport,			0,  0,  0, NULL},
+-	{PE_UINT8,	PF_PLAYERBASED, STR_CONFIG_PATCHES_DRAG_SIGNALS_DENSITY, "drag_signals_density", &_patches.drag_signals_density, 1, 20,  1, NULL},
+-	{PE_BOOL,		0, STR_CONFIG_AUTO_PBS_PLACEMENT, "auto_pbs_placement", &_patches.auto_pbs_placement, 1, 20,  1, NULL},
+-
+ };
+ 
+ static const PatchEntry _patches_vehicles[] = {
+Index: town_cmd.c
+===================================================================
+--- town_cmd.c	(revision 3031)
++++ town_cmd.c	(working copy)
+@@ -22,6 +22,7 @@
+ #include "gui.h"
+ #include "network.h"
+ #include "variables.h"
++#include "m_airport.h"
+ 
+ enum {
+ 	/* Max towns: 64000 (8 * 8000) */
+@@ -1940,6 +1941,7 @@
+ 		UpdateTownGrowRate(t);
+ 		UpdateTownAmounts(t);
+ 		UpdateTownUnwanted(t);
++		MunicipalAirport(t);
+ 	}
+ }
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 3031)
++++ variables.h	(working copy)
+@@ -114,6 +114,8 @@
+ 	bool bribe;							// enable bribing the local authority
+ 	bool nonuniform_stations;// allow nonuniform train stations
+ 	bool always_small_airport; // always allow small airports
++	bool allow_municipal_airports; // allow town to build airports
++	uint16 municipal_airports_tax; // tax rate of municipal airports
+ 	bool realistic_acceleration; // realistic acceleration for trains
+ 	bool wagon_speed_limits; // enable wagon speed limits
+ 	bool forbid_90_deg; // forbid trains to make 90 deg turns

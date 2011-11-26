@@ -1,0 +1,3038 @@
+Index: spritecache.h
+===================================================================
+--- spritecache.h	(revision 2949)
++++ spritecache.h	(working copy)
+@@ -3,15 +3,28 @@
+ #ifndef SPRITECACHE_H
+ #define SPRITECACHE_H
+ 
++#define MAXSPRITECOLORMAPS 96 //32 times 3 (for zoomlevels)
++typedef struct Sprite32 {
++	byte data32count;
++	int16 data32colormap[MAXSPRITECOLORMAPS];
++	byte data32zoomlevel[MAXSPRITECOLORMAPS];
++	Color32* data32[MAXSPRITECOLORMAPS];
++} Sprite32;
++
+ typedef struct Sprite {
+ 	byte info;
+ 	byte height;
+ 	uint16 width;
+ 	int16 x_offs;
+ 	int16 y_offs;
+-	byte data[VARARRAY_SIZE];
++
++	Sprite32* sprite32;
++
++	colidx data[VARARRAY_SIZE];
+ } Sprite;
+ 
++extern byte GetMakeSpriteData32No( Sprite* _s, byte zoomlevel, int16 colormap );
++
+ const void *GetRawSprite(SpriteID sprite);
+ 
+ static inline const Sprite *GetSprite(SpriteID sprite)
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2949)
++++ functions.h	(working copy)
+@@ -29,6 +29,14 @@
+ 
+ bool IsValidTile(TileIndex tile);
+ 
++static inline Point InvRemapCoords( int x, int y )
++{
++	Point pt;
++	pt.x = (y+(x>>1))>>1;
++	pt.y = (y-(x>>1))>>1;
++	return pt;
++}
++
+ static inline Point RemapCoords(int x, int y, int z)
+ {
+ #if !defined(NEW_ROTATION)
+@@ -257,6 +265,7 @@
+ 	SLD_SAVE_GAME = 2,
+ 	SLD_SAVE_SCENARIO = 3,
+ 	SLD_NEW_GAME = 4,
++	SLD_LOAD_OVERLAY = 5,
+ };
+ void ShowSaveLoadDialog(int mode);
+ 
+Index: screenshot.c
+===================================================================
+--- screenshot.c	(revision 2949)
++++ screenshot.c	(working copy)
+@@ -166,17 +166,20 @@
+ 
+ static bool MakePNGImage(const char *name, ScreenshotCallback *callb, void *userdata, uint w, uint h, int pixelformat, const Colour *palette)
+ {
++#ifndef BPP32
+ 	png_color rq[256];
++#endif
+ 	Pixel *buff;
+ 	FILE *f;
+ 	uint i, y, n;
+ 	uint maxlines;
+ 	png_structp png_ptr;
+ 	png_infop info_ptr;
++	uint memw = w*sizeof(Pixel);
+ 
+-	// only implemented for 8bit images so far.
+-	if (pixelformat != 8)
+-		return false;
++//	// only implemented for 8bit images so far.
++//	if (pixelformat != 8)
++//		return false;
+ 
+ 	f = fopen(name, "wb");
+ 	if (f == NULL) return false;
+@@ -205,9 +208,15 @@
+ 
+ 	png_set_filter(png_ptr, 0, PNG_FILTER_NONE);
+ 
++#ifdef BPP32
++	png_set_IHDR(png_ptr, info_ptr, w, h, pixelformat, PNG_COLOR_TYPE_RGB,
++		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
++#else
+ 	png_set_IHDR(png_ptr, info_ptr, w, h, pixelformat, PNG_COLOR_TYPE_PALETTE,
+ 		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
++#endif
+ 
++#ifndef BPP32
+ 	// convert the palette to the .PNG format.
+ 	for (i = 0; i != 256; i++) {
+ 		rq[i].red   = palette[i].r;
+@@ -216,20 +225,21 @@
+ 	}
+ 
+ 	png_set_PLTE(png_ptr, info_ptr, rq, 256);
++#endif
+ 	png_write_info(png_ptr, info_ptr);
+ 	png_set_flush(png_ptr, 512);
+ 
+ 	// use by default 64k temp memory
+-	maxlines = clamp(65536 / w, 16, 128);
++	maxlines = clamp(65536 / memw, 16, 128);
+ 
+ 	// now generate the bitmap bits
+-	buff = malloc(w * maxlines); // by default generate 128 lines at a time.
+-	if (buff == NULL) {
++	buff = malloc(memw * maxlines); // by default generate 128 lines at a time.
++	if (buff == NULL) { // boekabart: seriously? we don't trust malloc anymore?
+ 		png_destroy_write_struct(&png_ptr, &info_ptr);
+ 		fclose(f);
+ 		return false;
+ 	}
+-	memset(buff, 0, w * maxlines); // zero the buffer to have the padding bytes set to 0
++	memset(buff, 0, memw * maxlines); // zero the buffer to have the padding bytes set to 0
+ 
+ 	y = 0;
+ 	do {
+@@ -242,7 +252,7 @@
+ 
+ 		// write them to png
+ 		for (i = 0; i != n; i++)
+-			png_write_row(png_ptr, buff + i * w);
++			png_write_row(png_ptr, (png_bytep)(buff + i * w));
+ 	} while (y != h);
+ 
+ 	png_write_end(png_ptr, info_ptr);
+@@ -437,7 +447,7 @@
+ static void CurrentScreenCallback(void *userdata, Pixel *buf, uint y, uint pitch, uint n)
+ {
+ 	for (; n > 0; --n) {
+-		memcpy(buf, _screen.dst_ptr + y * _screen.pitch, _screen.width);
++		memcpy(buf, _screen.dst_ptr + y * _screen.pitch, _screen.width*sizeof(Pixel));
+ 		++y;
+ 		buf += pitch;
+ 	}
+@@ -529,5 +539,5 @@
+ 	vp.virtual_top = top;
+ 
+ 	sf = _screenshot_formats + _cur_screenshot_format;
+-	return sf->proc(MakeScreenshotName(sf->extension), LargeWorldCallback, &vp, vp.width, vp.height, 8, _cur_palette);
++	return sf->proc(MakeScreenshotName(sf->extension), LargeWorldCallback, &vp, vp.width, vp.height, sizeof(Pixel)<<3, _cur_palette);
+ }
+Index: video/sdl_v.c
+===================================================================
+--- video/sdl_v.c	(revision 2949)
++++ video/sdl_v.c	(working copy)
+@@ -36,6 +36,7 @@
+ 
+ static void UpdatePalette(uint start, uint count)
+ {
++#ifndef BPP32
+ 	SDL_Color pal[256];
+ 	uint i;
+ 
+@@ -47,19 +48,24 @@
+ 	}
+ 
+ 	SDL_CALL SDL_SetColors(_sdl_screen, pal, start, count);
++#endif
+ }
+ 
+ static void InitPalette(void)
+ {
++#ifndef BPP32
+ 	UpdatePalette(0, 256);
++#endif
+ }
+ 
+ static void CheckPaletteAnim(void)
+ {
++#ifndef BPP32
+ 	if (_pal_last_dirty != -1) {
+ 		UpdatePalette(_pal_first_dirty, _pal_last_dirty - _pal_first_dirty + 1);
+ 		_pal_last_dirty = -1;
+ 	}
++#endif
+ }
+ 
+ static void DrawSurfaceToScreen(void)
+@@ -171,13 +177,18 @@
+ 	DEBUG(driver, 1) ("sdl: using mode %dx%d", w, h);
+ 
+ 	// DO NOT CHANGE TO HWSURFACE, IT DOES NOT WORK
++#ifdef BPP32
++	// boekabart: On win32, HWSURFACE works fine. Change if you want.
++	newscreen = SDL_CALL SDL_SetVideoMode(w, h, 32, SDL_SWSURFACE | (_fullscreen ? SDL_FULLSCREEN : SDL_RESIZABLE));
++#else
+ 	newscreen = SDL_CALL SDL_SetVideoMode(w, h, 8, SDL_SWSURFACE | SDL_HWPALETTE | (_fullscreen ? SDL_FULLSCREEN : SDL_RESIZABLE));
++#endif
+ 	if (newscreen == NULL)
+ 		return false;
+ 
+ 	_screen.width = newscreen->w;
+ 	_screen.height = newscreen->h;
+-	_screen.pitch = newscreen->pitch;
++	_screen.pitch = newscreen->pitch / sizeof(Pixel); // Ottd pitch is in pixels, sdl pitch is in bytes
+ 
+ 	_sdl_screen = newscreen;
+ 	InitPalette();
+Index: video/win32_v.c
+===================================================================
+--- video/win32_v.c	(revision 2949)
++++ video/win32_v.c	(working copy)
+@@ -550,7 +550,7 @@
+ 
+ 	if (_wnd.double_size) {
+ 		w = ALIGN(w, 4);
+-		_wnd.alloced_bits = _wnd.buffer_bits = malloc(w * h);
++		_wnd.alloced_bits = _wnd.buffer_bits = malloc(w * h * sizeof(Pixel));
+ 		w *= 2;
+ 		h *= 2;
+ 	}
+@@ -559,7 +559,7 @@
+ 	bi->bmiHeader.biHeight = -(_wnd.height = h);
+ 
+ 	bi->bmiHeader.biPlanes = 1;
+-	bi->bmiHeader.biBitCount = 8;
++	bi->bmiHeader.biBitCount = sizeof(Pixel)<<3;
+ 	bi->bmiHeader.biCompression = BI_RGB;
+ 
+ 	if (_wnd.dib_sect)
+@@ -597,7 +597,7 @@
+ 	DEVMODE dm;
+ 
+ 	while (EnumDisplaySettings(NULL, i++, &dm) != 0) {
+-		if (dm.dmBitsPerPel == 8 && IS_INT_INSIDE(dm.dmPelsWidth, 640, MAX_SCREEN_WIDTH + 1) &&
++		if (dm.dmBitsPerPel == (sizeof(Pixel)<<3) && IS_INT_INSIDE(dm.dmPelsWidth, 640, MAX_SCREEN_WIDTH + 1) &&
+ 				IS_INT_INSIDE(dm.dmPelsHeight, 480, MAX_SCREEN_HEIGHT + 1)){
+ 			int j;
+ 			for (j = 0; j < n; j++) {
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2949)
++++ misc_gui.c	(working copy)
+@@ -1122,6 +1122,19 @@
+ {   WIDGETS_END},
+ };
+ 
++static const Widget _load_dialog_3_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,								STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   256,     0,    13, STR_0296c_LOAD_OVERLAY,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   127,    14,    25, STR_SORT_BY_NAME,				STR_SORT_ORDER_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   128,   256,    14,    25, STR_SORT_BY_DATE,				STR_SORT_ORDER_TIP},
++{     WWT_IMGBTN,  RESIZE_RIGHT,    14,     0,   256,    26,    47, 0x0,										STR_NULL},
++{     WWT_IMGBTN,     RESIZE_RB,    14,     0,   256,    48,   293, 0x0,										STR_NULL},
++{          WWT_6,     RESIZE_RB,    14,     2,   243,    50,   291, 0x0,										STR_400A_LIST_OF_DRIVES_DIRECTORIES},
++{  WWT_SCROLLBAR,    RESIZE_LRB,    14,   245,   256,    48,   281, 0x0,										STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   245,   256,   282,   293, 0x0,										STR_RESIZE_BUTTON},
++{   WIDGETS_END},
++};
++
+ static const Widget _save_dialog_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,						STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   256,     0,    13, STR_4000_SAVE_GAME,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -1166,6 +1179,8 @@
+ 	FiosFreeSavegameList();
+ 	if (_saveload_mode == SLD_NEW_GAME || _saveload_mode == SLD_LOAD_SCENARIO || _saveload_mode == SLD_SAVE_SCENARIO) {
+ 		_fios_list = FiosGetScenarioList(&_fios_num, _saveload_mode);
++	} else if (_saveload_mode == SLD_LOAD_OVERLAY ) {
++		_fios_list = FiosGetImageList(&_fios_num, _saveload_mode);
+ 	} else
+ 		_fios_list = FiosGetSavegameList(&_fios_num, _saveload_mode);
+ }
+@@ -1297,6 +1312,9 @@
+ 					ttd_strlcpy(_file_to_saveload.title, file->title, sizeof(_file_to_saveload.title));
+ 
+ 					DeleteWindow(w);
++				} else if (_saveload_mode == SLD_LOAD_OVERLAY ) {
++					LoadMapOverlay( name );
++					DeleteWindow(w);
+ 				} else {
+ 					// SLD_SAVE_GAME, SLD_SAVE_SCENARIO copy clicked name to editbox
+ 					ttd_strlcpy(WP(w, querystr_d).text.buf, file->name, WP(w, querystr_d).text.maxlength);
+@@ -1406,11 +1424,21 @@
+ 	SaveLoadDlgWndProc,
+ };
+ 
++static const WindowDesc _load_dialog_overlay_desc = {
++	WDP_CENTER, WDP_CENTER, 257, 294,
++	WC_SAVELOAD,0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
++	_load_dialog_3_widgets,
++	SaveLoadDlgWndProc,
++};
++
+ static const WindowDesc * const _saveload_dialogs[] = {
+ 	&_load_dialog_desc,
+ 	&_load_dialog_scen_desc,
+ 	&_save_dialog_desc,
+ 	&_save_dialog_scen_desc,
++	NULL,
++	&_load_dialog_overlay_desc
+ };
+ 
+ void ShowSaveLoadDialog(int mode)
+Index: lang/romanian.txt
+===================================================================
+--- lang/romanian.txt	(revision 2949)
++++ lang/romanian.txt	(working copy)
+@@ -946,6 +946,7 @@
+ STR_CONFIG_PATCHES_OFF                                          :inactiv
+ STR_CONFIG_PATCHES_ON                                           :activ
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Afiseazã viteza vehiculelor in bara de jos: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Deseneazã ferestre cu gradient: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Permite construirea pe coastã si in pantã: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Permite arii de cuprindere mai realistice: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Permite demolarea unui nr. mai mare constructii: {ORANGE}{STRING}
+Index: lang/french.txt
+===================================================================
+--- lang/french.txt	(revision 2949)
++++ lang/french.txt	(working copy)
+@@ -946,6 +946,7 @@
+ STR_CONFIG_PATCHES_OFF                                          :Inactif
+ STR_CONFIG_PATCHES_ON                                           :Actif
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Afficher vitesse du véhicule dans la barre d'état: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Dessinez les fenêtres avec un gradient: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Construction côtière et sur pentes: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Autoriser des zones de désserte plus réalistes : {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Permettre le retrait de plus d'éléments possédés par une ville: {ORANGE}{STRING}
+Index: lang/spanish.txt
+===================================================================
+--- lang/spanish.txt	(revision 2949)
++++ lang/spanish.txt	(working copy)
+@@ -668,6 +668,8 @@
+ STR_0294_QUIT_EDITOR                                            :Salir del editor
+ STR_0295                                                        :
+ STR_0296_QUIT                                                   :Salir
++STR_0296b_LOAD_OVERLAY                                          :*Load Overlay
++STR_0296c_LOAD_OVERLAY                                          :{WHITE}*Load Overlay
+ STR_0297_SAVE_SCENARIO_LOAD_SCENARIO                            :{BLACK}Guardar escenario, cargar escenario, cargar escenario, abandonar editor, salir
+ STR_0298_LOAD_SCENARIO                                          :{WHITE}Cargar Escenario
+ STR_0299_SAVE_SCENARIO                                          :{WHITE}Guardar Escenario
+Index: lang/dutch.txt
+===================================================================
+--- lang/dutch.txt	(revision 2949)
++++ lang/dutch.txt	(working copy)
+@@ -946,6 +946,9 @@
+ STR_CONFIG_PATCHES_OFF                                          :Uit
+ STR_CONFIG_PATCHES_ON                                           :Aan
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Geef snelheid in statusbalk weer: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Teken windows met kleuroverloop: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SUPERZOOM									:{LTBLUE}Betere zoom-kwaliteit: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SEASONCOLORS									:{LTBLUE}Seizoenskleuren: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Bouwen op hellingen toestaan: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Gebruik realistisch handelsgebied: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Sta verwijderen van meer stedelijke wegen, bruggen, tunnels, enz. toe: {ORANGE}{STRING}
+Index: lang/german.txt
+===================================================================
+--- lang/german.txt	(revision 2949)
++++ lang/german.txt	(working copy)
+@@ -947,6 +947,7 @@
+ STR_CONFIG_PATCHES_OFF                                          :Aus
+ STR_CONFIG_PATCHES_ON                                           :An
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Zeige Fahrzeuggeschwindigkeit in der Statusleiste: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Die Fenster mit einer Steigung zeichnen: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Erlaube das Bauen an Hängen und Küsten: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Aktiviere realistische Einzugsgebiete: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Erlaube die Entfernung von Industrien, weiteren Straßen usw.: {ORANGE}{STRING}
+Index: lang/american.txt
+===================================================================
+--- lang/american.txt	(revision 2949)
++++ lang/american.txt	(working copy)
+@@ -946,6 +946,9 @@
+ STR_CONFIG_PATCHES_OFF                                          :Off
+ STR_CONFIG_PATCHES_ON                                           :On
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Show vehicle speed in status bar: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Draw windows with a gradient: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SUPERZOOM									:{LTBLUE}Use filtered zoom: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SEASONCOLORS									:{LTBLUE}Season coloring: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Allow building on slopes and coasts: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Allow more realistically sized catchment areas: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Allow removal of more town-owned roads, bridges, etc: {ORANGE}{STRING}
+Index: lang/italian.txt
+===================================================================
+--- lang/italian.txt	(revision 2949)
++++ lang/italian.txt	(working copy)
+@@ -946,6 +946,7 @@
+ STR_CONFIG_PATCHES_OFF                                          :No
+ STR_CONFIG_PATCHES_ON                                           :Si
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Mostra velocità veicoli sulla barra di stato: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Renda le finestre con una pendenza: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Consenti la costruzione sulle coste/pendii: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Permetti aree di carico/scarico più realistiche: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Consenti la rimozione industrie, strade speciali, ecc.: {ORANGE}{STRING}
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2949)
++++ lang/english.txt	(working copy)
+@@ -668,6 +668,8 @@
+ STR_0294_QUIT_EDITOR                                            :Quit editor
+ STR_0295                                                        :
+ STR_0296_QUIT                                                   :Quit
++STR_0296b_LOAD_OVERLAY                                          :Load Overlay
++STR_0296c_LOAD_OVERLAY                                          :{WHITE}Load Overlay
+ STR_0297_SAVE_SCENARIO_LOAD_SCENARIO                            :{BLACK}Save scenario, load scenario, abandon scenario editor, quit
+ STR_0298_LOAD_SCENARIO                                          :{WHITE}Load Scenario
+ STR_0299_SAVE_SCENARIO                                          :{WHITE}Save Scenario
+@@ -946,6 +948,9 @@
+ STR_CONFIG_PATCHES_OFF                                          :Off
+ STR_CONFIG_PATCHES_ON                                           :On
+ STR_CONFIG_PATCHES_VEHICLESPEED                                 :{LTBLUE}Show vehicle speed in status bar: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_WINDOWGRADIENT								:{LTBLUE}Draw all windows with a gradient: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_SUPERZOOM									:{LTBLUE}Use filtered zoom: {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_SEASONCOLORS									:{LTBLUE}Season coloring: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_BUILDONSLOPES                                :{LTBLUE}Allow building on slopes and coasts: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_CATCHMENT                                    :{LTBLUE}Allow more realistically sized catchment areas: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_EXTRADYNAMITE                                :{LTBLUE}Allow removal of more town-owned roads, bridges, etc: {ORANGE}{STRING1}
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2949)
++++ variables.h	(working copy)
+@@ -86,6 +86,9 @@
+ typedef struct Patches {
+ 	bool modified_catchment;	//different-size catchment areas
+ 	bool vehicle_speed;			// show vehicle speed
++	bool window_gradients;		// draw windows with a gradient
++	bool super_zoom;			// zoom with filtering
++	bool season_colors;			// colorize the seasons
+ 	bool build_on_slopes;		// allow building on slopes
+ 	bool auto_pbs_placement;// automatic pbs signal placement
+ 	bool mammoth_trains;		// allow very long trains
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 2949)
++++ openttd.c	(working copy)
+@@ -723,6 +723,9 @@
+ 
+ void SwitchMode(int new_mode)
+ {
++	if (_game_mode==SM_EDITOR)
++		LoadMapOverlay( NULL );
++
+ #ifdef ENABLE_NETWORK
+ 	// If we are saving something, the network stays in his current state
+ 	if (new_mode != SM_SAVE) {
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2949)
++++ openttd.h	(working copy)
+@@ -10,6 +10,12 @@
+ // use this on non static functions
+ #define PUBLIC
+ 
++#define COLORIZE  // Enable colorization support
++#define BPP32     // Enable 32 bits mode
++
++typedef byte colidx;
++typedef unsigned long Color32;
++
+ typedef struct Rect {
+ 	int left,top,right,bottom;
+ } Rect;
+Index: gfx.c
+===================================================================
+--- gfx.c	(revision 2949)
++++ gfx.c	(working copy)
+@@ -8,6 +8,7 @@
+ #include "strings.h"
+ #include "string.h"
+ #include "gfx.h"
++#include "gfx32.h"
+ #include "table/palettes.h"
+ #include "table/sprites.h"
+ #include "hal.h"
+@@ -26,16 +27,134 @@
+ #define DIRTY_BYTES_PER_LINE (MAX_SCREEN_WIDTH / 64)
+ static byte _dirty_blocks[DIRTY_BYTES_PER_LINE * MAX_SCREEN_HEIGHT / 8];
+ 
++/* Disable Sprite blending part. Used to disable smooth blending in superzoom *
++ * mode of landscape tiles. This would cause strange effects on the edges     */
+ 
++static int _disable_sprite_blending = 0;
+ 
++void DisableSpriteBlending()
++{
++	_disable_sprite_blending++;
++}
++
++void EnableSpriteBlending()
++{
++	_disable_sprite_blending--;
++	assert(_disable_sprite_blending>=0);
++}
++
++/* Color Multiply Patch. Multiplies all blitted colors */
++
++int _color_multiplier_r=0x100, _color_multiplier_g=0x100, _color_multiplier_b=0x100;
++bool _color_multiplier_white = true;
++bool _multiply_colors = false;
++
++void SetColorMultiplier( int r, int g, int b )
++{
++	if ( _color_multiplier_r == r &&
++		 _color_multiplier_g == g &&
++		 _color_multiplier_b == b )
++		return;
++
++	_color_multiplier_white = (r==0x100 && g==0x100 && b==0x100);
++	
++	_color_multiplier_r = r;
++	_color_multiplier_g = g;
++	_color_multiplier_b = b;
++
++	MarkWholeScreenDirty();
++}
++
++void EnableColorMultiplier()
++{
++	_multiply_colors = true;
++}
++
++void DisableColorMultiplier()
++{
++	_multiply_colors = false;
++}
++
++/* Color Multiply Patch. Multiplies all blitted colors */
++
++inline Pixel _colorizep( Pixel p )
++{
++	int r, g, b;
++	assert( !(p&0xff000000) );
++	if (!_multiply_colors || _color_multiplier_white) return p;
++	r = _pred(p);   r = (r * _color_multiplier_r)>>8; if (r>0xff) r = 0xff;
++	g = _pgreen(p); g = (g * _color_multiplier_g)>>8; if (g>0xff) g = 0xff;
++	b = _pblue(p);  b = (b * _color_multiplier_b)>>8; if (b>0xff) b = 0xff;
++	p = rgb2p( r, g, b);
++	assert( !(p&0xff000000) );
++	return p;//rgb2p( r, g, b );
++}
++
++inline Color32 _colorizep2c( Pixel p )
++{
++	Color32 c;
++	int r, g, b;
++	assert( !(p&0xff000000) );
++	if (!_multiply_colors || _color_multiplier_white) return p2c(p);
++	r = _pred(p);   r = (r * _color_multiplier_r)>>8; if (r>0xff) r = 0xff;
++	g = _pgreen(p); g = (g * _color_multiplier_g)>>8; if (g>0xff) g = 0xff;
++	b = _pblue(p);  b = (b * _color_multiplier_b)>>8; if (b>0xff) b = 0xff;
++	c = rgb2c( r, g, b);
++	assert( !(c&0xff000000) );
++	return c;//rgb2p( r, g, b );
++}
++
++inline Color32 _colorizec( Color32 c )
++{
++	int r, g, b;
++	if (!_multiply_colors || _color_multiplier_white) return c;
++	r = _cred(c);   r = (r * _color_multiplier_r)>>8; if (r>0xff) r = 0xff;
++	g = _cgreen(c); g = (g * _color_multiplier_g)>>8; if (g>0xff) g = 0xff;
++	b = _cblue(c);  b = (b * _color_multiplier_b)>>8; if (b>0xff) b = 0xff;
++	c = rgb2c( r, g, b);
++	return c;//rgb2c( r, g, b );
++}
++
++/* Pixel blending functions. Slowish in 8bpp mode because uses the color2index lookup then *
++static Pixel blend2( Pixel p0, Pixel p1 )
++{
++	return rgb2p(
++		(_pred(p0)+_pred(p1))>>1,
++		(_pgreen(p0)+_pgreen(p1))>>1,
++		(_pblue(p0)+_pblue(p1))>>1
++		);
++}
++
++static Pixel blend4( Pixel p0, Pixel p1, Pixel p2, Pixel p3 )
++{
++	return rgb2p(
++		(_pred(p0)+_pred(p1)+_pred(p2)+_pred(p3))>>2,
++		(_pgreen(p0)+_pgreen(p1)+_pgreen(p2)+_pgreen(p3))>>2,
++		(_pblue(p0)+_pblue(p1)+_pblue(p2)+_pblue(p3))>>2
++		);
++}
++
++static Pixel blend16(	Pixel p00, Pixel p01, Pixel p02, Pixel p03,
++						Pixel p10, Pixel p11, Pixel p12, Pixel p13,
++						Pixel p20, Pixel p21, Pixel p22, Pixel p23,
++						Pixel p30, Pixel p31, Pixel p32, Pixel p33 )
++{
++	return blend4( 
++		blend4( p00, p01, p02, p03 ),
++		blend4( p10, p11, p12, p13 ),
++		blend4( p20, p21, p22, p23 ),
++		blend4( p30, p31, p32, p33 )
++		);
++}
++*/
+ void memcpy_pitch(void *d, void *s, int w, int h, int spitch, int dpitch)
+ {
+-	byte *dp = (byte*)d;
+-	byte *sp = (byte*)s;
++	Pixel *dp = (Pixel*)d;
++	Pixel *sp = (Pixel*)s;
+ 
+ 	assert(h >= 0);
+ 	for (; h != 0; --h) {
+-		memcpy(dp, sp, w);
++		memcpy(dp, sp, w*sizeof(Pixel));
+ 		dp += dpitch;
+ 		sp += spitch;
+ 	}
+@@ -77,7 +196,7 @@
+ 		}
+ 
+ 		for (ht = height; ht > 0; --ht) {
+-			memcpy(dst, src, width);
++			memcpy(dst, src, width*sizeof(Pixel));
+ 			src -= p;
+ 			dst -= p;
+ 		}
+@@ -103,7 +222,7 @@
+ 		// the y-displacement may be 0 therefore we have to use memmove,
+ 		// because source and destination may overlap
+ 		for (ht = height; ht > 0; --ht) {
+-			memmove(dst, src, width);
++			memmove(dst, src, width*sizeof(Pixel));
+ 			src += p;
+ 			dst += p;
+ 		}
+@@ -112,7 +231,6 @@
+ 	_video_driver->make_dirty(left, top, width, height);
+ }
+ 
+-
+ void GfxFillRect(int left, int top, int right, int bottom, int color)
+ {
+ 	DrawPixelInfo *dpi = _cur_dpi;
+@@ -142,7 +260,7 @@
+ 	if (!(color & PALETTE_MODIFIER_GREYOUT)) {
+ 		if (!(color & USE_COLORTABLE)) {
+ 			do {
+-				memset(dst, color, right);
++				fill_line(dst, i2p(color), right);
+ 				dst += dpi->pitch;
+ 			} while (--bottom);
+ 		} else {
+@@ -151,7 +269,9 @@
+ 
+ 			do {
+ 				int i;
+-				for (i = 0; i != right; i++) dst[i] = ctab[dst[i]];
++				for (i = 0; i != right; i++)
++//					dst[i] = i2p(ctab[p2i(dst[i])]);
++					dst[i] = usecolortable( dst[i], ctab );
+ 				dst += dpi->pitch;
+ 			} while (--bottom);
+ 		}
+@@ -159,7 +279,8 @@
+ 		byte bo = (oleft - left + dpi->left + otop - top + dpi->top) & 1;
+ 		do {
+ 			int i;
+-			for (i = (bo ^= 1); i < right; i += 2) dst[i] = (byte)color;
++			for (i = (bo ^= 1); i < right; i += 2)
++				dst[i] = colorizep(i2p((byte)color));
+ 			dst += dpi->pitch;
+ 		} while (--bottom > 0);
+ 	}
+@@ -170,7 +291,7 @@
+ 	DrawPixelInfo *dpi = _cur_dpi;
+ 	if ((x-=dpi->left) < 0 || x>=dpi->width || (y-=dpi->top)<0 || y>=dpi->height)
+ 		return;
+-	dpi->dst_ptr[y * dpi->pitch + x] = color;
++	dpi->dst_ptr[y * dpi->pitch + x] = i2p(color);
+ }
+ 
+ void GfxDrawLine(int x, int y, int x2, int y2, int color)
+@@ -660,15 +781,20 @@
+ 	return DoDrawString(buffer, x, y, color);
+ }
+ 
++static int16 _active_colormap;
++
+ void DrawSprite(uint32 img, int x, int y)
+ {
+ 	if (img & PALETTE_MODIFIER_COLOR) {
+-		_color_remap_ptr = GetNonSprite(GB(img, PALETTE_SPRITE_START, PALETTE_SPRITE_WIDTH)) + 1;
++		_active_colormap = GB(img, PALETTE_SPRITE_START, PALETTE_SPRITE_WIDTH);
++		_color_remap_ptr = GetNonSprite(_active_colormap) + 1;
+ 		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 1);
+ 	} else if (img & PALETTE_MODIFIER_TRANSPARENT) {
++		_active_colormap = ~0; // means transparant, i guess
+ 		_color_remap_ptr = GetNonSprite(GB(img, PALETTE_SPRITE_START, PALETTE_SPRITE_WIDTH)) + 1;
+ 		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 2);
+ 	} else {
++		_active_colormap = 0;
+ 		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 0);
+ 	}
+ }
+@@ -684,6 +810,7 @@
+ 	int height_org;
+ 	int pitch;
+ 	byte info;
++	const Sprite *spriteobject;
+ } BlitterParams;
+ 
+ static void GfxBlitTileZoomIn(BlitterParams *bp)
+@@ -725,15 +852,16 @@
+ 
+ 				ctab = _color_remap_ptr;
+ 
+-				for (; num >= 4; num -=4) {
+-					dst[3] = ctab[src[3]];
+-					dst[2] = ctab[src[2]];
+-					dst[1] = ctab[src[1]];
+-					dst[0] = ctab[src[0]];
++				for (;num >= 4; num -=4) {
++					dst[3] = colorizep(i2p(ctab[src[3]]));
++					dst[2] = colorizep(i2p(ctab[src[2]]));
++					dst[1] = colorizep(i2p(ctab[src[1]]));
++					dst[0] = colorizep(i2p(ctab[src[0]]));
+ 					dst += 4;
+ 					src += 4;
+ 				}
+-				for (; num != 0; num--) *dst++ = ctab[*src++];
++				for (; num != 0; num--, src++)
++					*dst++ = colorizep(i2p(ctab[*src]));
+ 			} while (!(done & 0x80));
+ 
+ 			bp->dst += bp->pitch;
+@@ -765,7 +893,8 @@
+ 
+ 				ctab = _color_remap_ptr;
+ 				for (; num != 0; num--) {
+-					*dst = ctab[*dst];
++//					*dst = i2p(ctab[p2i(*dst)]);
++					*dst = usecolortable( *dst, ctab );
+ 					dst++;
+ 				}
+ 			} while (!(done & 0x80));
+@@ -798,7 +927,7 @@
+ 					num -= skip;
+ 					if (num <= 0) continue;
+ 				}
+-#if defined(_WIN32)
++#if !defined BPP32 && !defined COLORIZE && defined(_WIN32) 
+ 				if (num & 1) *dst++ = *src++;
+ 				if (num & 2) { *(uint16*)dst = *(uint16*)src; dst += 2; src += 2; }
+ 				if (num >>= 2) {
+@@ -809,7 +938,7 @@
+ 					} while (--num != 0);
+ 				}
+ #else
+-				memcpy(dst, src, num);
++				colorize_line( dst, src, num );
+ #endif
+ 			} while (!(done & 0x80));
+ 
+@@ -837,7 +966,7 @@
+ 				for (i = 0; i != width; i++) {
+ 					byte b = ctab[src[i]];
+ 
+-					if (b != 0) dst[i] = b;
++					if (b != 0) dst[i] = colorizep(i2p(b));
+ 				}
+ 				src += bp->width_org;
+ 				dst += bp->pitch;
+@@ -849,7 +978,9 @@
+ 
+ 			do {
+ 				for (i = 0; i != width; i++)
+-					if (src[i] != 0) dst[i] = ctab[dst[i]];
++					if (src[i] != 0) 
++//						dst[i] = i2p(ctab[p2i(dst[i]&0xff)]);
++						dst[i] = usecolortable( dst[i], ctab );
+ 				src += bp->width_org;
+ 				dst += bp->pitch;
+ 			} while (--height != 0);
+@@ -857,7 +988,7 @@
+ 	} else {
+ 		if (!(bp->info & 1)) {
+ 			do {
+-				memcpy(dst, src, width);
++				colorize_line( dst, src, width );
+ 				src += bp->width_org;
+ 				dst += bp->pitch;
+ 			} while (--height != 0);
+@@ -866,17 +997,17 @@
+ 				int n = width;
+ 
+ 				for (; n >= 4; n -= 4) {
+-					if (src[0] != 0) dst[0] = src[0];
+-					if (src[1] != 0) dst[1] = src[1];
+-					if (src[2] != 0) dst[2] = src[2];
+-					if (src[3] != 0) dst[3] = src[3];
++					if (src[0] != 0) dst[0] = colorizep(i2p(src[0]));
++					if (src[1] != 0) dst[1] = colorizep(i2p(src[1]));
++					if (src[2] != 0) dst[2] = colorizep(i2p(src[2]));
++					if (src[3] != 0) dst[3] = colorizep(i2p(src[3]));
+ 
+ 					dst += 4;
+ 					src += 4;
+ 				}
+ 
+ 				for (; n != 0; n--) {
+-					if (src[0] != 0) dst[0] = src[0];
++					if (src[0] != 0) dst[0] = colorizep(i2p(src[0]));
+ 					src++;
+ 					dst++;
+ 				}
+@@ -933,7 +1064,7 @@
+ 				ctab = _color_remap_ptr;
+ 				num = (num + 1) >> 1;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*src];
++						*dst = colorizep(i2p(ctab[*src]));
+ 						dst++;
+ 						src += 2;
+ 				}
+@@ -979,7 +1110,8 @@
+ 				ctab = _color_remap_ptr;
+ 				num = (num + 1) >> 1;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*dst];
++//						*dst = i2p(ctab[p2i(*dst)]);
++						*dst = usecolortable( *dst, ctab );
+ 						dst++;
+ 				}
+ 			} while (!(done & 0x80));
+@@ -1027,9 +1159,9 @@
+ 				num = (num + 1) >> 1;
+ 
+ 				for (; num != 0; num--) {
+-						*dst = *src;
+-						dst++;
+-						src += 2;
++					*dst = colorizep(i2p(*src));
++					dst++;
++					src += 2;
+ 				}
+ 
+ 			} while (!(done & 0x80));
+@@ -1063,8 +1195,7 @@
+ 			for (height >>= 1; height != 0; height--) {
+ 				for (i = 0; i != width >> 1; i++) {
+ 					byte b = ctab[src[i * 2]];
+-
+-					if (b != 0) dst[i] = b;
++					if (b != 0) dst[i] = colorizep(i2p(b));
+ 				}
+ 				src += bp->width_org * 2;
+ 				dst += bp->pitch;
+@@ -1075,8 +1206,11 @@
+ 			const byte *ctab = _color_remap_ptr;
+ 
+ 			for (height >>= 1; height != 0; height--) {
+-				for (i = 0; i != width >> 1; i++)
+-					if (src[i * 2] != 0) dst[i] = ctab[dst[i]];
++				for (i = 0; i != width >> 1; i++) {
++					if (src[i * 2] != 0) 
++//						dst[i] = i2p(ctab[p2i(dst[i])]);
++						dst[i] = usecolortable( dst[i], ctab );
++				}
+ 				src += bp->width_org * 2;
+ 				dst += bp->pitch;
+ 			}
+@@ -1084,8 +1218,9 @@
+ 	} else {
+ 		if (bp->info & 1) {
+ 			for (height >>= 1; height != 0; height--) {
+-				for (i = 0; i != width >> 1; i++)
+-					if (src[i * 2] != 0) dst[i] = src[i * 2];
++				for (i = 0; i != width >> 1; i++) {
++					if (src[i*2]) dst[i] = colorizep(i2p(src[i*2]));
++				}
+ 				src += bp->width_org * 2;
+ 				dst += bp->pitch;
+ 			}
+@@ -1145,7 +1280,7 @@
+ 				ctab = _color_remap_ptr;
+ 				num = (num + 3) >> 2;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*src];
++						*dst = colorizep(i2p(ctab[*src]));
+ 						dst++;
+ 						src += 4;
+ 				}
+@@ -1210,7 +1345,8 @@
+ 				ctab = _color_remap_ptr;
+ 				num = (num + 3) >> 2;
+ 				for (; num != 0; num--) {
+-						*dst = ctab[*dst];
++//						*dst = i2p(ctab[p2i(*dst)]);
++						*dst = usecolortable( *dst, ctab );
+ 						dst++;
+ 				}
+ 
+@@ -1279,7 +1415,7 @@
+ 				num = (num + 3) >> 2;
+ 
+ 				for (; num != 0; num--) {
+-						*dst = *src;
++						*dst = colorizep(i2p(*src));
+ 						dst++;
+ 						src += 4;
+ 				}
+@@ -1328,7 +1464,7 @@
+ 				for (i = 0; i != width >> 2; i++) {
+ 					byte b = ctab[src[i * 4]];
+ 
+-					if (b != 0) dst[i] = b;
++					if (b != 0) dst[i] = colorizep(i2p(b));
+ 				}
+ 				src += bp->width_org * 4;
+ 				dst += bp->pitch;
+@@ -1340,7 +1476,9 @@
+ 
+ 			for (height >>= 2; height != 0; height--) {
+ 				for (i = 0; i != width >> 2; i++)
+-					if (src[i * 4] != 0) dst[i] = ctab[dst[i]];
++					if (src[i * 4] != 0) 
++//						dst[i] = i2p(ctab[p2i(dst[i])]);
++						dst[i] = usecolortable( dst[i], ctab );
+ 				src += bp->width_org * 4;
+ 				dst += bp->pitch;
+ 			}
+@@ -1349,7 +1487,7 @@
+ 		if (bp->info & 1) {
+ 			for (height >>= 2; height != 0; height--) {
+ 				for (i = 0; i != width >> 2; i++)
+-					if (src[i * 4] != 0) dst[i] = src[i * 4];
++					if (src[i * 4] != 0) dst[i] = colorizep(i2p(src[i * 4]));
+ 				src += bp->width_org * 4;
+ 				dst += bp->pitch;
+ 			}
+@@ -1357,8 +1495,360 @@
+ 	}
+ }
+ 
++/* Start Filtered super_zoom patch */
++
++static void GfxBlitSpriteToColor32(BlitterParams *bp)
++{
++	const byte* src_o = bp->sprite;
++	const byte* src;
++	int num, skip;
++	byte done;
++	Color32 *dst, *bpdst = (Color32*)bp->dst;
++	const byte* ctab;
++
++	if (bp->mode & 1) {
++		src_o += READ_LE_UINT16(src_o + bp->start_y * 2);
++
++		do {
++			do {
++				done = src_o[0];
++				num = done & 0x7F;
++				skip = src_o[1];
++				src = src_o + 2;
++				src_o += num + 2;
++
++				dst = (Color32*)bpdst;
++
++				if ( (skip -= bp->start_x) > 0) {
++					dst += skip;
++				} else {
++					src -= skip;
++					num += skip;
++					if (num <= 0) continue;
++					skip = 0;
++				}
++
++				skip = skip + num - bp->width;
++				if (skip > 0) {
++					num -= skip;
++					if (num <= 0) continue;
++				}
++
++				ctab = _color_remap_ptr;
++
++				for (;num >= 4; num -=4) {
++					dst[3] = (i2c(ctab[src[3]]));
++					dst[2] = (i2c(ctab[src[2]]));
++					dst[1] = (i2c(ctab[src[1]]));
++					dst[0] = (i2c(ctab[src[0]]));
++					dst += 4;
++					src += 4;
++				}
++				for (; num != 0; num--, src++)
++					*dst++ = i2c(ctab[*src]);
++			} while (!(done & 0x80));
++
++			bpdst += bp->pitch;
++		} while (--bp->height != 0);
++	} else if (bp->mode & 2) {
++		src_o += READ_LE_UINT16(src_o + bp->start_y * 2);
++		do {
++			do {
++				done = src_o[0];
++				num = done & 0x7F;
++				skip = src_o[1];
++				src_o += num + 2;
++
++				dst = (Color32*)bpdst;
++
++				if ( (skip -= bp->start_x) > 0) {
++					dst += skip;
++				} else {
++					num += skip;
++					if (num <= 0) continue;
++					skip = 0;
++				}
++
++				skip = skip + num - bp->width;
++				if (skip > 0) {
++					num -= skip;
++					if (num <= 0) continue;
++				}
++
++				ctab = _color_remap_ptr;
++				for (; num != 0; num--) {
++//					*dst = i2c(ctab[p2i(*dst)]);
++					*dst = 0x80000000; // todo: a different alpha value per _active_colormap
++					dst++;
++				}
++			} while (!(done & 0x80));
++
++			bpdst += bp->pitch;
++		} while (--bp->height != 0);
++	} else {
++		src_o += READ_LE_UINT16(src_o + bp->start_y * 2);
++		do {
++			do {
++				done = src_o[0];
++				num = done & 0x7F;
++				skip = src_o[1];
++				src = src_o + 2;
++				src_o += num + 2;
++
++				dst = (Color32*)bpdst;
++
++				if ( (skip -= bp->start_x) > 0) {
++					dst += skip;
++				} else {
++					src -= skip;
++					num += skip;
++					if (num <= 0) continue;
++					skip = 0;
++				}
++
++				skip = skip + num - bp->width;
++				if (skip > 0) {
++					num -= skip;
++					if (num <= 0) continue;
++				}
++				_blit_line( dst, src, num );
++			} while (!(done & 0x80));
++
++			bpdst += bp->pitch;
++		} while (--bp->height != 0);
++	}
++}
++
++static void GfxBlitSpriteToColor32UnComp(BlitterParams *bp)
++{
++	const byte *src = bp->sprite;
++	Color32 *dst = (Color32*)bp->dst;
++	int height = bp->height;
++	int width = bp->width;
++	int i;
++
++	assert(height > 0);
++	assert(width > 0);
++
++	if (bp->mode & 1) {
++		if (bp->info & 1) {
++			const byte *ctab = _color_remap_ptr;
++
++			do {
++				for (i = 0; i != width; i++) {
++					byte b = ctab[src[i]];
++
++					if (b != 0) dst[i] = i2c(b);
++				}
++				src += bp->width_org;
++				dst += bp->pitch;
++			} while (--height != 0);
++		}
++	} else if (bp->mode & 2) {
++		if (bp->info & 1) {
++//			const byte *ctab = _color_remap_ptr;
++
++			do {
++				for (i = 0; i != width; i++)
++					if (src[i] != 0) 
++//						dst[i] = i2c(ctab[p2i(dst[i]&0xff)]);
++						dst[i] = 0x80000000; // todo: a different alpha value per _active_colormap
++				src += bp->width_org;
++				dst += bp->pitch;
++			} while (--height != 0);
++		}
++	} else {
++		if (!(bp->info & 1)) {
++			do {
++				_blit_line( dst, src, width );
++				src += bp->width_org;
++				dst += bp->pitch;
++			} while (--height != 0);
++		} else {
++			do {
++				int n = width;
++
++				for (; n >= 4; n -= 4) {
++					if (src[0] != 0) dst[0] = i2c(src[0]);
++					if (src[1] != 0) dst[1] = i2c(src[1]);
++					if (src[2] != 0) dst[2] = i2c(src[2]);
++					if (src[3] != 0) dst[3] = i2c(src[3]);
++
++					dst += 4;
++					src += 4;
++				}
++
++				for (; n != 0; n--) {
++					if (src[0] != 0) dst[0] = i2c(src[0]);
++					src++;
++					dst++;
++				}
++
++				src += bp->width_org - width;
++				dst += bp->pitch - width;
++			} while (--height != 0);
++		}
++	}
++}
++
+ typedef void (*BlitZoomFunc)(BlitterParams *bp);
+ 
++static void _GfxBlitZoom_Fancy(BlitterParams *bp, int power )
++{
++	// New way for 32bpp: make fake buffer (twice as big), filled with ~0
++	// draw on high res
++	// render to actual buffer scaled down
++
++	int x,y, n = 1<<power;
++	Sprite* s = (Sprite*)(void*)bp->spriteobject; // Fucking ugly way to get a non const ptr
++	Pixel* dst = bp->dst;
++	Color32* osrc;
++	int datawidth = ( s->width + n - 1 ) >> power; // the +n-1 thing is to round UP
++	int rw = bp->width>>power;
++	int rh = bp->height>>power;
++	int d0 = GetMakeSpriteData32No( s, 0, _active_colormap );
++	int dp = GetMakeSpriteData32No( s, power, _active_colormap );
++	Sprite32* s32 = s->sprite32;
++
++	bool dontblend = bp->mode==0 && _disable_sprite_blending>0; //Only landscape tiles not blended. ISSUE: transp. bridges still dont blend
++
++	assert(bp->spriteobject);
++
++	if (!s32->data32[dp]) {
++		// The requested zoom is not yet rendered into 32bpp
++		if (!s32->data32[d0]) {
++			// also the 100% zoom is not yet rendered into 32bpp
++			BlitterParams bpx;
++			int h = s->height;
++			int w = s->width;
++			int bufsize = sizeof(Color32) * h * w;
++			s32->data32[d0] = malloc( bufsize );
++			memset( s32->data32[d0], 0xff, bufsize );
++			// Draw using the normal scale (tileblit or nocomp one)
++			bpx = *bp;
++			bpx.height = h;
++			bpx.width = w;
++			bpx.pitch = w;
++			bpx.start_x = 0;
++			bpx.start_y = 0;
++			bpx.sprite = bp->sprite_org;
++			bpx.dst = (Pixel*)s32->data32[d0];
++			if (bp->info&8)
++				GfxBlitSpriteToColor32( &bpx );
++			else
++				GfxBlitSpriteToColor32UnComp( &bpx );
++		}
++		// s32->data32[d0] contains (now) the alphablendable sprite (0xff alpha is don't draw)
++		if (power!=0) { // if power=0 then we already have what we need now
++			// scale it down
++			int h = ( s->height + n - 1 ) >> power; // the +n-1 thing is to round UP
++			int w = datawidth;
++			
++			int bufsize = sizeof(Color32) * h * w;
++			Color32* dst = malloc( bufsize );
++			s32->data32[dp] = dst;
++			// Scaledown
++			for (y=0; y<s->height; y+=n) {
++				Color32* src = s32->data32[d0] + s->width * y;
++				for (x=0; x<s->width; x+=n) {
++					int xx,yy, r=0, g=0, b=0, np=0, a=0, tp=0, div=0;
++					for (yy=0; yy<n && y+yy<s->height; yy++) {
++						Color32* src2 = src + x + yy*s->width;
++						for (xx=0; xx<n && x+xx<s->width; xx++) {
++							Color32 c = src2[xx];
++							int ca = _calpha(c);
++							assert(ca<0x100);
++							// Weigh alpha in color averaging
++							if (ca==0x00) { // use pixel
++								r += _cred(c)<<8;
++								g += _cgreen(c)<<8;
++								b += _cblue(c)<<8;
++								np++;
++								div+=0x100;
++							}
++							else if (ca!=0xff) {
++								int ica = (0x100-ca);
++								r += _cred(c)*ica;
++								g += _cgreen(c)*ica;
++								b += _cblue(c)*ica;
++								np++;
++								div += ica;
++							} //else ca=0xff means ignore the entire pixel
++							a += ca;
++							tp++;
++						}
++					}
++
++					if (div>0/* && np>=tp*/) { // at least minpix pixels drawn in original (1/4th of the total)
++						int ialpha = a/tp; // 0xff = background  0 = pixel. I call that inverted
++						assert(ialpha<0x100);
++						if (ialpha==0 || dontblend)
++							*dst++ = rgb2c( r/div, g/div, b/div ); // Don't colorize, will be done in final blit
++						else if (ialpha==0xff)
++							*dst++ = 0xff000000; // full alpha, rgb must be 0 (premultiplied with 0)
++						else {
++							int alpha = (0x100-ialpha); // we'll premultiply the alpha. faster later
++							div <<= 8; // then we don't have to shift 8 3 times (the 0x100 from alpha)
++							// assumed that (a/x)>>8 equals a/(x<<8). not? right? right.
++							*dst++ = argb2c( ialpha, (r*alpha/div), (g*alpha/div), (b*alpha/div) );
++						}
++					}
++					else
++						*dst++ = 0xff000000; // just full alpha, no color
++				}
++			}
++			assert(dst-s32->data32[dp]==h*w);
++		}
++	}
++
++	// s32->data32[dp] contains the Color32 pixels
++	// Let's do some blending into pixelbuffer
++	osrc = s32->data32[dp] + (bp->start_x>>power) + (bp->start_y>>power) * datawidth;
++	for (y=0; y<rh; y++) {
++		Color32* src = osrc + y*datawidth;
++		for (x=0; x<rw; x++ ) {
++			Color32 cx = *src++;
++			int a = _calpha(cx);
++			dst[x] = colorize_blend_cx2p( cx, dst[x], a );
++		}
++		dst += bp->pitch;
++	}
++}
++
++static void GfxBlitTileZoomOut_Fancy(BlitterParams *bp )
++{
++	if (_patches.super_zoom)
++		_GfxBlitZoom_Fancy( bp, 2 );
++	else
++		GfxBlitTileZoomOut( bp );
++}
++
++static void GfxBlitZoomOutUncomp_Fancy(BlitterParams *bp )
++{
++	if (_patches.super_zoom)
++		_GfxBlitZoom_Fancy( bp, 2 );
++	else
++		GfxBlitZoomOutUncomp( bp );
++}
++
++static void GfxBlitTileZoomMedium_Fancy(BlitterParams *bp )
++{
++	if (_patches.super_zoom)
++		_GfxBlitZoom_Fancy( bp, 1 );
++	else
++		GfxBlitTileZoomMedium( bp );
++}
++
++static void GfxBlitZoomMediumUncomp_Fancy(BlitterParams *bp )
++{
++	if (_patches.super_zoom)
++		_GfxBlitZoom_Fancy( bp, 1 );
++	else
++		GfxBlitZoomMediumUncomp( bp );
++}
++
++/* End Filtered Zoom Patch */
++
+ static void GfxMainBlitter(const Sprite* sprite, int x, int y, int mode)
+ {
+ 	DrawPixelInfo *dpi = _cur_dpi;
+@@ -1370,14 +1860,14 @@
+ 	static const BlitZoomFunc zf_tile[3] =
+ 	{
+ 		GfxBlitTileZoomIn,
+-		GfxBlitTileZoomMedium,
+-		GfxBlitTileZoomOut
++		GfxBlitTileZoomMedium_Fancy, // filtered
++		GfxBlitTileZoomOut_Fancy     // filtered
+ 	};
+ 	static const BlitZoomFunc zf_uncomp[3] =
+ 	{
+ 		GfxBlitZoomInUncomp,
+-		GfxBlitZoomMediumUncomp,
+-		GfxBlitZoomOutUncomp
++		GfxBlitZoomMediumUncomp_Fancy, // filtered
++		GfxBlitZoomOutUncomp_Fancy     // filtered
+ 	};
+ 
+ 	/* decode sprite header */
+@@ -1387,6 +1877,7 @@
+ 	bp.height_org = bp.height = sprite->height;
+ 	info = sprite->info;
+ 	bp.info = info;
++	bp.spriteobject = sprite;
+ 	bp.sprite_org = bp.sprite = sprite->data;
+ 	bp.dst = dpi->dst_ptr;
+ 	bp.mode = mode;
+@@ -1444,30 +1935,36 @@
+ 		if (bp.height == 0) return;
+ 
+ 		y &= zoom_mask;
++		start_y = 0;
+ 
+ 		if ( (y -= dpi->top) < 0) {
+ 			bp.height += y;
+ 			if (bp.height <= 0) return;
+ 			bp.sprite -= bp.width * y;
++			start_y -= y;
+ 			y = 0;
+ 		} else {
+ 			bp.dst += bp.pitch * (y >> dpi->zoom);
+ 		}
+ 
++		bp.start_y = start_y;
++
+ 		if (bp.height > dpi->height - y) {
+ 			bp.height = dpi->height - y;
+ 			if (bp.height <= 0) return;
+ 		}
+ 
++		start_x = 0;
+ 		x &= zoom_mask;
+-
+ 		if ( (x -= dpi->left) < 0) {
+ 			bp.width += x;
+ 			if (bp.width <= 0) return;
++			start_x -= x;
+ 			bp.sprite -= x;
+ 			x = 0;
+ 		}
+ 		bp.dst += x >> dpi->zoom;
++		bp.start_x = start_x;
+ 
+ 		if (bp.width > dpi->width - x) {
+ 			bp.width = dpi->width - x;
+@@ -1506,8 +2003,16 @@
+ 	DoPaletteAnimations();
+ }
+ 
+-#define EXTR(p, q) (((uint16)(_timer_counter * (p)) * (q)) >> 16)
+-#define EXTR2(p, q) (((uint16)(~_timer_counter * (p)) * (q)) >> 16)
++#if defined BPP32 || defined COLORIZE
++// both bpp32 (because no palette) and colorize (because of cached lookup table)
++// disable palette animations. Since we need the function to colorize the world,
++// we'll just stop the palette animation timers
++# define EXTR(p, q) ((uint16)0)
++# define EXTR2(p, q) (((uint16)(~((int)0) * (p)) * (q)) >> 16)
++#else
++# define EXTR(p, q) (((uint16)(_timer_counter * (p)) * (q)) >> 16)
++# define EXTR2(p, q) (((uint16)(~_timer_counter * (p)) * (q)) >> 16)
++#endif
+ 
+ void DoPaletteAnimations(void)
+ {
+@@ -2001,3 +2506,308 @@
+ 			return 1;
+ 	return (_color_list[_player_colors[player]].window_color_1b) | IS_PALETTE_COLOR;
+ }
++
++/* Start Gradient Patch                                  *
++ * find the nearest color in the static pallette (<217?) *
++ * Use int, must be signed for the - later!              *
++ * now also part of the super_zoom patch                 */
++
++colidx FindNearestColor( int r, int g, int b )
++{
++	colidx i, best=0;
++	int dist=262144;//256^2*3
++	static colidx* color2index = 0;
++	int cacheindex = r + (g<<8) + (b<<16);
++
++	// ONLY if super zoom (heavy use)
++	// use a lookup table (it's 16 Mb..)
++	if (!color2index && _patches.super_zoom) {
++		color2index = (colidx*)malloc( 256*256*256 );
++		memset( color2index, 217, 256*256*256 ); //217 is used as the 'Not Set' value
++	}
++
++	// Check the lookup table
++	if (color2index) {
++		colidx l = color2index[cacheindex];
++		if (l!=217)
++			return l;
++	}
++
++	// End lookup at #217, this is where the animated palette starts
++	// fixme?! are there colors above some number that are not rotated, include these?
++	for (i=0; i<217; i++) {
++		Colour* c = &_cur_palette[i];
++//		int d = abs((int)c->r - r)+abs((int)c->g - g)+abs((int)c->b - b);
++		int d = (c->r-r)*(c->r-r)+(c->g-g)*(c->g-g)+(c->b-b)*(c->b-b);
++
++		// worse match, continue
++		if (d>=dist)
++			continue;
++
++		// exact match: immediately return this color index
++		if (d==0) {
++			// store in cache
++			if (color2index)
++				color2index[cacheindex] = i;
++			return i;
++		}
++
++		// better match, store
++		best = i;
++		dist = d;
++	}
++
++	// store in cache
++	if (color2index)
++		color2index[cacheindex] = best;
++
++	return best;
++}
++
++#define GRADIENT_STEPS 64 //Has to be EVEN
++#define HGRADIENT_STEPS (GRADIENT_STEPS>>1)
++
++// This cache has for each base color a cache of the entire gradient+diffusion, in 64 steps
++
++#ifdef BPP32
++#define DITHERWIDTH 1 // don't use more mem than necessary
++#else
++#define DITHERWIDTH 8
++#endif
++typedef Pixel grad_t[DITHERWIDTH];
++
++static grad_t _gradient_cache[256][GRADIENT_STEPS] = {0};
++
++#define roundeddtoi(dbl) ((int)((dbl)+0.5))
++
++grad_t* GetGradient( byte color )
++{
++	grad_t* grad = _gradient_cache[color];
++	int i;
++	int r1, g1, b1, r2, g2, b2;
++	static double ooo = 1./(double)(HGRADIENT_STEPS-1);
++	Colour* c;
++
++	// Don't fill for color 0: it'll stay zero and fill the cache every time
++	if (color==0 || ((Pixel*)grad)[0]>0)
++		return grad;
++
++	c = &_cur_palette[color];
++	// c1 blends 50% to white
++	r1 = 128 + (c->r>>1);
++	g1 = 128 + (c->g>>1);
++	b1 = 128 + (c->b>>1);
++	// c2 blends to black
++	r2 = (3*c->r)>>2;
++	g2 = (3*c->g)>>2;
++	b2 = (3*c->b)>>2;
++
++	assert( GRADIENT_STEPS==(HGRADIENT_STEPS<<1) );
++
++	// First part of gradient
++	for (i=0; i<HGRADIENT_STEPS; i++) {
++		int tr, tg, tb;
++		int ir, ig, ib;
++		int j;
++		Pixel* diffuse = (Pixel*)&grad[i];
++		double t = (double)i*ooo;
++		double it = 1. - t;
++
++		tr = roundeddtoi(it*r2 + t*c->r);
++		tg = roundeddtoi(it*g2 + t*c->g);
++		tb = roundeddtoi(it*b2 + t*c->b);
++		ir = tr;
++		ig = tg;
++		ib = tb;
++		// from c2 to c
++		for (j=0; j<DITHERWIDTH; j++) {
++			diffuse[j] = rgb2p( ir, ig, ib );
++#ifndef BPP32
++			ir = tr + ir - _cur_palette[diffuse[j]].r; if (ir<0) ir=0; else if (ir>0xff) ir = 0xff;
++			ig = tg + ig - _cur_palette[diffuse[j]].g; if (ig<0) ig=0; else if (ig>0xff) ig = 0xff;
++			ib = tb + ib - _cur_palette[diffuse[j]].b; if (ib<0) ib=0; else if (ib>0xff) ib = 0xff;
++#endif
++		}
++	}
++	// Second part of gradient
++	for (i=0; i<HGRADIENT_STEPS; i++) {
++		int tr, tg, tb;
++		int ir, ig, ib;
++		int j;
++		Pixel* diffuse = (Pixel*)&grad[i+HGRADIENT_STEPS];
++		double t = (double)i*ooo;
++		double it = 1. - t;
++
++		tr = roundeddtoi(it*c->r + t*r1);
++		tg = roundeddtoi(it*c->g + t*g1);
++		tb = roundeddtoi(it*c->b + t*b1);
++		ir = tr;
++		ig = tg;
++		ib = tb;
++		// from c2 to c
++		for (j=0; j<DITHERWIDTH; j++) {
++			diffuse[j] = rgb2p( ir, ig, ib ); // in 8bpp, uses lookup
++#ifndef BPP32
++			// in 32 bits mode, the error (ir-pred) will always be 0
++			// in 32 bits mode, j DITHERWIDTH = 1 so this is useless
++			// so don't do it. Though it works.
++			ir = tr + ir - _pred(diffuse[j]); if (ir<0) ir=0; else if (ir>0xff) ir = 0xff;
++			ig = tg + ig - _pgreen(diffuse[j]); if (ig<0) ig=0; else if (ig>0xff) ig = 0xff;
++			ib = tb + ib - _pblue(diffuse[j]); if (ib<0) ib=0; else if (ib>0xff) ib = 0xff;
++#endif
++		}
++	}
++	{
++		Pixel* _g = (Pixel*)grad;
++		Pixel p = _g[0];
++		assert( p!=0 );
++	}
++	return grad;
++}
++
++/* Fills a rect with a gradient based on the normal color */
++
++void GfxFillRectGradient(int left, int top, int right, int bottom, int color)
++{
++	DrawPixelInfo *dpi = _cur_dpi;
++	Pixel *dst;
++	grad_t* gradient;
++	double t, dt;
++	int ditheroff = 0; // iterating offset in dither buffer
++	int ditherlineoffset = 2; // Offset in dither buffer start pos per line
++
++//	bool dodither = (bottom-top)>=16; //use this line to NOT dither buttons and titlebars (stuff<16)
++	bool dodither = DITHERWIDTH>1; // dither all if ditherwith is >1
++
++	if (!_patches.window_gradients || !!(color & PALETTE_MODIFIER_GREYOUT) || !!(color & USE_COLORTABLE)) {
++		GfxFillRect( left, top, right, bottom, color );
++		return;
++	}
++
++	dt = GRADIENT_STEPS/(double)(bottom-top+1);
++	t=0;
++
++	if (dpi->zoom != 0) return;
++	if (left > right || top > bottom) return;
++	if (right < dpi->left || left >= dpi->left + dpi->width) return;
++	if (bottom < dpi->top || top >= dpi->top + dpi->height) return;
++
++	if ( (left -= dpi->left) < 0) { ditheroff = -left; left = 0; }
++	right = right - dpi->left + 1;
++	if (right > dpi->width) right = dpi->width;
++	right -= left;
++	assert(right > 0);
++
++	if ( (top -= dpi->top) < 0) { t -= top * dt; ditheroff-=ditherlineoffset*top; top = 0; }
++	bottom = bottom - dpi->top + 1;
++	if (bottom > dpi->height) bottom = dpi->height;
++	bottom -= top;
++	assert(bottom > 0);
++
++	dst = dpi->dst_ptr + top * dpi->pitch + left;
++
++	gradient = GetGradient( color&255 );
++
++	do {
++		Pixel* bg = (Pixel*)gradient;
++		int it = t;
++		assert(it>=0);
++		assert(it<GRADIENT_STEPS);
++		if (dodither) {
++			int todo = right; // todo is amount to do
++			Pixel* mybg = bg+it*DITHERWIDTH;
++			Pixel* mydst = dst;
++
++			// memcpy the 'rest' of the ditherbuffer (the part from offset to the end)
++			ditheroff%=DITHERWIDTH;
++			if (ditheroff) {
++				int rest = DITHERWIDTH-ditheroff;
++				if (rest>todo)
++					rest = todo;
++				memcpy( dst, mybg+ditheroff, rest*sizeof(Pixel) );
++				todo -= rest;
++				mydst += rest;
++			}
++
++			// fill the buffer with dithered blocks
++			for (; todo; mydst+=DITHERWIDTH) {
++				int size = (todo<DITHERWIDTH)?todo:DITHERWIDTH;
++				memcpy(mydst, mybg, size*sizeof(Pixel));
++				todo -= size;
++			}
++			ditheroff += ditherlineoffset;
++		}
++		else
++			fill_line(dst, bg[it*DITHERWIDTH], right);
++
++		dst += dpi->pitch;
++		t+=dt;
++	} while (--bottom);
++}
++
++/* Exact copy of DrawFrameRect, but calls the gradient version of GfxFillRect for the inner part */
++void DrawFrameRectGradient(int left, int top, int right, int bottom, int ctab, int flags)
++{
++	byte color_2 = _color_list[ctab].window_color_1a;
++	byte color_interior = _color_list[ctab].window_color_bga;
++	byte color_3 = _color_list[ctab].window_color_bgb;
++	byte color = _color_list[ctab].window_color_2;
++
++	if (!(flags & 0x8)) {
++		if (!(flags & 0x20)) {
++			GfxFillRect(left, top, left, bottom - 1, color);
++			GfxFillRect(left + 1, top, right - 1, top, color);
++			GfxFillRect(right, top, right, bottom - 1, color_2);
++			GfxFillRect(left, bottom, right, bottom, color_2);
++			if (!(flags & 0x10)) {
++				GfxFillRectGradient(left + 1, top + 1, right - 1, bottom - 1, color_interior);
++			}
++		} else {
++			GfxFillRect(left, top, left, bottom, color_2);
++			GfxFillRect(left + 1, top, right, top, color_2);
++			GfxFillRect(right, top + 1, right, bottom - 1, color);
++			GfxFillRect(left + 1, bottom, right, bottom, color);
++			if (!(flags & 0x10)) {
++				GfxFillRectGradient(left + 1, top + 1, right - 1, bottom - 1,
++					flags & 0x40 ? color_interior : color_3);
++			}
++		}
++	} else if (flags & 0x1) {
++		// transparency
++		GfxFillRect(left, top, right, bottom, 0x322 | USE_COLORTABLE);
++	} else {
++		GfxFillRectGradient(left, top, right, bottom, color_interior);
++	}
++}
++
++// End Gradient Patch
++
++// Blit functions for 32 bpp mode
++// Also work for 8 bpp, but memset and memcpy are faster
++// so use fill_line and blit_line macros, these do that for 8bpp
++Color32* _fill_line( Color32* buf, Color32 color, size_t rep )
++{
++	unsigned int q;
++	Color32* tgt = buf;
++	for (q=0; q<rep; q++)
++		tgt[q] = color;
++	return buf; // like memset does.
++}
++
++Color32* _blit_line( Color32* buf, const colidx* spriteline, size_t rep )
++{
++	unsigned int q;
++	Color32* tgt = buf;
++	for (q=0; q<rep; q++)
++		tgt[q]=i2c(spriteline[q]);
++	return buf; // like memset does.
++}
++
++Pixel* colorize_line( Pixel* buf, const colidx* spriteline, size_t rep )
++{
++	unsigned int q;
++	Pixel* tgt = buf;
++	for (q=0; q<rep; q++)
++		tgt[q]=colorizep(i2p(spriteline[q]));
++	return buf; // like memset does.
++}
+Index: gfx.h
+===================================================================
+--- gfx.h	(revision 2949)
++++ gfx.h	(working copy)
+@@ -3,8 +3,19 @@
+ #ifndef GFX_H
+ #define GFX_H
+ 
+-typedef byte Pixel;
++// Typedef the pixel type
++#ifdef BPP32 // 32 BPP mode
++typedef Color32 Pixel;
++#else
++typedef colids Pixel;
++#endif
+ 
++extern void DisableSpriteBlending( void );
++extern void EnableSpriteBlending( void );
++extern void SetColorMultiplier( int r, int g, int b );
++extern void EnableColorMultiplier( void );
++extern void DisableColorMultiplier( void );
++
+ typedef struct ColorList {
+ 	byte unk0, unk1, unk2;
+ 	byte window_color_1a, window_color_1b;
+@@ -61,8 +72,10 @@
+ void DrawStringRightAligned(int x, int y, StringID str, uint16 color);
+ void DrawStringRightAlignedTruncated(int x, int y, StringID str, uint16 color, uint maxw);
+ 
++void GfxFillRectGradient(int left, int top, int right, int bottom, int color);
+ void GfxFillRect(int left, int top, int right, int bottom, int color);
+ void GfxDrawLine(int left, int top, int right, int bottom, int color);
++void DrawFrameRectGradient(int left, int top, int right, int bottom, int color, int flags);
+ void DrawFrameRect(int left, int top, int right, int bottom, int color, int flags);
+ uint16 GetDrawStringPlayerColor(byte player);
+ 
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 2949)
++++ viewport.c	(working copy)
+@@ -18,6 +18,7 @@
+ #include "signs.h"
+ #include "waypoint.h"
+ #include "variables.h"
++#include "gfx32.h" //for overlay
+ 
+ #define VIEWPORT_DRAW_MEM (65536 * 2)
+ 
+@@ -1051,11 +1052,15 @@
+ 
+ static void ViewportDrawTileSprites(TileSpriteToDraw *ts)
+ {
++	DisableSpriteBlending(); // for zoom when super_zoom is on
++
+ 	do {
+ 		Point pt = RemapCoords(ts->x, ts->y, ts->z);
+ 		DrawSprite(ts->image, pt.x, pt.y);
+ 		ts = ts->next;
+ 	} while (ts != NULL);
++
++	EnableSpriteBlending();
+ }
+ 
+ static void ViewportSortParentSprites(ParentSpriteToDraw* psd[])
+@@ -1199,6 +1204,8 @@
+ 	_cur_dpi = dpi;
+ }
+ 
++void ViewportDrawOverlay( const ViewPort* vp );
++
+ void ViewportDoDraw(const ViewPort *vp, int left, int top, int right, int bottom)
+ {
+ 	ViewportDrawer vd;
+@@ -1256,6 +1263,8 @@
+ 	//  is checked)
+ 	assert(vd.parent_list <= endof(parent_list));
+ 
++	EnableColorMultiplier();
++
+ 	if (vd.first_tile != NULL) ViewportDrawTileSprites(vd.first_tile);
+ 
+ 	/* null terminate parent sprite list */
+@@ -1264,6 +1273,10 @@
+ 	ViewportSortParentSprites(parent_list);
+ 	ViewportDrawParentSprites(parent_list);
+ 
++	DisableColorMultiplier();
++
++	ViewportDrawOverlay( vp );
++
+ 	if (vd.first_string != NULL) ViewportDrawStrings(&vd.dpi, vd.first_string);
+ 
+ 	_cur_dpi = old_dpi;
+@@ -2238,3 +2251,151 @@
+ {
+ 	SetObjectToPlace(SPR_CURSOR_MOUSE, 0, 0, 0);
+ }
++
++/* MapOverlay patch START */
++
++static uint findh( int x, int _y, int curh )
++{
++	int y,dy,bx,by,tx,ty,wx,wy,dh,hxy;
++	uint h00,h10,h01,h11,hx0,hx1;
++	y = _y + curh; // h is in pixels (8x)
++	dy = y<<1;
++	bx = dy - x;
++	by = dy + x;
++	tx = bx>>6;
++	if (tx<0||tx>=MapSizeX()) return 0;
++	ty = by>>6;
++	if (ty<0||ty>=MapSizeY()) return 0;
++	wx = bx % 64;
++	wy = by % 64;
++	h00 = TileHeight( TileXY(tx, ty) )<<3;
++	h10 = TileHeight( TileXY(tx+1, ty) )<<3;
++	h01 = TileHeight( TileXY(tx, ty+1) )<<3;
++	h11 = TileHeight( TileXY(tx+1, ty+1) )<<3;
++	hx0 = h00 * (64-wx) + h10 * wx;
++	hx1 = h01 * (64-wx) + h11 * wx;
++	hxy = (hx0 * (64-wy) + hx1 * wy)>>12; // could do the shift 12 here, more accurate
++	dh = curh - (int)hxy;
++	if (dh>=-1 && dh<=1) return hxy; // recursion ends when diff is max 1
++	return findh( x, _y, hxy );
++}
++
++Color32* _mapoverlay_img = NULL;
++uint _mapoverlay_x = 0, _mapoverlay_y = 0;
++
++void UnloadMapOverlay()
++{
++	if (!_mapoverlay_img) return;
++	free( _mapoverlay_img );
++	_mapoverlay_img = 0;
++	_mapoverlay_x = _mapoverlay_y = 0;
++	MarkWholeScreenDirty();
++}
++
++#include "readpng.c"
++
++void LoadMapOverlay( const char* filename )
++{
++	int s,x;
++	
++	UnloadMapOverlay();
++
++	if (filename==0 || filename[0]=='\0')
++		return;
++
++	_mapoverlay_img = ReadPNGtoColor32( filename, &_mapoverlay_x, &_mapoverlay_y );
++	s = _mapoverlay_x * _mapoverlay_y;
++	for (x=0; x<s; x++)
++	{
++		Color32* c = _mapoverlay_img + x;
++		int a = _calpha( *c );
++		int r,g,b;
++		// now, scale the alpha by 4
++		a>>=2;
++		r = (a * _cred( *c ))>>8;
++		g = (a * _cgreen( *c ))>>8;
++		b = (a * _cblue( *c ))>>8;
++		*c = argb2c( 0xff-a, r, g, b );
++	}
++	MarkWholeScreenDirty();
++}
++
++void CreateMO()
++{
++	int x,y;
++	if (_mapoverlay_img) return;
++
++	LoadMapOverlay( "wtf.png" );
++
++	return;
++
++	_mapoverlay_x = 4 * MapSizeX();
++	_mapoverlay_y = 4 * MapSizeY();
++
++	_mapoverlay_img = malloc (_mapoverlay_x * _mapoverlay_y * sizeof(Color32) );
++	for (y=0; y<_mapoverlay_y; y++)
++		for (x=0; x<_mapoverlay_x; x++)
++		{
++			if ((x%2)^(y%2))
++				_mapoverlay_img[x+_mapoverlay_x*y] = argb2c(0x80,0x00,0x00,0x00);
++			else
++				_mapoverlay_img[x+_mapoverlay_x*y] = argb2c(0xFF,0x00,0x00,0x00);
++		}
++}
++
++void ViewportDrawOverlay( const ViewPort* vp )
++{
++	Pixel* _dst = _cur_vd->dpi.dst_ptr;
++	int step = 1<<vp->zoom;
++	int x,y,line;
++	float mpx,mpy;
++
++	if (!_mapoverlay_img) return;
++
++	mpx = _mapoverlay_x/(float)(MapSizeY()<<6);
++	mpy = _mapoverlay_y/(float)(MapSizeX()<<6);
++	mpx = max(mpx, mpy);
++	mpy = mpx;
++
++	for (line=0,y=0; y<_cur_vd->dpi.height; y+=step, line++)
++	{
++		int yy = y + _cur_vd->dpi.top;// + vp->virtual_top;
++		int dy = yy<<1; int n=0;
++		Pixel* _p = _dst + line * _cur_vd->dpi.pitch;
++		uint h = 0;
++		if (yy<0) continue;
++		for (x=0; x<_cur_vd->dpi.width; x+=step)
++		{
++			Pixel* p = _p++;
++			Color32 c;
++			int xx = x + _cur_vd->dpi.left;// + vp->virtual_left;
++			int bx,by,tx,ty;
++
++			bx = dy - xx;
++			by = dy + xx;
++
++			if (bx<0 || by<0) continue;
++
++			tx = bx/64;
++			ty = by/64;
++
++			if (tx>=_map_size_x-1 || ty>=_map_size_y-1) continue;
++
++			h = findh( xx, yy, h );
++
++			bx = (dy+(h<<1)) + xx;
++			by = (dy+(h<<1)) - xx;
++
++			bx = mpx * bx;
++			by = mpy * by;
++
++			if (bx>=_mapoverlay_x) continue;
++			if (by>=_mapoverlay_y) continue;
++
++			c = _mapoverlay_img[bx + _mapoverlay_x * by];
++			*p = blend_cx2p( c, *p, _calpha(c) );
++		}
++	}
++}
++
++/* MapOverlay patch END */
+Index: viewport.h
+===================================================================
+--- viewport.h	(revision 2949)
++++ viewport.h	(working copy)
+@@ -136,4 +136,8 @@
+ 
+ void ViewportDoDraw(const ViewPort *vp, int left, int top, int right, int bottom);
+ 
++extern Color32* _mapoverlay_img;
++extern uint _mapoverlay_x, _mapoverlay_y;
++extern void LoadMapOverlay( const char* filename );
++
+ #endif /* VIEWPORT_H */
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2949)
++++ misc.c	(working copy)
+@@ -491,12 +491,82 @@
+ 	}
+ }
+ 
++/* Colorize patch */
++typedef struct
++{
++	int r, g, b;
++} MultiColor;
++
++extern void SetColorMultiplier( int r, int g, int b );
++MultiColor _month_colors[12] = {
++	{ 0x0ba,0x0ba,0x100 }, //jan
++	{ 0x0ba,0x0ba,0x100 }, //feb
++	{ 0x0e5,0x0e5,0x100 }, //mar - interpolate
++	{ 0x120,0x120,0x100 }, //apr
++	{ 0x120,0x120,0x100 }, //may
++	{ 0x130,0x130,0x110 }, //jun - inter
++	{ 0x140,0x140,0x120 }, //jul
++	{ 0x140,0x140,0x120 }, //aug
++	{ 0x120,0x108,0x0e0 }, //sep -int
++	{ 0x100,0x0d0,0x0b0 }, //okt 
++	{ 0x100,0x0d0,0x0b0 }, //nov
++	{ 0x0dd,0x0c5,0x0d8 } //dec - int
++};
++
++void UpdateMonthColor( int month )
++{
++	month %= 12;
++	if (_patches.season_colors)
++		SetColorMultiplier( _month_colors[month].r, _month_colors[month].g, _month_colors[month].b ); // Colorize patch
++	else
++		SetColorMultiplier( 0x100,0x100,0x100 ); // Colorize patch
++}
++
++MultiColor _hour_colors[24] = {
++	{ 0x040,0x050,0x0b0 }, //0
++	{ 0x040,0x050,0x0b0 }, //1
++	{ 0x040,0x050,0x0b0 }, //2
++	{ 0x040,0x050,0x0b0 }, //3
++	{ 0x040,0x050,0x0b0 }, //4
++	{ 0x058,0x060,0x0D8 }, //5
++	{ 0x070,0x078,0x0F0 }, //6
++	{ 0x088,0x090,0x100 }, //7
++	{ 0x100,0x100,0x104 }, //8
++	{ 0x118,0x118,0x108 }, //9
++	{ 0x130,0x130,0x10c }, //10
++	{ 0x148,0x148,0x110 }, //11
++	{ 0x160,0x160,0x120 }, //12
++	{ 0x180,0x180,0x130 }, //13
++	{ 0x180,0x180,0x130 }, //14
++	{ 0x180,0x180,0x130 }, //15
++	{ 0x160,0x160,0x120 }, //16
++	{ 0x148,0x140,0x110 }, //17
++	{ 0x128,0x120,0x0f0 }, //18
++	{ 0x110,0x100,0x0d0 }, //19
++	{ 0x100,0x0d0,0x0b0 }, //20
++	{ 0x0c0,0x0a0,0x0b0 }, //21
++	{ 0x080,0x070,0x0b0 }, //22
++	{ 0x060,0x060,0x0b0 }, //23
++};
++
++void UpdateHourColor( int Hour )
++{
++	Hour %= 24;
++	if (_patches.season_colors)
++		SetColorMultiplier( _hour_colors[Hour].r, _hour_colors[Hour].g, _hour_colors[Hour].b ); // Colorize patch
++	else
++		SetColorMultiplier( 0x100,0x100,0x100 ); // Colorize patch
++}
++
++/* End Colorize patch */
++
+ void IncreaseDate(void)
+ {
+ 	YearMonthDay ymd;
+ 
+ 	if (_game_mode == GM_MENU) {
+ 		_tick_counter++;
++		UpdateHourColor(_tick_counter/40); // 10 ticks per hour
+ 		return;
+ 	}
+ 
+@@ -525,6 +595,9 @@
+ 
+ 	/* check if we entered a new month? */
+ 	ConvertDayToYMD(&ymd, _date);
++
++	UpdateMonthColor( ymd.month );
++
+ 	if ((byte)ymd.month == _cur_month)
+ 		return;
+ 	_cur_month = ymd.month;
+Index: win32.c
+===================================================================
+--- win32.c	(revision 2949)
++++ win32.c	(working copy)
+@@ -564,6 +564,7 @@
+ 
+ static char *_fios_path;
+ static char *_fios_save_path;
++static char *_fios_image_path;
+ static char *_fios_scn_path;
+ static FiosItem *_fios_items;
+ static int _fios_count, _fios_alloc;
+@@ -606,6 +607,108 @@
+ }
+ 
+ 
++// Get a list of images
++FiosItem *FiosGetImageList(int *num, int mode)
++{
++	WIN32_FIND_DATA fd;
++	HANDLE h;
++	FiosItem *fios;
++	int sort_start;
++
++	if (_fios_image_path == NULL) {
++		_fios_image_path = malloc(MAX_PATH);
++		strcpy(_fios_image_path, _path.personal_dir);
++	}
++
++	_fios_path = _fios_image_path;
++
++	// Parent directory, only if not of the type C:\.
++	if (_fios_path[3] != '\0') {
++		fios = FiosAlloc();
++		fios->type = FIOS_TYPE_PARENT;
++		fios->mtime = 0;
++		strcpy(fios->name, "..");
++		strcpy(fios->title, ".. (Parent directory)");
++	}
++
++	// Show subdirectories first
++	h = MyFindFirstFile(_fios_path, "*.*", &fd);
++	if (h != INVALID_HANDLE_VALUE) {
++		do {
++			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY &&
++					strcmp(fd.cFileName, ".") != 0 &&
++					strcmp(fd.cFileName, "..") != 0) {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_DIR;
++				fios->mtime = 0;
++				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
++				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", fd.cFileName);
++			}
++		} while (FindNextFile(h, &fd));
++		FindClose(h);
++	}
++
++	{
++		/* XXX ugly global variables ... */
++		byte order = _savegame_sort_order;
++		_savegame_sort_order = 2; // sort ascending by name
++		qsort(_fios_items, _fios_count, sizeof(FiosItem), compare_FiosItems);
++		_savegame_sort_order = order;
++	}
++
++	// this is where to start sorting
++	sort_start = _fios_count;
++
++	/* Show savegame files
++	 * .SAV OpenTTD saved game
++	 * .SS1 Transport Tycoon Deluxe preset game
++	 * .SV1 Transport Tycoon Deluxe (Patch) saved game
++	 * .SV2 Transport Tycoon Deluxe (Patch) saved 2-player game
++	 */
++	h = MyFindFirstFile(_fios_path, "*.*", &fd);
++	if (h != INVALID_HANDLE_VALUE) {
++		do {
++			char *t;
++
++			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
++
++			t = strrchr(fd.cFileName, '.');
++			if (t == NULL) continue;
++
++			if (strcasecmp(t, ".png") == 0) { // OpenTTD
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_FILE;
++				fios->mtime = *(uint64*)&fd.ftLastWriteTime;
++				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
++
++				*t = '\0'; // strip extension
++				ttd_strlcpy(fios->title, fd.cFileName, lengthof(fios->title));
++			}
++		} while (FindNextFile(h, &fd));
++		FindClose(h);
++	}
++
++	qsort(_fios_items + sort_start, _fios_count - sort_start, sizeof(FiosItem), compare_FiosItems);
++
++	// Drives
++	{
++		char drives[256];
++		const char *s;
++
++		GetLogicalDriveStrings(sizeof(drives), drives);
++		for (s = drives; *s != '\0';) {
++			fios = FiosAlloc();
++			fios->type = FIOS_TYPE_DRIVE;
++			sprintf(fios->name, "%c:", s[0]);
++			sprintf(fios->title, "%c:", s[0]);
++			while (*s++ != '\0') {}
++		}
++	}
++
++	*num = _fios_count;
++	return _fios_items;
++}
++
+ // Get a list of savegames
+ FiosItem *FiosGetSavegameList(int *num, int mode)
+ {
+Index: widget.c
+===================================================================
+--- widget.c	(revision 2949)
++++ widget.c	(working copy)
+@@ -184,7 +184,7 @@
+ 		case WWT_PANEL_2: {
+ 			int img;
+ 
+-			DrawFrameRect(r.left, r.top, r.right, r.bottom, wi->color, (clicked) ? FR_LOWERED : 0);
++			DrawFrameRectGradient(r.left, r.top, r.right, r.bottom, wi->color, (clicked) ? FR_LOWERED : 0);
+ 
+ 			if ((img = wi->unkA) != 0) { // has an image
+ 				if ((wi->type & WWT_MASK) == WWT_PANEL_2 && clicked) img++; // show diff image when clicked
+@@ -196,7 +196,7 @@
+ 
+ 		case WWT_CLOSEBOX: /* WWT_TEXTBTN */
+ 		case WWT_4: {
+-			DrawFrameRect(r.left, r.top, r.right, r.bottom, wi->color, (clicked) ? FR_LOWERED : 0);
++			DrawFrameRectGradient(r.left, r.top, r.right, r.bottom, wi->color, (clicked) ? FR_LOWERED : 0);
+ 			}
+ 		/* fall through */
+ 
+@@ -212,7 +212,7 @@
+ 
+ 		case WWT_6: {
+ 			StringID str;
+-			DrawFrameRect(r.left, r.top, r.right, r.bottom, wi->color, FR_LOWERED | FR_DARKENED);
++			DrawFrameRectGradient(r.left, r.top, r.right, r.bottom, wi->color, FR_LOWERED | FR_DARKENED);
+ 
+ 			if ((str = wi->unkA) != 0) {
+ 				DrawString(r.left+2, r.top+1, str, 0);
+@@ -349,7 +349,7 @@
+ 			c2 = _color_list[wi->color&0xF].window_color_2;
+ 
+ 			// draw "shaded" background
+-			GfxFillRect(r.left+10, r.top, r.right-10, r.bottom, c2);
++			GfxFillRectGradient(r.left+10, r.top, r.right-10, r.bottom, c2);
+ 			GfxFillRect(r.left+10, r.top, r.right-10, r.bottom, c1 | PALETTE_MODIFIER_GREYOUT);
+ 
+ 			// draw shaded lines
+@@ -360,7 +360,7 @@
+ 
+ 			// draw actual scrollbar
+ 			pt = HandleScrollbarHittest(&w->hscroll, r.left, r.right);
+-			DrawFrameRect(pt.x, r.top, pt.y, r.bottom, wi->color, (w->flags4 & (WF_SCROLL_MIDDLE | WF_HSCROLL)) == (WF_SCROLL_MIDDLE | WF_HSCROLL) ? FR_LOWERED : 0);
++			DrawFrameRectGradient(pt.x, r.top, pt.y, r.bottom, wi->color, (w->flags4 & (WF_SCROLL_MIDDLE | WF_HSCROLL)) == (WF_SCROLL_MIDDLE | WF_HSCROLL) ? FR_LOWERED : 0);
+ 
+ 			break;
+ 		}
+@@ -417,10 +417,10 @@
+ 		case WWT_CAPTION: {
+ 			assert(r.bottom - r.top == 13); // XXX - to ensure the same sizes are used everywhere!
+ 			DrawFrameRect(r.left, r.top, r.right, r.bottom, wi->color, FR_BORDERONLY);
+-			DrawFrameRect(r.left+1, r.top+1, r.right-1, r.bottom-1, wi->color, (w->caption_color == 0xFF) ? FR_LOWERED | FR_DARKENED : FR_LOWERED | FR_DARKENED | FR_BORDERONLY);
++			DrawFrameRectGradient(r.left+1, r.top+1, r.right-1, r.bottom-1, wi->color, (w->caption_color == 0xFF) ? FR_LOWERED | FR_DARKENED : FR_LOWERED | FR_DARKENED | FR_BORDERONLY);
+ 
+ 			if (w->caption_color != 0xFF) {
+-				GfxFillRect(r.left+2, r.top+2, r.right-2, r.bottom-2, _color_list[_player_colors[w->caption_color]].window_color_1b);
++				GfxFillRectGradient(r.left+2, r.top+2, r.right-2, r.bottom-2, _color_list[_player_colors[w->caption_color]].window_color_1b);
+ 			}
+ 
+ 			DrawStringCentered( (r.left+r.right+1)>>1, r.top+2, wi->unkA, 0x84);
+Index: unix.c
+===================================================================
+--- unix.c	(revision 2949)
++++ unix.c	(working copy)
+@@ -51,6 +51,7 @@
+ 
+ static char *_fios_path;
+ static char *_fios_save_path;
++static char *_fios_image_path;
+ static char *_fios_scn_path;
+ static FiosItem *_fios_items;
+ static int _fios_count, _fios_alloc;
+@@ -80,6 +81,99 @@
+ }
+ 
+ 
++// Get a list of images
++FiosItem *FiosGetImageList(int *num, int mode)
++{
++	FiosItem *fios;
++	DIR *dir;
++	struct dirent *dirent;
++	struct stat sb;
++	int sort_start;
++	char filename[MAX_PATH];
++
++	if (_fios_image_path == NULL) {
++		_fios_image_path = malloc(MAX_PATH);
++		strcpy(_fios_image_path, _path.save_dir);
++	}
++
++	_fios_path = _fios_image_path;
++
++	// Parent directory, only if not in root already.
++	if (_fios_path[1] != '\0') {
++		fios = FiosAlloc();
++		fios->type = FIOS_TYPE_PARENT;
++		fios->mtime = 0;
++		strcpy(fios->name, "..");
++		strcpy(fios->title, ".. (Parent directory)");
++	}
++
++	// Show subdirectories first
++	dir = opendir(_fios_path);
++	if (dir != NULL) {
++		while ((dirent = readdir(dir)) != NULL) {
++			snprintf(filename, lengthof(filename), "%s/%s",
++				_fios_path, dirent->d_name);
++			if (!stat(filename, &sb) && S_ISDIR(sb.st_mode) &&
++					dirent->d_name[0] != '.') {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_DIR;
++				fios->mtime = 0;
++				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++				snprintf(fios->title, lengthof(fios->title),
++					"%s/ (Directory)", dirent->d_name);
++			}
++		}
++		closedir(dir);
++	}
++
++	{
++		/* XXX ugly global variables ... */
++		byte order = _savegame_sort_order;
++		_savegame_sort_order = 2; // sort ascending by name
++		qsort(_fios_items, _fios_count, sizeof(FiosItem), compare_FiosItems);
++		_savegame_sort_order = order;
++	}
++
++	// this is where to start sorting
++	sort_start = _fios_count;
++
++	/* Show savegame files
++	 * .SAV OpenTTD saved game
++	 * .SS1 Transport Tycoon Deluxe preset game
++	 * .SV1 Transport Tycoon Deluxe (Patch) saved game
++	 * .SV2 Transport Tycoon Deluxe (Patch) saved 2-player game
++	 */
++	dir = opendir(_fios_path);
++	if (dir != NULL) {
++		while ((dirent = readdir(dir)) != NULL) {
++			char *t;
++
++			snprintf(filename, lengthof(filename), "%s/%s",
++				_fios_path, dirent->d_name);
++			if (stat(filename, &sb) || S_ISDIR(sb.st_mode)) continue;
++
++			t = strrchr(dirent->d_name, '.');
++			if (t == NULL) continue;
++
++			if (strcasecmp(t, ".png") == 0) { // OpenTTD
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_FILE;
++				fios->mtime = sb.st_mtime;
++				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++
++				*t = '\0'; // strip extension
++				ttd_strlcpy(fios->title, dirent->d_name, lengthof(fios->title));
++			}
++		}
++		closedir(dir);
++	}
++
++	qsort(_fios_items + sort_start, _fios_count - sort_start, sizeof(FiosItem), compare_FiosItems);
++	*num = _fios_count;
++	return _fios_items;
++}
++
++
+ // Get a list of savegames
+ FiosItem *FiosGetSavegameList(int *num, int mode)
+ {
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2949)
++++ main_gui.c	(working copy)
+@@ -201,6 +201,9 @@
+ 		case 4:
+ 			AskExitGame();
+ 			break;
++		case 5:
++			ShowSaveLoadDialog(SLD_LOAD_OVERLAY);
++			break;
+ 		}
+ 	} else {
+ 		switch(index) {
+@@ -1004,7 +1007,7 @@
+ 
+ static void ToolbarScenSaveOrLoad(Window *w)
+ {
+-	PopupMainToolbMenu(w, 0x2C, 3, STR_0292_SAVE_SCENARIO, 5, 0);
++	PopupMainToolbMenu(w, 0x2C, 3, STR_0292_SAVE_SCENARIO, 6, 0);
+ }
+ 
+ static void ToolbarScenDateBackward(Window *w)
+Index: gfx32.h
+===================================================================
+--- gfx32.h	(revision 0)
++++ gfx32.h	(revision 0)
+@@ -0,0 +1,278 @@
++/* $Id: gfx32.h $ */
++
++#ifndef GFX32_H
++#define GFX32_H
++
++/* This next block defines a set of macros and inlines that make it possible  *
++ * to switch between 8bpp and 32bpp easily, without introducing function calls*
++ *                                                                            *
++ * 'naming' convention:                                                       *
++ * i = colorindex (always 8 bit)                                              *
++ * p = pixel in current format (8 or 32)                                      *
++ * c = color (3 x byte, r g b)                                                */
++
++// color to index lookup. 
++// CURRENTLY only used in 8bpp mode but works also in 32bpp
++//  not in use there since I do the shadowcast with a multiply, not a lookup
++extern colidx FindNearestColor( int r, int g, int b );
++
++// Create a Color32 from components
++#define rgb2c(r,g,b) ((Color32)(b)|(((Color32)(g))<<8)|(((Color32)(r))<<16))
++#define argb2c(a,r,g,b) ((Color32)(b)|(((Color32)(g))<<8)|(((Color32)(r))<<16)|(((Color32)(a))<<24))
++
++// get the red/green/blue component from a Color32
++#define _calpha(c) (((c)>>24)&0xff)
++#define _cred(c) (((c)>>16)&0xff)
++#define _cgreen(c) (((c)>>8)&0xff)
++#define _cblue(c) ((c)&0xff)
++
++// get the red/green/blue component from a colorindex
++#define _ired(i) _cur_palette[i].r
++#define _igreen(i) _cur_palette[i].g
++#define _iblue(i) _cur_palette[i].b
++
++// Get index from a Color32
++#define c2i(c) FindNearestColor( _cred(c), _cgreen(c), _cblue(c) )
++// ... and back
++#define i2c(i) rgb2c(_cur_palette[i].r,_cur_palette[i].g,_cur_palette[i].b)
++
++#ifdef BPP32 // 32 BPP mode
++
++// get the red/green/blue component from a pixel
++#define _pred(p) _cred(p)
++#define _pgreen(p) _cgreen(p)
++#define _pblue(p) _cblue(p)
++
++// macros to go from...
++//  colorindex to pixel
++#define i2p(i) i2c(i)
++//  pixel to colorindex
++#define p2i(p) c2i(p)
++// color to pixel and back
++#define c2p(c) c
++#define p2c(p) p
++//  rgb colors to pixel
++#define rgb2p(r,g,b) rgb2c(r,g,b)
++
++// macro to fill a line with 1 single pixel
++#define fill_line(dst, pix, n) _fill_line(dst, pix, n)
++// macro to blit a line from a colorindex* 
++#define blit_line(dst, src_ci, n) _blit_line(dst, src_ci, n)
++// macro to map pixel p in table t (used for shadow, implemented here hardcoded
++//#define usecolortable( p, t ) blend4( p,p,p,0 ) //75% color, 25% shadow
++#define usecolortable( p, t ) c2p(blend2c_cx2p( 0, p, 0xA0));  //75% color, 25% shadow
++
++#else // 8 BPP
++
++// get the red/green/blue component from a pixel
++#define _pred(p) _cur_palette[p].r
++#define _pgreen(p) _cur_palette[p].g
++#define _pblue(p) _cur_palette[p].b
++
++// macros to go from...
++//  colorindex to pixel
++#define i2p(i) i
++//  pixel to colorindex
++#define p2i(p) p
++// color to pixel and back
++#define c2p(c) c2i(c)
++#define p2c(p) i2c(p)
++//  rgb colors to pixel
++#define rgb2p(r,g,b) FindNearestColor( r, g, b )
++
++// macro to fill a line with 1 single colorindex
++#define fill_line(a, b, c) memset(a, b, c)
++// macro to blit a line from a colorindex* 
++#define blit_line(a, b, c) memcpy(a, b, c)
++
++// macro to map pixel p in table t
++#define usecolortable( p, t ) (t)[p]
++
++#endif //BPP32
++
++// fwd to functions implementing blitting (use above macros to call)
++extern Color32* _fill_line( Color32* buf, Color32 color, size_t rep );
++extern Color32* _blit_line( Color32* buf, const colidx* spriteline, size_t rep );
++// fwd to function that colorized-blits a line
++extern Pixel* colorize_line( Pixel* buf, const colidx* spriteline, size_t rep );
++
++// Macros for pixel sizes
++//#define GFXPIXELBYTES sizeof(Pixel)
++//#define GFXPIXELBITS (GFXPIXELBYTES<<3)
++
++#ifdef COLORIZE
++#define colorizep( p ) _colorizep(p)
++#define colorizep2c( p ) _colorizep2c(p)
++#define colorizec( p ) _colorizec(p)
++#else
++#define colorizep( p ) (p)
++#define colorizep2c( p ) p2c(p)
++#define colorizec( c ) (c)
++#endif
++
++// Blend.
++// a is for pixel alpha (0xff = pixel, 0x00 = color)
++// cx stands for premultiplied alpha
++// cx.a is ignored
++#define blend2c_cx2p( cx, p, a ) \
++	( \
++	a==0xff?p2c(p): \
++	a==0?(cx&0x00ffffff): \
++	(cx&0x00ffffff)+( (((_pred(p)*a)<<8)&0xff0000) | ((_pgreen(p)*a)&0xff00) | (((_pblue(p)*a)>>8)&0xff) ) \
++	)
++#ifdef BPP32
++#define blend_cx2p( cx, p, a ) blend2c_cx2p( cx, p, a )
++#else
++inline Pixel blend_cx2p( Color32 cx, Pixel p, int a )
++{
++	Color32 blended;
++	if (a==0xff) return p;
++	blended = blend2c_cx2p( cx, p, a );
++	return c2p( blended );
++}
++#endif
++
++#define colorize_blend_cx2p( cx, p, a ) blend_cx2p( colorizec(cx&0x00ffffff), p, a )
++
++/* End of 32 bpp macros, typedefs and forwards                                */
++
++#endif
++/* $Id: gfx32.h $ */
++
++#ifndef GFX32_H
++#define GFX32_H
++
++/* This next block defines a set of macros and inlines that make it possible  *
++ * to switch between 8bpp and 32bpp easily, without introducing function calls*
++ *                                                                            *
++ * 'naming' convention:                                                       *
++ * i = colorindex (always 8 bit)                                              *
++ * p = pixel in current format (8 or 32)                                      *
++ * c = color (3 x byte, r g b)                                                */
++
++// color to index lookup. 
++// CURRENTLY only used in 8bpp mode but works also in 32bpp
++//  not in use there since I do the shadowcast with a multiply, not a lookup
++extern colidx FindNearestColor( int r, int g, int b );
++
++// Create a Color32 from components
++#define rgb2c(r,g,b) ((Color32)(b)|(((Color32)(g))<<8)|(((Color32)(r))<<16))
++#define argb2c(a,r,g,b) ((Color32)(b)|(((Color32)(g))<<8)|(((Color32)(r))<<16)|(((Color32)(a))<<24))
++
++// get the red/green/blue component from a Color32
++#define _calpha(c) (((c)>>24)&0xff)
++#define _cred(c) (((c)>>16)&0xff)
++#define _cgreen(c) (((c)>>8)&0xff)
++#define _cblue(c) ((c)&0xff)
++
++// get the red/green/blue component from a colorindex
++#define _ired(i) _cur_palette[i].r
++#define _igreen(i) _cur_palette[i].g
++#define _iblue(i) _cur_palette[i].b
++
++// Get index from a Color32
++#define c2i(c) FindNearestColor( _cred(c), _cgreen(c), _cblue(c) )
++// ... and back
++#define i2c(i) rgb2c(_cur_palette[i].r,_cur_palette[i].g,_cur_palette[i].b)
++
++#ifdef BPP32 // 32 BPP mode
++
++// get the red/green/blue component from a pixel
++#define _pred(p) _cred(p)
++#define _pgreen(p) _cgreen(p)
++#define _pblue(p) _cblue(p)
++
++// macros to go from...
++//  colorindex to pixel
++#define i2p(i) i2c(i)
++//  pixel to colorindex
++#define p2i(p) c2i(p)
++// color to pixel and back
++#define c2p(c) c
++#define p2c(p) p
++//  rgb colors to pixel
++#define rgb2p(r,g,b) rgb2c(r,g,b)
++
++// macro to fill a line with 1 single pixel
++#define fill_line(dst, pix, n) _fill_line(dst, pix, n)
++// macro to blit a line from a colorindex* 
++#define blit_line(dst, src_ci, n) _blit_line(dst, src_ci, n)
++// macro to map pixel p in table t (used for shadow, implemented here hardcoded
++//#define usecolortable( p, t ) blend4( p,p,p,0 ) //75% color, 25% shadow
++#define usecolortable( p, t ) c2p(blend2c_cx2p( 0, p, 0xA0));  //75% color, 25% shadow
++
++#else // 8 BPP
++
++// get the red/green/blue component from a pixel
++#define _pred(p) _cur_palette[p].r
++#define _pgreen(p) _cur_palette[p].g
++#define _pblue(p) _cur_palette[p].b
++
++// macros to go from...
++//  colorindex to pixel
++#define i2p(i) i
++//  pixel to colorindex
++#define p2i(p) p
++// color to pixel and back
++#define c2p(c) c2i(c)
++#define p2c(p) i2c(p)
++//  rgb colors to pixel
++#define rgb2p(r,g,b) FindNearestColor( r, g, b )
++
++// macro to fill a line with 1 single colorindex
++#define fill_line(a, b, c) memset(a, b, c)
++// macro to blit a line from a colorindex* 
++#define blit_line(a, b, c) memcpy(a, b, c)
++
++// macro to map pixel p in table t
++#define usecolortable( p, t ) (t)[p]
++
++#endif //BPP32
++
++// fwd to functions implementing blitting (use above macros to call)
++extern Color32* _fill_line( Color32* buf, Color32 color, size_t rep );
++extern Color32* _blit_line( Color32* buf, const colidx* spriteline, size_t rep );
++// fwd to function that colorized-blits a line
++extern Pixel* colorize_line( Pixel* buf, const colidx* spriteline, size_t rep );
++
++// Macros for pixel sizes
++//#define GFXPIXELBYTES sizeof(Pixel)
++//#define GFXPIXELBITS (GFXPIXELBYTES<<3)
++
++#ifdef COLORIZE
++#define colorizep( p ) _colorizep(p)
++#define colorizep2c( p ) _colorizep2c(p)
++#define colorizec( p ) _colorizec(p)
++#else
++#define colorizep( p ) (p)
++#define colorizep2c( p ) p2c(p)
++#define colorizec( c ) (c)
++#endif
++
++// Blend.
++// a is for pixel alpha (0xff = pixel, 0x00 = color)
++// cx stands for premultiplied alpha
++// cx.a is ignored
++#define blend2c_cx2p( cx, p, a ) \
++	( \
++	a==0xff?p2c(p): \
++	a==0?(cx&0x00ffffff): \
++	(cx&0x00ffffff)+( (((_pred(p)*a)<<8)&0xff0000) | ((_pgreen(p)*a)&0xff00) | (((_pblue(p)*a)>>8)&0xff) ) \
++	)
++#ifdef BPP32
++#define blend_cx2p( cx, p, a ) blend2c_cx2p( cx, p, a )
++#else
++inline Pixel blend_cx2p( Color32 cx, Pixel p, int a )
++{
++	Color32 blended;
++	if (a==0xff) return p;
++	blended = blend2c_cx2p( cx, p, a );
++	return c2p( blended );
++}
++#endif
++
++#define colorize_blend_cx2p( cx, p, a ) blend_cx2p( colorizec(cx&0x00ffffff), p, a )
++
++/* End of 32 bpp macros, typedefs and forwards                                */
++
++#endif
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2949)
++++ settings.c	(working copy)
+@@ -829,6 +829,9 @@
+ //  of stuff.
+ static const SettingDesc patch_player_settings[] = {
+ 	{"vehicle_speed",				SDT_BOOL,		(void*)true,	&_patches.vehicle_speed,				NULL},
++	{"window_gradients",			SDT_BOOL,		(void*)true,	&_patches.window_gradients,				NULL},
++	{"super_zoom",				SDT_BOOL,		(void*)true,	&_patches.super_zoom,				NULL},
++	{"season_colors",			SDT_BOOL,		(void*)true,	&_patches.season_colors,			NULL},
+ 
+ 	{"lost_train_days",			SDT_UINT16, (void*)180,		&_patches.lost_train_days,			NULL},
+ 	{"train_income_warn",		SDT_BOOL,		(void*)true,	&_patches.train_income_warn,		NULL},
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2949)
++++ settings_gui.c	(working copy)
+@@ -636,6 +636,35 @@
+ 	return 0;
+ }
+ 
++static int32 WindowGradientActive(int32 p1)
++{
++	MarkWholeScreenDirty();
++	return 0;
++}
++
++static int32 SuperZoomActive(int32 p1)
++{
++	MarkWholeScreenDirty();
++	return 0;
++}
++
++extern void UpdateMonthColor( int month );
++extern void UpdateHourColor( int hour );
++
++static int32 SeasonColorsActive(int32 p1)
++{
++	if (_game_mode == GM_MENU) {
++		UpdateHourColor(_tick_counter/40); // in menu screen, use day colors
++	}
++	else {
++		YearMonthDay ymd;
++		ConvertDayToYMD(&ymd, _date);
++		UpdateMonthColor( ymd.month );
++	}
++	MarkWholeScreenDirty();
++	return 0;
++}
++
+ typedef int32 PatchButtonClick(int32);
+ 
+ typedef struct PatchEntry {
+@@ -666,6 +695,12 @@
+ 
+ static const PatchEntry _patches_ui[] = {
+ 	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_VEHICLESPEED,		"vehicle_speed",		&_patches.vehicle_speed,						0,  0,  0, NULL},
++	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_WINDOWGRADIENT,		"window_gradients",		&_patches.window_gradients,						0,  0,  0, &WindowGradientActive},
++	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_SUPERZOOM,			"super_zoom",			&_patches.super_zoom,							0,  0,  0, &SuperZoomActive},
++#ifdef COLORIZE
++	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_SEASONCOLORS,		"season_colors",		&_patches.season_colors,						0,  0,  0, &SeasonColorsActive},
++#endif
++
+ 	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_LONGDATE,				"long_date",				&_patches.status_long_date,					0,  0,  0, NULL},
+ 	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_SHOWFINANCES,		"show_finances",		&_patches.show_finances,						0,  0,  0, NULL},
+ 	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_AUTOSCROLL,			"autoscroll",				&_patches.autoscroll,								0,  0,  0, NULL},
+Index: readpng.c
+===================================================================
+--- readpng.c	(revision 0)
++++ readpng.c	(revision 0)
+@@ -0,0 +1,182 @@
++
++#include <png.h>
++
++static void PNGAPI png_error_exit(png_structp png_ptr, png_const_charp message)
++{
++	DEBUG(misc, 0) ("ERROR(libpng): %s - %s", message, (char *)png_get_error_ptr(png_ptr));
++	longjmp(png_ptr->jmpbuf, 1);
++}
++
++static void PNGAPI png_warning_exit(png_structp png_ptr, png_const_charp message)
++{
++	DEBUG(misc, 0) ("WARNING(libpng): %s - %s", message, (char *)png_get_error_ptr(png_ptr));
++}
++
++Color32* ReadPNGtoColor32( const char* filename, int* w, int *h)
++{
++	FILE* infile = fopen( filename, "rb" );
++
++	png_infop info_ptr, end_info;
++	png_structp png_ptr;
++	uint width, height;
++	int bit_depth, color_type, interlace_type,
++       compression_type, filter_type;
++
++	int alpha_depth;
++	bool gray;
++	float aspect;
++	png_color_8p sig_bit;
++	Color32* lfb;
++	Color32** lines;
++	int l;
++
++	if (!infile)
++		return 0;
++
++	png_ptr = png_create_read_struct
++		(PNG_LIBPNG_VER_STRING, (png_voidp)NULL,
++		png_error_exit, png_warning_exit);
++	if (!png_ptr)
++		return 0;
++	info_ptr = png_create_info_struct(png_ptr);
++	if (!info_ptr) {
++		png_destroy_read_struct(&png_ptr,
++			(png_infopp)NULL, (png_infopp)NULL);
++		return 0;
++	}
++	end_info = png_create_info_struct(png_ptr);
++	if (!end_info) {
++		png_destroy_read_struct(&png_ptr, &info_ptr,
++			(png_infopp)NULL);
++		return 0;
++	}
++
++	if (setjmp(png_ptr->jmpbuf)) 
++	{
++        png_destroy_read_struct(&png_ptr, &info_ptr,
++           &end_info);
++        return 0;
++    }
++
++	png_init_io(png_ptr, infile);
++
++//	png_set_read_status_fn(png_ptr, read_row_callback);
++
++	png_read_info(png_ptr, info_ptr);
++	
++	png_get_IHDR(png_ptr, info_ptr, &width, &height,
++       &bit_depth, &color_type, &interlace_type,
++       &compression_type, &filter_type);
++
++	alpha_depth = (color_type & PNG_COLOR_MASK_ALPHA)?bit_depth:0;
++	gray = (color_type & PNG_COLOR_MASK_COLOR)==0;
++
++	if (bit_depth < 8) 
++		png_set_expand(png_ptr);
++	// Expand paletted files to full RGB
++	if (color_type == PNG_COLOR_TYPE_PALETTE) 
++		png_set_palette_to_rgb(png_ptr);
++	// Convert grayscale files to RGB
++	if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
++		png_set_gray_to_rgb(png_ptr);
++	// Expand transparency to 8-bit alpha channel
++	if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS)) 
++	{
++		png_set_tRNS_to_alpha(png_ptr);
++		// Chromakeyed?
++		// FIXME: detect alpha bit depth for paletted images
++		if (color_type != PNG_COLOR_TYPE_PALETTE) 
++			alpha_depth = 1;
++		else
++			alpha_depth = bit_depth;
++	}
++	// Force 32 bit output (alpha = 255)
++	if (0==(color_type & PNG_COLOR_MASK_ALPHA))
++		png_set_filler( png_ptr, 0xFF, PNG_FILLER_AFTER);
++	// Strip 16 bit files to 8 bit
++	if (bit_depth == 16)
++		png_set_strip_16(png_ptr);
++	// Convert to BGR / BGRA
++	png_set_bgr(png_ptr);
++
++	// Aspect ratio
++	aspect = png_get_pixel_aspect_ratio(png_ptr,info_ptr);
++	if (aspect==0.f) aspect=1.f;
++/*	png_uint_32 res_x, res_y;
++	int unit_type;
++	if (png_get_pHYs(png_ptr,info_ptr,&res_x,&res_y,&unit_type))
++		aspect = res_y?res_x/(float)res_y:0.f;
++*/
++	// Set background in LFB?
++//	if (png_get_bKGD()
++
++#ifdef GAMMA_CORRECTION
++	{
++		double screen_gamma = 2.2;		// windows default
++
++		// Gamma correction
++		int intent;
++		if (png_get_sRGB(png_ptr, info_ptr, &intent))
++		{
++//			citk_Debug("sRGB %i", intent);
++			png_set_gamma(png_ptr, screen_gamma, 0.45455);
++		}
++		else
++		{
++			double image_gamma;
++			if (png_get_gAMA(png_ptr, info_ptr, &image_gamma))
++			{
++//				citk_Debug("gAMA %lf", image_gamma);
++				png_set_gamma(png_ptr, screen_gamma, image_gamma);
++			}
++			else
++				png_set_gamma(png_ptr, screen_gamma, 0.45455);
++		}
++	}
++#endif // GAMMA_CORRECTION
++
++	// Find original color precision
++	if (png_get_sBIT(png_ptr, info_ptr, &sig_bit))
++	{
++		int bits;
++		// Adjust alpha precision
++		if (alpha_depth > sig_bit->alpha)
++			alpha_depth = sig_bit->alpha;
++		if (gray)
++			bits = sig_bit->gray;
++		else
++			bits = max( sig_bit->blue, max(sig_bit->red, sig_bit->green) );
++		// Adjust color/gray precision
++		if (bit_depth > bits)
++			bit_depth = bits;
++	}
++
++	png_read_update_info( png_ptr, info_ptr );
++
++	lfb = malloc( width * height * sizeof(Color32) ); 
++	lines = malloc( sizeof(Color32*) * height);
++	for (l=0; l<height; l++)
++		lines[l] = lfb + width * l;
++
++	png_read_image(png_ptr,(unsigned char**)lines);
++
++	free( lines );
++
++	png_read_end(png_ptr, end_info);
++	png_destroy_read_struct(&png_ptr, &info_ptr, &end_info);
++
++	fclose( infile );
++/*
++	if (!gray)
++		gray = DBitmap_IsGrayscale(lfb);
++
++	if (color_type==PNG_COLOR_TYPE_PALETTE && !gray) 
++	{
++		// FIXME: detect color bit depth for paletted images
++		bit_depth = 8;
++	}
++*/
++	if (w) *w = width;
++	if (h) *h = height;
++	return lfb;
++}
+Index: hal.h
+===================================================================
+--- hal.h	(revision 2949)
++++ hal.h	(working copy)
+@@ -79,6 +79,8 @@
+ FiosItem *FiosGetSavegameList(int *num, int mode);
+ // Get a list of scenarios
+ FiosItem *FiosGetScenarioList(int *num, int mode);
++// Get a list of images
++FiosItem *FiosGetImageList(int *num, int mode);
+ // Free the list of savegames
+ void FiosFreeSavegameList(void);
+ // Browse to. Returns a filename w/path if we reached a file.
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2949)
++++ spritecache.c	(working copy)
+@@ -28,6 +28,49 @@
+ 	byte data[VARARRAY_SIZE];
+ } MemBlock;
+ 
++/* Ugly way to detect if a memoryblock is in fact a Sprite* (or a nonsprite) *
++ * better (todo, if no-one objects)                                          *
++ * reserve 1/some bit(s) of the size in memblock for the 'content type'      *
++ * Important when we want to 'clean up' the sprite when free'ing it          *
++ * in my case, the cached Color32 buffers                                    */
++static bool IsSprite( void* data, int size )
++{
++	Sprite* s = (Sprite*)data;
++	unsigned int datasize = (s->width * s->height)>>4;
++	if (s->width==0 || s->width>1024) return false;
++	if (s->height==0 || s->height>1024) return false;
++	return (size>=sizeof(Sprite)+datasize);
++}
++
++// This one asserts that IsSprite returns the expected value
++// called after each allocsprite in debug mode.
++static void IsSpriteEx( void* data, int size, bool shouldbesprite )
++{
++	assert( shouldbesprite==IsSprite( data, size ) );
++}
++
++byte GetMakeSpriteData32No( Sprite* _s, byte zoomlevel, int16 colormap )
++{
++	Sprite32* s;
++	byte i;
++	if (!_s->sprite32) {
++		_s->sprite32 = (Sprite32*)malloc(sizeof(Sprite32));
++		_s->sprite32->data32count = 0;
++	}
++	s = _s->sprite32;
++	
++	for (i=0; i<s->data32count; i++) {
++		if (s->data32colormap[i]==colormap && s->data32zoomlevel[i]==zoomlevel)
++			return i;
++	}
++	// return first available and increase (first, mark data* as 0)
++	assert(s->data32count<MAXSPRITECOLORMAPS);
++	s->data32[s->data32count] = 0;
++	s->data32colormap[s->data32count] = colormap;
++	s->data32zoomlevel[s->data32count] = zoomlevel;
++	return s->data32count++;
++}
++
+ static uint _sprite_lru_counter;
+ static MemBlock *_spritecache_ptr;
+ static int _compact_cache_counter;
+@@ -93,23 +136,38 @@
+ 	type = FioReadByte();
+ 	if (type == 0xFF) {
+ 		byte* dest = AllocSprite(num);
++#ifndef NDEBUG // all this to check if the return value of IsSprite is correct
++		int mem_req = (num+sizeof(MemBlock) + sizeof(uint32) - 1) & ~(sizeof(uint32) - 1);
++#endif
+ 
+ 		_sprite_ptr[id] = dest;
+ 		FioReadBlock(dest, num);
+ 
++#ifndef NDEBUG // all this to check if the return value of IsSprite is correct
++		IsSpriteEx( dest, mem_req, false );
++#endif
+ 		return dest;
+ 	} else {
+ 		uint height = FioReadByte();
+ 		uint width  = FioReadWord();
+ 		Sprite* sprite;
+ 		byte* dest;
+-
++#ifndef NDEBUG // all this to check if the return value of IsSprite is correct
++		int mem_req;
++#endif
+ 		num = (type & 0x02) ? width * height : num - 8;
+ 		sprite = AllocSprite(sizeof(*sprite) + num);
++#ifndef NDEBUG // all this to check if the return value of IsSprite is correct
++		mem_req = (sizeof(*sprite) + num+sizeof(MemBlock) + sizeof(uint32) - 1) & ~(sizeof(uint32) - 1);
++#endif
+ 		_sprite_ptr[id] = sprite;
++		sprite->sprite32 = 0; // zero the ptr to 32 bit data
+ 		sprite->info   = type;
+ 		sprite->height = (id != 142) ? height : 10; // Compensate for a TTD bug
+ 		sprite->width  = width;
++#ifndef NDEBUG // all this to check if the return value of IsSprite is correct
++		IsSpriteEx( sprite, mem_req, true );
++#endif
+ 		sprite->x_offs = FioReadWord();
+ 		sprite->y_offs = FioReadWord();
+ 
+@@ -269,6 +327,18 @@
+ 	}
+ }
+ 
++static void DeleteSprite32( Sprite* _s )
++{
++	int q;
++	Sprite32* sp = _s->sprite32;
++	if (!sp) return;
++	assert( sp->data32count<=MAXSPRITECOLORMAPS );
++	for (q=0; q<sp->data32count; q++)
++		free( sp->data32[q] );
++	free( sp );
++	_s->sprite32 = NULL;
++}
++
+ static void DeleteEntryFromSpriteCache(void)
+ {
+ 	int i;
+@@ -316,6 +386,8 @@
+ 	s = (MemBlock*)_sprite_ptr[best] - 1;
+ 	assert(!(s->size & S_FREE_MASK));
+ 	s->size |= S_FREE_MASK;
++	if (IsSprite( s->data, s->size ))
++		DeleteSprite32( (Sprite*)s->data );
+ 	_sprite_ptr[best] = NULL;
+ 
+ 	// And coalesce adjacent free blocks

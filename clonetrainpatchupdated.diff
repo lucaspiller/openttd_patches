@@ -1,0 +1,476 @@
+Index: OpenTTD/lang/english.txt
+===================================================================
+--- OpenTTD/lang/english.txt	(revision 20)
++++ OpenTTD/lang/english.txt	(working copy)
+@@ -2252,7 +2252,13 @@
+ STR_886B_CAN_T_RENAME_TRAIN_VEHICLE		:{WHITE}Can't rename train vehicle type...
+ 
+ STR_TRAIN_STOPPING						:{RED}Stopping
+-STR_TRAIN_STOPPING_VEL					:{RED}Stopping, {VELOCITY}
++STR_TRAIN_STOPPING_VEL					:{RED}Stopping, {VELOCITY}
++
++STR_TRAIN_CLONE							:{BLACK}Clone
++STR_TRAIN_CLONE_TOOL_TIP				:{BLACK}Click on a train to clone it. Hold CTRL to share orders.
++STR_TRAIN_CAN_T_CLONE_TRAIN				:{WHITE}Can't clone train...
++STR_TRAIN_CAN_T_CLONE_NOT_AVAIL			:{WHITE}... not available any more.
++STR_TRAIN_CAN_T_CLONE_WRONG_TRACK		:{WHITE}... tracks differ.
+ 
+ ##id 0x9000
+ STR_9000_ROAD_VEHICLE_IN_THE_WAY		:{WHITE}Road vehicle in the way
+Index: OpenTTD/train_cmd.c
+===================================================================
+--- OpenTTD/train_cmd.c	(revision 20)
++++ OpenTTD/train_cmd.c	(working copy)
+@@ -368,8 +368,10 @@
+ 
+ /* Build a railroad vehicle
+  * p1 = vehicle type id
++ * p2 is used by the CloneTrainCommand
++ * p2 & 1: not set will NormalizeTrains in depot (default), set will NOT
++ * (p2 >> 1 )&1: not set: buy all of the multi head parts, set:buy only part in (p2 >> 2);
+  */
+-
+ int32 CmdBuildRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	const RailVehicleInfo *rvi;
+@@ -392,6 +394,9 @@
+ 
+ 	value = EstimateTrainCost(rvi);
+ 
++	if ( (p2 >> 1)&1 ) // Separate parts cost the half (how about future three part trains?)
++		value >>= 1;
++
+ 	if (!(flags & DC_QUERY_COST)) {
+ 		v = AllocateVehicle();
+ 		if (v == NULL || _ptr_to_next_order >= endof(_order_array))
+@@ -465,36 +470,47 @@
+ 
+ 			VehiclePositionChanged(v);
+ 
+-			if (rvi->flags&RVI_MULTIHEAD && (u=AllocateVehicle()) != NULL) {
+-				u->direction = v->direction;
+-				u->owner = v->owner;
+-				u->tile = v->tile;
+-				u->x_pos = v->x_pos;
+-				u->y_pos = v->y_pos;
+-				u->z_pos = v->z_pos;
+-				u->z_height = 6;
+-				u->u.rail.track = 0x80;
+-				v->u.rail.first_engine = 0xffff;
+-				u->vehstatus = VS_HIDDEN | VS_DEFPAL;
+-				u->subtype = 2;
+-				u->spritenum = v->spritenum + 1;
+-				u->cargo_type = v->cargo_type;
+-				u->cargo_cap = v->cargo_cap;
+-				u->u.rail.railtype = v->u.rail.railtype;
+-//				u->next_in_chain = 0xffff;
+-				v->next = u;
+-				u->engine_type = v->engine_type;
+-				u->build_year = v->build_year;
+-				v->value = u->value = v->value >> 1;
+-//				u->day_counter = 0;
+-				u->type = VEH_Train;
+-				u->cur_image = 0xAC2;
+-				VehiclePositionChanged(u);
++			// Buy only parts of a multi head?
++			if ( (p2 >> 1)&1 ){
++				// which part to buy?
++				v->spritenum += p2>>2; //piece_to_buy = p2 >> 2;
++
++			}else{
++				// Buy all pieces of a multi head 
++				if (rvi->flags&RVI_MULTIHEAD && (u=AllocateVehicle()) != NULL) {
++					u->direction = v->direction;
++					u->owner = v->owner;
++					u->tile = v->tile;
++					u->x_pos = v->x_pos;
++					u->y_pos = v->y_pos;
++					u->z_pos = v->z_pos;
++					u->z_height = 6;
++					u->u.rail.track = 0x80;
++					v->u.rail.first_engine = 0xffff;
++					u->vehstatus = VS_HIDDEN | VS_DEFPAL;
++					u->subtype = 2;
++					u->spritenum = v->spritenum + 1;
++					u->cargo_type = v->cargo_type;
++					u->cargo_cap = v->cargo_cap;
++					u->u.rail.railtype = v->u.rail.railtype;
++	//				u->next_in_chain = 0xffff;
++					v->next = u;
++					u->engine_type = v->engine_type;
++					u->build_year = v->build_year;
++					v->value = u->value = v->value >> 1;
++	//				u->day_counter = 0;
++					u->type = VEH_Train;
++					u->cur_image = 0xAC2;
++					VehiclePositionChanged(u);
++				}
+ 			}
+ 
+ 			UpdateTrainAcceleration(v);
+-			NormalizeTrainVehInDepot(v);
+ 
++			// Normalize is dedault and will add all lingering wagons to the new loc.
++			if (p2 != 1)
++				NormalizeTrainVehInDepot(v);
++
+ 			InvalidateWindow(WC_VEHICLE_DEPOT, tile);
+ 			InvalidateWindow(WC_TRAINS_LIST, v->owner);
+ 			InvalidateWindow(WC_COMPANY, v->owner);
+@@ -584,6 +600,8 @@
+ /* p1 & 0xffff= source vehicle index
+    p1 & 0xffff0000 = what wagon to put the wagon AFTER, 0xffff0000 to make a new line
+ 	 p2 & 1 = move all vehicles following the vehicle..
++	 (p2 >> 1)&1 = force: do not check for multi head units, thus placing them at the end and
++	 not between muliheads.
+  */
+ 
+ int32 CmdMoveRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+@@ -632,12 +650,14 @@
+ 		if (num > (_patches.mammoth_trains ? 100 : 9) && dst_head->subtype==0)
+ 			return_cmd_error(STR_8819_TRAIN_TOO_LONG);
+ 
+-		// if it's a multiheaded vehicle we're dragging to, drag to the vehicle before..
+-		while (is_custom_secondhead_sprite(dst->spritenum)
+-		       || (!is_custom_sprite(dst->spritenum) && _engine_sprite_add[dst->spritenum] != 0)) {
+-			Vehicle *v = GetPrevVehicleInChain(dst);
+-			if (!v || src == v) break;
+-			dst = v;
++		if ( !p2>>1 ){// check for multihead?
++			// if it's a multiheaded vehicle we're dragging to, drag to the vehicle before..
++			while (is_custom_secondhead_sprite(dst->spritenum)
++				   || (!is_custom_sprite(dst->spritenum) && _engine_sprite_add[dst->spritenum] != 0)) {
++				Vehicle *v = GetPrevVehicleInChain(dst);
++				if (!v || src == v) break;
++				dst = v;
++			}
+ 		}
+ 
+ 		assert(dst_head->tile == src_head->tile);
+@@ -995,6 +1015,15 @@
+ 	return 0;
+ }
+ 
++// Calculates what refitting of a wagon costs, based on type of engine and cargo types
++int32 LocoRefitCost(uint16 engine_type, byte old_cargo_type,byte new_cargo_type) 
++{ 
++  if (!(_rail_vehicle_info[engine_type].flags & RVI_WAGON) && old_cargo_type != new_cargo_type && _rail_vehicle_info[engine_type].capacity) 
++    return (_price.build_railvehicle >> 8);
++  return 0; 
++}
++
++
+ // p1 = vehicle to refit
+ // p2 = new cargo
+ 
+@@ -1015,7 +1044,7 @@
+ 
+ 	do {
+ 		if (!(_rail_vehicle_info[v->engine_type].flags & RVI_WAGON) && (byte)p2 != v->cargo_type && v->cargo_cap != 0) {
+-			cost += (_price.build_railvehicle >> 8);
++			cost += LocoRefitCost(v->engine_type,v->cargo_type,(byte)p2); 
+ 			num += v->cargo_cap;
+ 			if (flags & DC_EXEC) {
+ 				v->cargo_count = 0;
+@@ -1030,6 +1059,127 @@
+ 	return cost;
+ }
+ 
++extern int32 CmdCloneOrder(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++
++
++/* Clone a Train
++ * p1 vehicle index to clone, this is the head of a train to clone.
++ */
++int32 CmdCloneTrain(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++{
++	int32 cost = 0;
++	Vehicle *v, *org, *end_of_train;
++	int _last_build_train,_last_build_wagon,_last_build;
++
++	v = NULL;
++
++	// The loc of the train to clone
++	org = &_vehicles[p1];
++
++	// It must be a train to clone...
++	if (org->type != VEH_Train) 
++		return CMD_ERROR;
++
++	// You must own the train to clone...
++	if (!CheckOwnership(org->owner))
++		return CMD_ERROR;
++
++	// Check if railtype is correct :)
++	{
++		int tile, railtype;
++		tile = TILE_FROM_XY(x,y);
++		// type of rail in depot
++		if (tile != 0) {
++			railtype = _map3_lo[tile] & 0xF;
++		} else {
++			railtype = DEREF_PLAYER(_local_player)->max_railtype - 1;
++		}
++		// check if rail in depot matches clicked train
++		if ( (&_engines[org->engine_type])->railtype != railtype){
++			return_cmd_error(STR_TRAIN_CAN_T_CLONE_WRONG_TRACK);
++		}
++
++	}
++
++	// Check if engine can be bought (it must be available!)
++	if ( ! (&_engines[org->engine_type])->player_avail & 0xFF ){
++		return_cmd_error(STR_TRAIN_CAN_T_CLONE_NOT_AVAIL);
++	}
++
++	// All seems to be OK
++
++	/*** Clone Train ***/
++
++	// _last_build_* will contain bogus info when ( !DO_EXEC );
++	// but that's not to bad, because nothing is done with it...when ( ! DO_ECEX)
++	_last_build_train = 0;
++	_last_build_wagon = 0;
++
++	// for every vehicle in the original train: make a copy of it
++	do { 
++		// Is it part of a multiheaded loc?
++		if ((&_rail_vehicle_info[org->engine_type])->flags & RVI_MULTIHEAD){
++			int part = 0; // part number to buy
++			// p2: 1 for not normalize, (1<<1) for buying only parts of multi head
++			//     0<<2 for piece number to buy
++			part = org->spritenum - (&_rail_vehicle_info[org->engine_type])->image_index;
++			cost += CmdBuildRailVehicle( x, y, flags, org->engine_type, 1|(1<<1)|(part<<2));
++		}else{
++			// just a wagon
++			cost += CmdBuildRailVehicle( x, y, flags, org->engine_type, 1);
++		}
++
++		if ( v == NULL ){ // if it's the first item (thus a loc), set it to v
++			v = &_vehicles[_new_train_id];
++		}
++
++		// set _last_build to the item last build (a wagon or a loc)
++		if (_last_build_train != _new_train_id ){ 
++			_last_build = _new_train_id;
++			_last_build_train = _new_train_id;
++		}else{
++			_last_build = _new_wagon_id;
++			_last_build_wagon = _new_wagon_id;
++		}
++
++		// check if wagon/loc part was refitted
++		if ( (&_rail_vehicle_info[org->engine_type])->cargo_type != org->cargo_type ){
++			// wagon/loc was refitted	
++			if (!(flags & DC_EXEC)) {
++				// LocoRefitCost(engine type.old_type,new_type)
++				cost += LocoRefitCost(org->engine_type,(&_rail_vehicle_info[org->engine_type])->cargo_type,org->cargo_type);
++			}else{
++				// Do it really 
++				cost += CmdRefitRailVehicle(x,y, flags,_last_build, org->cargo_type);
++			}
++		}
++
++		// move the _last_build wagons/loc to end of train:
++		if (flags & DC_EXEC) {
++			// only when a new train is really created!
++			end_of_train = GetLastVehicleInChain(v);
++			// the 1<<1 forces the vehicles into order
++			CmdMoveRailVehicle(x,y,flags, _last_build | ((end_of_train->index) <<16) ,(1<<1));
++		}
++	}while( org = org->next );
++
++	if (flags & DC_EXEC){ // only when a new train is really created!
++		v = GetFirstVehicleInChain(&_vehicles[_last_build]);
++
++		// set the right value for this global
++		_new_train_id = v->index;
++		org = &_vehicles[p1];
++
++		// Clone/Copy the orders, pressing ctrl will clone the orders
++		CmdCloneOrder(x,y,flags, v->index | ((org->index)<<16), ! _ctrl_pressed);
++	}
++
++	// return the costs
++	return cost;
++}
++
++
++
+ int GetDepotByTile(uint tile)
+ {
+ 	Depot *d;
+Index: OpenTTD/train_gui.c
+===================================================================
+--- OpenTTD/train_gui.c	(revision 20)
++++ OpenTTD/train_gui.c	(working copy)
+@@ -72,6 +72,19 @@
+ 	ShowTrainViewWindow(v);
+ }
+ 
++// Call Back Function when creating a clone of a train
++static void CcCloneTrain(bool success, uint tile, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++
++	if (!success)
++		return;
++				
++	v = &_vehicles[_new_train_id];
++	ShowTrainViewWindow(v);
++}
++
++
+ static void NewRailVehicleWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -274,7 +287,7 @@
+ 	tile = w->window_number;
+ 
+ 	/* setup disabled buttons */
+-	w->disabled_state = (_map_owner[tile]==_local_player) ? 0 : ((1<<3)|(1<<4)|(1<<6));
++	w->disabled_state = (_map_owner[tile]==_local_player) ? 0 : ((1<<3)|(1<<4)|(1<<6)|(1<<9));
+ 
+ 	/* determine amount of items for scroller */
+ 	num = 1;
+@@ -471,6 +484,47 @@
+ 	}
+ }
+ 
++
++/* Clone a train
++ * v is the train to clone.
++ */
++static bool HandleCloneVehClick(Vehicle *v, Window *w)
++{
++
++	if (!v){
++		return false;
++	}
++
++	// for train vehicles: subtype 0 for locs and not zero for others
++	if (v->type == VEH_Train && v->subtype != 0) {
++		v = GetFirstVehicleInChain(v);
++		if (v->subtype != 0) // This happens when clicking on a train in depot with no loc attached
++			return false;
++	}else{
++		if (v->type != VEH_Train) {
++			// it's not a train, Do Nothing
++			return false;
++		}
++	}
++
++	//DoCommand(window, train head to clone, p2, CallBackUnit, CMD_ Stuff)
++    DoCommandP(w->window_number, v->index  ,0,CcCloneTrain,CMD_CLONE_TRAIN | CMD_MSG(STR_TRAIN_CAN_T_CLONE_TRAIN));
++
++	ResetObjectToPlace();
++
++	return true;
++}
++
++static void ClonePlaceObj(uint tile, Window *w)
++{
++	Vehicle *v;
++
++
++	v = CheckMouseOverVehicle();
++	if (v && HandleCloneVehClick(v, w))
++		return;
++}
++
+ static void TrainDepotWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -489,9 +543,40 @@
+ 		case 2:
+ 			TrainDepotClickTrain(w, e->click.pt.x, e->click.pt.y);
+ 			break;
++		case 9: /* clone button */
++			InvalidateWidget(w, 9);
++			w->click_state ^= 1<<9;
++
++			if (HASBIT(w->click_state, 9)) {
++				_place_clicked_vehicle = NULL;
++				SetObjectToPlaceWnd(ANIMCURSOR_PICKSTATION, 1, w);
++			} else {
++				ResetObjectToPlace();
++			}
++			break;
++
+ 		}
+ 	} break;
+ 
++	case WE_PLACE_OBJ: {
++		ClonePlaceObj(e->place.tile, w);
++	} break;
++
++	case WE_ABORT_PLACE_OBJ: {
++		w->click_state &= ~(1<<9);
++		InvalidateWidget(w, 9);
++	} break;
++
++	// check if a vehicle in a depot was clicked..
++	case WE_MOUSELOOP: {
++		Vehicle *v = _place_clicked_vehicle;
++		if (v) {
++			_place_clicked_vehicle = NULL;
++			HandleCloneVehClick( v, w);
++		}
++	} break;
++
++
+ 	case WE_DESTROY:
+ 		DeleteWindowById(WC_BUILD_VEHICLE, w->window_number);
+ 		break;
+@@ -565,9 +650,10 @@
+ {      WWT_PANEL,    14,   314,   337,    55,   108, 0x2BF,									STR_DRAG_WHOLE_TRAIN_TO_SELL_TIP},
+ 
+ {  WWT_SCROLLBAR,    14,   338,   348,    14,   108, 0x0,										STR_0190_SCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,    14,     0,   173,    109,  120, STR_8815_NEW_VEHICLES,	STR_8840_BUILD_NEW_TRAIN_VEHICLE},
+-{ WWT_PUSHTXTBTN,    14,   174,   348,    109,  120, STR_00E4_LOCATION,			STR_8842_CENTER_MAIN_VIEW_ON_TRAIN},
++{ WWT_PUSHTXTBTN,    14,     0,   116,    109,  120, STR_8815_NEW_VEHICLES,	STR_8840_BUILD_NEW_TRAIN_VEHICLE},
++{ WWT_PUSHTXTBTN,    14,   233,   348,    109,  120, STR_00E4_LOCATION,			STR_8842_CENTER_MAIN_VIEW_ON_TRAIN},
+ { WWT_HSCROLLBAR,    14,     0,   313,    98,   108, 0x0,										STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{WWT_NODISTXTBTN,    14,   117,   232,    109,  120, STR_TRAIN_CLONE,		STR_TRAIN_CLONE_TOOL_TIP},
+ {      WWT_LAST},
+ };
+ 
+Index: OpenTTD/command.c
+===================================================================
+--- OpenTTD/command.c	(revision 20)
++++ OpenTTD/command.c	(working copy)
+@@ -160,6 +160,8 @@
+ 
+ DEF_COMMAND(CmdStartScenario);
+ 
++DEF_COMMAND(CmdCloneTrain);
++
+ /* The master command table */
+ static CommandProc * const _command_proc_table[] = {
+ 	CmdBuildRailroadTrack,			/* 0 */
+@@ -294,9 +296,11 @@
+ 	CmdRefitRailVehicle,		/* 106 */
+ 	CmdRestoreOrderIndex,		/* 107 */
+ 	CmdBuildLock,						/* 108 */
+-	CmdStartScenario				/* 109 */
++	CmdStartScenario,				/* 109 */
+ 	
+ 	//CmdDestroyIndustry,			/* 109 */
++
++	CmdCloneTrain					/* 110*/
+ };
+ 
+ int32 DoCommandByTile(TileIndex tile, uint32 p1, uint32 p2, uint32 flags, uint procc)
+Index: OpenTTD/command.h
+===================================================================
+--- OpenTTD/command.h	(revision 20)
++++ OpenTTD/command.h	(working copy)
+@@ -144,6 +144,8 @@
+ 	CMD_START_SCENARIO = 109,
+ 
+ 	//CMD_DESTROY_INDUSTRY = 109,
++
++	CMD_CLONE_TRAIN = 110,
+ };
+ 
+ enum {

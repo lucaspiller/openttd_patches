@@ -1,0 +1,383 @@
+Index: network_data.h
+===================================================================
+--- network_data.h	(revision 2364)
++++ network_data.h	(working copy)
+@@ -56,7 +56,6 @@
+ typedef enum {
+ 	MAP_PACKET_START,
+ 	MAP_PACKET_NORMAL,
+-	MAP_PACKET_PATCH,
+ 	MAP_PACKET_END,
+ } MapPacket;
+ 
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2364)
++++ saveload.c	(working copy)
+@@ -8,7 +8,7 @@
+ #include "saveload.h"
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 13,
++	SAVEGAME_MAJOR_VERSION = 14,
+ 	SAVEGAME_MINOR_VERSION = 0x1,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+@@ -71,12 +71,6 @@
+ 	return SlReadByteInternal();
+ }
+ 
+-void SlWriteByte(byte v)
+-{
+-	if (_sl.bufp == _sl.bufe) SlWriteFill();
+-	*_sl.bufp++ = v;
+-}
+-
+ static int SlReadUint16(void)
+ {
+ 	int x = SlReadByte() << 8;
+@@ -96,6 +90,12 @@
+ 	return (uint64)x << 32 | y;
+ }
+ 
++void SlWriteByte(byte v)
++{
++	if (_sl.bufp == _sl.bufe) SlWriteFill();
++	*_sl.bufp++ = v;
++}
++
+ static void SlWriteUint16(uint16 v)
+ {
+ 	SlWriteByte((byte)(v >> 8));
+@@ -264,6 +264,7 @@
+ 	if (_sl.save) {
+ 		// Read a value from the struct. These ARE endian safe.
+ 		switch((conv >> 4)&0xf) {
++		case SLE_VAR_B>>4: x = *(bool*)ptr; break;
+ 		case SLE_VAR_I8>>4: x = *(int8*)ptr; break;
+ 		case SLE_VAR_U8>>4: x = *(byte*)ptr; break;
+ 		case SLE_VAR_I16>>4: x = *(int16*)ptr; break;
+@@ -279,6 +280,7 @@
+ 
+ 		// Write it to the file
+ 		switch(conv & 0xF) {
++		case SLE_FILE_B: assert( x == 1 || x == 0); SlWriteByte(x);break; // boolean values take a whole byte
+ 		case SLE_FILE_I8: assert(x >= -128 && x <= 127); SlWriteByte(x);break;
+ 		case SLE_FILE_U8:	assert(x >= 0 && x <= 255); SlWriteByte(x);break;
+ 		case SLE_FILE_I16:assert(x >= -32768 && x <= 32767); SlWriteUint16(x);break;
+@@ -296,6 +298,7 @@
+ 
+ 		// Read a value from the file
+ 		switch(conv & 0xF) {
++		case SLE_FILE_B: x = (bool)SlReadByte();	break;
+ 		case SLE_FILE_I8: x = (int8)SlReadByte();	break;
+ 		case SLE_FILE_U8: x = (byte)SlReadByte(); break;
+ 		case SLE_FILE_I16: x = (int16)SlReadUint16();	break;
+@@ -312,6 +315,7 @@
+ 
+ 		// Write it to the struct, these ARE endian safe.
+ 		switch((conv >> 4)&0xf) {
++		case SLE_VAR_B>>4: *(bool*)ptr = x; break;
+ 		case SLE_VAR_I8>>4: *(int8*)ptr = x; break;
+ 		case SLE_VAR_U8>>4: *(byte*)ptr = x; break;
+ 		case SLE_VAR_I16>>4: *(int16*)ptr = x; break;
+@@ -436,6 +440,7 @@
+ 	}
+ 
+ 	while (true) {
++	
+ 		// Currently it only supports up to 4096 byte big objects
+ 		ptr = (byte*)object + (d[0] & 0xF) + (d[1] << 4);
+ 
+@@ -634,6 +639,7 @@
+ 	for(p=0; p!=CH_NUM_PRI_LEVELS; p++) {
+ 		for(chsc=_sl.chs;(ch=*chsc++) != NULL;) {
+ 			while(true) {
++				DEBUG(misc,5)("Saving chunk %c%c%c%c", ch->id >> 24, ch->id>>16, ch->id>>8, ch->id);
+ 				if (((ch->flags >> CH_PRI_SHL) & (CH_NUM_PRI_LEVELS - 1)) == p)
+ 					SlSaveChunk(ch);
+ 				if (ch->flags & CH_LAST)
+@@ -672,9 +678,7 @@
+ 		id = SlReadUint32();
+ 		if (id == 0)
+ 			return;
+-#if 0
+-		printf("Loading chunk %c%c%c%c\n", id >> 24, id>>16, id>>8,id);
+-#endif
++		DEBUG(misc,5)("Loading chunk %c%c%c%c", id >> 24, id>>16, id>>8,id);
+ 		ch = SlFindChunkHandler(id);
+ 		if (ch == NULL) SlError("found unknown tag in savegame (sync error)");
+ 		SlLoadChunk(ch);
+Index: saveload.h
+===================================================================
+--- saveload.h	(revision 2364)
++++ saveload.h	(working copy)
+@@ -100,6 +100,7 @@
+ };
+ 
+ enum {
++
+ 	SLE_FILE_I8 = 0,
+ 	SLE_FILE_U8 = 1,
+ 	SLE_FILE_I16 = 2,
+@@ -110,6 +111,8 @@
+ 	SLE_FILE_U64 = 7,
+ 
+ 	SLE_FILE_STRINGID = 8,
++	
++	SLE_FILE_B = 9,
+ //	SLE_FILE_IVAR = 8,
+ //	SLE_FILE_UVAR = 9,
+ 
+@@ -124,6 +127,8 @@
+ 
+ 	SLE_VAR_NULL = 8 << 4, // useful to write zeros in savegame.
+ 
++	SLE_VAR_B = 9 << 4,
++	
+ 	SLE_VAR_INT = SLE_VAR_I32,
+ 	SLE_VAR_UINT = SLE_VAR_U32,
+ 
+@@ -137,6 +142,8 @@
+ 	SLE_UINT64 = SLE_FILE_U64 | SLE_VAR_U64,
+ 
+ 	SLE_STRINGID = SLE_FILE_STRINGID | SLE_VAR_U16,
++	
++	SLE_BOOL = SLE_FILE_B | SLE_VAR_B,
+ };
+ 
+ #define SLE_VAR(t,i,c) 0 | (offsetof(t,i) & 0xF), offsetof(t,i) >> 4, c
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2364)
++++ misc.c	(working copy)
+@@ -787,7 +787,84 @@
+ 	SlObject(&_opt, _game_opt_desc);
+ }
+ 
++static const byte _game_patch_desc[] = {
++	SLE_VAR(Patches,	build_on_slopes,	SLE_BOOL),
++	SLE_VAR(Patches,	mammoth_trains,	SLE_BOOL),
++	SLE_VAR(Patches,	join_stations,	SLE_BOOL),
++	SLE_VAR(Patches,	station_spread,	SLE_UINT8),
++	SLE_VAR(Patches,	full_load_any,	SLE_BOOL),
++	SLE_VAR(Patches,	modified_catchment,	SLE_BOOL),
++	SLE_VAR(Patches,	inflation,	SLE_BOOL),
++	SLE_VAR(Patches,	selectgoods,	SLE_BOOL),
++	SLE_VAR(Patches,	longbridges,	SLE_BOOL),
++	SLE_VAR(Patches,	gotodepot,	SLE_BOOL),
++	SLE_VAR(Patches,	build_rawmaterial_ind,	SLE_BOOL),
++	SLE_VAR(Patches,	multiple_industry_per_town,	SLE_BOOL),
++	SLE_VAR(Patches,	same_industry_close,	SLE_BOOL),
++	SLE_VAR(Patches,	signal_side,	SLE_BOOL),
++	SLE_VAR(Patches,	new_nonstop,	SLE_BOOL),
++	SLE_VAR(Patches,	roadveh_queue,	SLE_BOOL),
++	SLE_VAR(Patches,	snow_line_height,	SLE_UINT8),
++	SLE_VAR(Patches,	bribe,	SLE_BOOL),
++	SLE_VAR(Patches,	new_depot_finding,	SLE_BOOL),
++	SLE_VAR(Patches,	nonuniform_stations,	SLE_BOOL),
++	SLE_VAR(Patches,	always_small_airport,	SLE_BOOL),
++	SLE_VAR(Patches,	realistic_acceleration,	SLE_BOOL),
++	SLE_VAR(Patches,	forbid_90_deg,	SLE_BOOL),
++	SLE_VAR(Patches,	improved_load,	SLE_BOOL),
++	SLE_VAR(Patches,	max_trains,	SLE_UINT16),
++	SLE_VAR(Patches,	max_roadveh,	SLE_UINT16),
++	SLE_VAR(Patches,	max_aircraft,	SLE_UINT16),
++	SLE_VAR(Patches,	max_ships,	SLE_UINT16),
++	SLE_VAR(Patches,	servint_ispercent,	SLE_BOOL),
++	SLE_VAR(Patches,	servint_trains,	SLE_UINT16),
++	SLE_VAR(Patches,	servint_roadveh,	SLE_UINT16),
++	SLE_VAR(Patches,	servint_ships,	SLE_UINT16),
++	SLE_VAR(Patches,	servint_aircraft,	SLE_UINT16),
++	SLE_VAR(Patches,	no_servicing_if_no_breakdowns,	SLE_BOOL),
++	SLE_VAR(Patches,	new_pathfinding,	SLE_BOOL),
++	SLE_VAR(Patches,	pf_maxlength,	SLE_UINT16),
++	SLE_VAR(Patches,	pf_maxdepth,	SLE_UINT32),
++	SLE_VAR(Patches,	ai_disable_veh_train,	SLE_BOOL),
++	SLE_VAR(Patches,	ai_disable_veh_roadveh,	SLE_BOOL),
++	SLE_VAR(Patches,	ai_disable_veh_aircraft,	SLE_BOOL),
++	SLE_VAR(Patches,	ai_disable_veh_ship,	SLE_BOOL),
++	SLE_VAR(Patches,	starting_date,	SLE_UINT32),
++	SLE_VAR(Patches,	ending_date,	SLE_UINT32),
++	SLE_VAR(Patches,	colored_news_date,	SLE_UINT32),
++	SLE_VAR(Patches,	extra_dynamite,	SLE_BOOL),
++	SLE_VAR(Patches,	never_expire_vehicles,	SLE_BOOL),
++	SLE_VAR(Patches,	extend_vehicle_life,	SLE_UINT8),
++	SLE_VAR(Patches,	auto_euro,	SLE_BOOL),
++	SLE_VAR(Patches,	serviceathelipad,	SLE_BOOL),
++	SLE_VAR(Patches,	smooth_economy,	SLE_BOOL),
++	SLE_VAR(Patches,	allow_shares,	SLE_BOOL),
++	SLE_VAR(Patches,	dist_local_authority,	SLE_UINT8),
++	SLE_VAR(Patches,	wait_oneway_signal,	SLE_UINT8),
++	SLE_VAR(Patches,	wait_twoway_signal,	SLE_UINT8),
++	SLE_VAR(Patches,	ainew_active,	SLE_BOOL),
++	SLE_VAR(Patches,	map_x,	SLE_UINT32),
++	SLE_VAR(Patches,	map_y,	SLE_UINT32),
++	SLE_VAR(Patches,	new_pathfinding_all,	SLE_BOOL),
++	SLE_VAR(Patches,	npf_max_search_nodes,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_firstred_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_firstred_exit_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_lastred_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_station_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_slope_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_curve_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_rail_depot_reverse_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_buoy_penalty,	SLE_UINT32),
++	SLE_VAR(Patches,	npf_water_curve_penalty,	SLE_UINT32),
++	SLE_END()
++};
+ 
++// Save load game patches
++static void SaveLoad_PATS(void)
++{
++	SlObject(&_patches, _game_patch_desc);
++}
++
+ static const SaveLoadGlobVarList _date_desc[] = {
+ 	{&_date, 										SLE_UINT16, 0, 255},
+ 	{&_date_fract, 							SLE_UINT16, 0, 255},
+@@ -943,5 +1020,6 @@
+ 	{ 'DATE', SaveLoad_DATE, SaveLoad_DATE, CH_RIFF},
+ 	{ 'VIEW', SaveLoad_VIEW, SaveLoad_VIEW, CH_RIFF},
+ 	{ 'OPTS', SaveLoad_OPTS, SaveLoad_OPTS, CH_RIFF},
+-	{ 'CHTS', Save_CHTS, Load_CHTS, CH_RIFF | CH_LAST}
++	{ 'PATS', SaveLoad_PATS, SaveLoad_PATS, CH_RIFF},
++	{ 'CHTS', Save_CHTS, Load_CHTS, CH_RIFF | CH_LAST},
+ };
+Index: network_client.c
+===================================================================
+--- network_client.c	(revision 2364)
++++ network_client.c	(working copy)
+@@ -26,8 +26,6 @@
+ 
+ static uint32 last_ack_frame;
+ 
+-void NetworkRecvPatchSettings(NetworkClientState *cs, Packet *p);
+-
+ // **********
+ // Sending functions
+ //   DEF_CLIENT_SEND_COMMAND has no parameters
+@@ -481,10 +479,6 @@
+ 		InvalidateWindow(WC_NETWORK_STATUS_WINDOW, 0);
+ 	}
+ 
+-	if (maptype == MAP_PACKET_PATCH) {
+-		NetworkRecvPatchSettings(MY_CLIENT, p);
+-	}
+-
+ 	// Check if this was the last packet
+ 	if (maptype == MAP_PACKET_END) {
+ 		// We also get, very nice, the player_seeds in this packet
+@@ -507,7 +501,7 @@
+ 			return NETWORK_RECV_STATUS_SAVEGAME;
+ 		}
+ 
+-		_opt_ptr = &_opt; // during a network game you are always in-game
++		//_opt_ptr = &_opt; // during a network game you are always in-game
+ 
+ 		// Say we received the map and loaded it correctly!
+ 		SEND_COMMAND(PACKET_CLIENT_MAP_OK)();
+@@ -796,37 +790,6 @@
+ // If this fails, check the array above with network_data.h
+ assert_compile(lengthof(_network_client_packet) == PACKET_END);
+ 
+-extern const SettingDesc patch_settings[];
+-
+-// This is a TEMPORARY solution to get the patch-settings
+-//  to the client. When the patch-settings are saved in the savegame
+-//  this should be removed!!
+-void NetworkRecvPatchSettings(NetworkClientState *cs, Packet *p)
+-{
+-	const SettingDesc *item;
+-
+-	item = patch_settings;
+-
+-	while (item->name != NULL) {
+-		switch (item->flags) {
+-			case SDT_BOOL:
+-			case SDT_INT8:
+-			case SDT_UINT8:
+-				*(uint8 *)(item->ptr) = NetworkRecv_uint8(cs, p);
+-				break;
+-			case SDT_INT16:
+-			case SDT_UINT16:
+-				*(uint16 *)(item->ptr) = NetworkRecv_uint16(cs, p);
+-				break;
+-			case SDT_INT32:
+-			case SDT_UINT32:
+-				*(uint32 *)(item->ptr) = NetworkRecv_uint32(cs, p);
+-				break;
+-		}
+-		item++;
+-	}
+-}
+-
+ // Is called after a client is connected to the server
+ void NetworkClient_Connected(void)
+ {
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2364)
++++ network_server.c	(working copy)
+@@ -20,7 +20,6 @@
+ 
+ void NetworkHandleCommandQueue(NetworkClientState *cs);
+ void NetworkPopulateCompanyInfo(void);
+-void NetworkSendPatchSettings(NetworkClientState *cs);
+ 
+ extern const char _openttd_revision[];
+ 
+@@ -326,9 +325,6 @@
+ 				int i;
+ 				Packet *p;
+ 
+-				// XXX - Delete this when patch-settings are saved in-game
+-				NetworkSendPatchSettings(cs);
+-
+ 				p = NetworkSend_Init(PACKET_SERVER_MAP);
+ 				NetworkSend_uint8(p, MAP_PACKET_END);
+ 				// Send the player_seeds in this packet
+@@ -1188,43 +1184,6 @@
+ // If this fails, check the array above with network_data.h
+ assert_compile(lengthof(_network_server_packet) == PACKET_END);
+ 
+-
+-extern const SettingDesc patch_settings[];
+-
+-// This is a TEMPORARY solution to get the patch-settings
+-//  to the client. When the patch-settings are saved in the savegame
+-//  this should be removed!!
+-void NetworkSendPatchSettings(NetworkClientState *cs)
+-{
+-	const SettingDesc *item;
+-	Packet *p = NetworkSend_Init(PACKET_SERVER_MAP);
+-	NetworkSend_uint8(p, MAP_PACKET_PATCH);
+-	// Now send all the patch-settings in a pretty order..
+-
+-	item = patch_settings;
+-
+-	while (item->name != NULL) {
+-		switch (item->flags) {
+-			case SDT_BOOL:
+-			case SDT_INT8:
+-			case SDT_UINT8:
+-				NetworkSend_uint8(p, *(uint8 *)item->ptr);
+-				break;
+-			case SDT_INT16:
+-			case SDT_UINT16:
+-				NetworkSend_uint16(p, *(uint16 *)item->ptr);
+-				break;
+-			case SDT_INT32:
+-			case SDT_UINT32:
+-				NetworkSend_uint32(p, *(uint32 *)item->ptr);
+-				break;
+-		}
+-		item++;
+-	}
+-
+-	NetworkSend_Packet(p, cs);
+-}
+-
+ // This update the company_info-stuff
+ void NetworkPopulateCompanyInfo(void)
+ {

@@ -1,0 +1,103 @@
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3145)
++++ openttd.c	(working copy)
+@@ -65,6 +65,8 @@
+ 
+ bool _dbg_screen_rect;
+ 
++static uint16 _num_sign_sort; // Sign sort thing
++
+ /* TODO: usrerror() for errors which are not of an internal nature but
+  * caused by the user, i.e. missing files or fatal configuration errors.
+  * Post-0.4.0 since Celestar doesn't want this in SVN before. --pasky */
+@@ -273,6 +275,7 @@
+ static void LoadIntroGame(void)
+ {
+ 	char filename[256];
++	const SignStruct *ss;
+ 
+ 	_game_mode = GM_MENU;
+ 	CLRBITS(_display_opt, DO_TRANS_BUILDINGS); // don't make buildings transparent in intro
+@@ -295,6 +298,21 @@
+ 			GenerateWorld(1, 64, 64); // if failed loading, make empty world.
+ 	}
+ 
++	// Sort signs for movey thingy
++	_num_sign_sort = 0;
++
++	_sign_sort = realloc(_sign_sort, GetSignPoolSize() * sizeof(_sign_sort[0]));
++	if (_sign_sort == NULL)
++		error("Could not allocate memory for the sign-sorting-list");
++
++	FOR_ALL_SIGNS(ss) {
++		if(ss->str != STR_NULL) {
++			_sign_sort[_num_sign_sort++] = ss->index;
++		}
++	}
++
++	_sign_last_update = 0;
++
+ 	_pause = 0;
+ 	_local_player = 0;
+ 	MarkWholeScreenDirty();
+@@ -881,6 +899,33 @@
+ 		CallWindowTickEvent();
+ 		NewsLoop();
+ 		_current_player = p;
++		
++		if (_game_mode == GM_MENU && _tick_counter - _sign_last_update > 370) {
++			// 370 ticks ~ 10 secs
++			SignStruct *ss = NULL;
++			Window *w = FindWindowById(WC_MAIN_WINDOW, 0);
++			char buf1[64];
++			int zoom_level;
++			assert(w);
++	
++			if (_num_sign_sort > 0) {
++				_view_sign_number++;
++				if (_view_sign_number >= _num_sign_sort)
++					_view_sign_number = 0;
++	
++				ss = GetSign(_sign_sort[_view_sign_number]);
++				GetString(buf1, ss->str);
++				zoom_level = strtol(buf1, NULL, 10);
++				if (zoom_level < 0 || zoom_level > 2)
++					zoom_level = 0;
++			
++				DEBUG(misc, 2) ("Sign number: %d Zoom: %d", ss->index, zoom_level);
++				w->viewport->zoom = zoom_level;
++		         	ScrollMainWindowToTile(TileVirtXY(ss->x, ss->y));
++			}
++	
++			_sign_last_update = _tick_counter;
++		}		
+ 	}
+ }
+ 
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 3145)
++++ openttd.h	(working copy)
+@@ -563,4 +563,8 @@
+ 
+ void OTTD_SendThreadMessage(ThreadMsg msg);
+ 
++/* Variables for sign scrolling of title screen */
++VARDEF uint16 _sign_last_update;
++VARDEF uint32 _view_sign_number;
++
+ #endif /* OPENTTD_H */
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 3145)
++++ viewport.c	(working copy)
+@@ -900,7 +900,7 @@
+ 	int left, top, right, bottom;
+ 	StringSpriteToDraw *sstd;
+ 
+-	if (!(_display_opt & DO_SHOW_SIGNS))
++	if (!(_display_opt & DO_SHOW_SIGNS || _game_mode == GM_MENU))
+ 		return;
+ 
+ 	left = dpi->left;

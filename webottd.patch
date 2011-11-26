@@ -1,0 +1,205 @@
+Index: video/png_v.h
+===================================================================
+--- video/png_v.h	(revision 0)
++++ video/png_v.h	(revision 0)
+@@ -0,0 +1,11 @@
++/* $Id$ */
++
++#ifndef VIDEO_PNG_H
++#define VIDEO_PNG_H
++
++#include <png.h>
++#include "../hal.h"
++
++extern const HalVideoDriver _png_video_driver;
++
++#endif /* VIDEO_PNG_H */
+
+Property changes on: video/png_v.h
+___________________________________________________________________
+Name: svn:keyword
+   + Id
+
+Index: video/png_v.c
+===================================================================
+--- video/png_v.c	(revision 0)
++++ video/png_v.c	(revision 0)
+@@ -0,0 +1,135 @@
++/* $Id$ */
++
++/* $Id: null_v.c 2748 2005-07-29 16:40:29Z tron $ */
++
++#include "../stdafx.h"
++#include "../openttd.h"
++#include "../gfx.h"
++#include "../variables.h"
++#include "../window.h"
++#include "../debug.h"
++#include "png_v.h"
++
++typedef struct SPNG {
++	FILE *f;
++	png_structp ptr;
++	png_infop info_ptr;
++} SPNG;
++
++static SPNG _png;
++
++static void PNGAPI png_my_error(png_structp png_ptr, png_const_charp message)
++{
++	DEBUG(misc, 0) ("ERROR(libpng): %s - %s", message, (char *)png_get_error_ptr(png_ptr));
++	longjmp(png_ptr->jmpbuf, 1);
++}
++
++static void PNGAPI png_my_warning(png_structp png_ptr, png_const_charp message)
++{
++	DEBUG(misc, 0) ("WARNING(libpng): %s - %s", message, (char *)png_get_error_ptr(png_ptr));
++}
++
++static const char* PngVideoStart(const char* const* parm)
++{
++	png_color rq[256];
++	char name[100];
++	uint i;
++
++	snprintf(name, sizeof(name), "game.png");
++
++	_screen.width = _screen.pitch = 640;
++	_screen.height = 480;
++
++	/* Open our output file */
++	_png.f = fopen(name, "wb");
++	if (_png.f == NULL)
++		/* Failed, we can not load this driver! */
++		return strdup("Cannot open output-file!");
++
++	/* Create PNG stream */
++	_png.ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, name, png_my_error, png_my_warning);
++	if (_png.ptr == NULL) {
++		fclose(_png.f);
++		return strdup("Cannot initialize PNG!");;
++	}
++
++	/* Create info-struct */
++	_png.info_ptr = png_create_info_struct(_png.ptr);
++	if (_png.info_ptr == NULL) {
++		png_destroy_write_struct(&_png.ptr, (png_infopp)NULL);
++		fclose(_png.f);
++		return false;
++	}
++
++	/* Set error-check */
++	if (setjmp(png_jmpbuf(_png.ptr))) {
++		png_destroy_write_struct(&_png.ptr, &_png.info_ptr);
++		fclose(_png.f);
++		return false;
++	}
++
++	/* Set some basic stuff */
++	png_init_io(_png.ptr, _png.f);
++	png_set_filter(_png.ptr, 0, PNG_FILTER_NONE);
++	png_set_IHDR(_png.ptr, _png.info_ptr, 640, 480, 8, PNG_COLOR_TYPE_PALETTE,
++		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
++
++	/* Set the palette */
++	for (i = 0; i != 256; i++) {
++		rq[i].red   = _cur_palette[i].r;
++		rq[i].green = _cur_palette[i].g;
++		rq[i].blue  = _cur_palette[i].b;
++	}
++	png_set_PLTE(_png.ptr, _png.info_ptr, rq, 256);
++
++	png_write_info(_png.ptr, _png.info_ptr);
++//	png_set_flush(_png.ptr, 512);
++
++	return NULL;
++}
++
++static void PngVideoStop(void)
++{
++	png_write_end(_png.ptr, _png.info_ptr);
++	png_destroy_write_struct(&_png.ptr, &_png.info_ptr);
++
++	fclose(_png.f);
++}
++
++static void PngVideoMakeDirty(int left, int top, int width, int height)
++{
++}
++
++static void PngVideoMainLoop(void)
++{
++	byte *buffer;
++	uint i;
++
++	buffer = malloc(640 * 480);
++	memset(buffer, 0, 640 * 480);
++
++	for (i = 0; i < 20; i++) {
++		GameLoop();
++		_screen.dst_ptr = buffer;
++		UpdateWindows();
++	}
++
++	for (i = 0; i < 480; i++) {
++		png_write_row(_png.ptr, buffer + i * 640);
++	}
++
++	free(buffer);
++}
++
++/* Silly to do this on this driver.. */
++static bool PngVideoChangeRes(int w, int h) {	return false; }
++static void PngVideoFullScreen(bool fs) { }
++
++const HalVideoDriver _png_video_driver = {
++	PngVideoStart,
++	PngVideoStop,
++	PngVideoMakeDirty,
++	PngVideoMainLoop,
++	PngVideoChangeRes,
++	PngVideoFullScreen,
++};
+
+Property changes on: video/png_v.c
+___________________________________________________________________
+Name: svn:keyword
+   + Id
+
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2766)
++++ Makefile	(working copy)
+@@ -705,6 +705,10 @@
+ C_SOURCES += music/extmidi.c
+ endif
+ 
++ifdef WITH_PNG
++C_SOURCES += video/png_v.c
++endif
++
+ ifdef OSX
+ OBJC_SOURCES += os/macosx/macos.m
+ endif
+Index: driver.c
+===================================================================
+--- driver.c	(revision 2766)
++++ driver.c	(working copy)
+@@ -23,6 +23,7 @@
+ #include "video/null_v.h"
+ #include "video/sdl_v.h"
+ #include "video/win32_v.h"
++#include "video/png_v.h"
+ 
+ typedef struct DriverDesc {
+ 	const char* name;
+@@ -82,6 +83,9 @@
+ #ifdef ENABLE_NETWORK
+ 	M("dedicated",  "Dedicated Video Driver", &_dedicated_video_driver),
+ #endif
++#ifdef WITH_PNG
++	M("png",        "PNG Video Driver",       &_png_video_driver),
++#endif
+ 	M(NULL, NULL, NULL)
+ };
+ #undef M

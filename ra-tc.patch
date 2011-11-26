@@ -1,0 +1,31 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 3023)
++++ train_cmd.c	(working copy)
+@@ -196,6 +196,7 @@
+ 	int max_speed = 2000;
+ 	int area = 120;
+ 	int friction = 35; //[1e-3]
++	int friction_coeff = 71; //[1e-2]
+ 	int drag_coeff = 20;	//[1e-4]
+ 	int incl = 0;
+ 	int resistance;
+@@ -324,8 +325,18 @@
+ 	if (v->u.rail.railtype != 2) force = min(force, mass * 10 * 200);
+ 
+ 	if (mode == AM_ACCEL) {
++		if (!HASBIT(v->u.rail.flags, VRF_GOINGDOWN) && v->u.rail.railtype != 2) {
++			friction = friction_coeff * v->u.rail.cached_veh_weight * (HASBIT(v->u.rail.flags, VRF_GOINGDOWN) ? 97 : 98);
++			if (friction < (force - resistance))
++				force = (force - resistance) + friction; // traction control
++		}
+ 		return (force - resistance) / (mass * 4);
+ 	} else {
++		if (!HASBIT(v->u.rail.flags, VRF_GOINGUP) && v->u.rail.railtype != 2) {
++			friction = friction_coeff * v->u.rail.cached_veh_weight * (HASBIT(v->u.rail.flags, VRF_GOINGDOWN) ? 97 : 98);
++			if (friction < (force - resistance))
++				force = (force - resistance) + friction;
++		}
+ 		return min((-force - resistance) / (mass * 4), 10000 / (mass * 4));
+ 	}
+ }

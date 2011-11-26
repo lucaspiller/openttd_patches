@@ -1,0 +1,209 @@
+Index: depot.c
+===================================================================
+--- depot.c	(revision 2765)
++++ depot.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include "table/strings.h"
+ #include "saveload.h"
+ #include "order.h"
++#include "station.h"
+ 
+ enum {
+ 	/* Max depots: 64000 (8 * 8000) */
+@@ -143,3 +144,28 @@
+ const ChunkHandler _depot_chunk_handlers[] = {
+ 	{ 'DEPT', Save_DEPT, Load_DEPT, CH_ARRAY | CH_LAST},
+ };
++
++TileIndex FindNearestDepot(PlayerID owner, StationID station, TransportType tiletype)
++{
++	enum { MAX_DISTANCE = 0xFFFF };
++
++	if (station == INVALID_STATION || tiletype == INVALID_TRANSPORT || owner == OWNER_NONE) {
++		return INVALID_TILE;
++	} else {
++		const TileIndex station_xy = GetStation(station)->xy;
++		TileIndex nearest_tile = INVALID_TILE;
++		Depot *depot;
++		uint current_distance = MAX_DISTANCE;
++
++		FOR_ALL_DEPOTS(depot) {
++			if (IsValidDepot(depot) || IsTileOwner(depot->xy, owner) || IsTileDepotType(depot->xy, tiletype)) {
++				uint distance = DistanceManhattan(depot->xy, station_xy);
++				if (distance < current_distance) {
++					current_distance = distance;
++					nearest_tile = depot->xy;
++				}
++			}
++		}
++		return nearest_tile;
++	}
++}
+Index: depot.h
+===================================================================
+--- depot.h	(revision 2765)
++++ depot.h	(working copy)
+@@ -144,5 +144,6 @@
+ void InitializeDepot(void);
+ Depot *AllocateDepot(void);
+ void DoDeleteDepot(TileIndex tile);
++TileIndex FindNearestDepot(PlayerID owner, StationID station, TileType tiletype);
+ 
+ #endif /* DEPOT_H */
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2765)
++++ openttd.h	(working copy)
+@@ -76,6 +76,7 @@
+ typedef uint32 CursorID;
+ typedef uint16 EngineID; //! All enginenumbers should be of this type
+ typedef uint16 UnitID;   //! All unitnumber stuff is of this type (or anyway, should be)
++typedef uint16 StationID;
+ 
+ typedef uint32 WindowNumber;
+ typedef byte WindowClass;
+Index: strgen/strgen.vcproj
+===================================================================
+--- strgen/strgen.vcproj	(revision 2765)
++++ strgen/strgen.vcproj	(working copy)
+@@ -136,9 +136,6 @@
+ 			Name="Source Files"
+ 			Filter="cpp;c;cxx;rc;def;r;odl;idl;hpj;bat">
+ 			<File
+-				RelativePath="stdafx.c">
+-			</File>
+-			<File
+ 				RelativePath="strgen.c">
+ 			</File>
+ 		</Filter>
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 2765)
++++ roadveh_gui.c	(working copy)
+@@ -1003,18 +1003,24 @@
+ 			if (!IsWindowOfPrototype(w, _player_roadveh_widgets))
+ 				break;
+ 
+-			tile = _last_built_road_depot_tile;
+-			do {
+-				if (IsTileDepotType(tile, TRANSPORT_ROAD) && IsTileOwner(tile, _local_player)) {
+-					ShowRoadDepotWindow(tile);
+-					ShowBuildRoadVehWindow(tile);
+-					return;
+-				}
++			tile = FindNearestDepot(owner, station, TRANSPORT_ROAD);
++			if (tile == INVALID_TILE) {
++				tile = _last_built_road_depot_tile;
++				do {
++					if (IsTileDepotType(tile, TRANSPORT_ROAD) && IsTileOwner(tile, _local_player)) {
++						ShowRoadDepotWindow(tile);
++						ShowBuildRoadVehWindow(tile);
++						return;
++					}
+ 
+-				tile = TILE_MASK(tile + 1);
+-			} while(tile != _last_built_road_depot_tile);
++					tile = TILE_MASK(tile + 1);
++				} while(tile != _last_built_road_depot_tile);
+ 
+-			ShowBuildRoadVehWindow(0);
++				ShowBuildRoadVehWindow(0);
++			} else {
++				ShowRoadDepotWindow(tile);
++				ShowBuildRoadVehWindow(tile);
++			}
+ 		} break;
+ 		case 10: {
+ 			if (!IsWindowOfPrototype(w, _player_roadveh_widgets))
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2765)
++++ train_gui.c	(working copy)
+@@ -1483,18 +1483,24 @@
+ 			if (!IsWindowOfPrototype(w, _player_trains_widgets))
+ 				break;
+ 
+-			tile = _last_built_train_depot_tile;
+-			do {
+-				if (IsTileDepotType(tile, TRANSPORT_RAIL) && IsTileOwner(tile, _local_player)) {
+-					ShowTrainDepotWindow(tile);
+-					ShowBuildTrainWindow(tile);
+-					return;
+-				}
++			tile = FindNearestDepot(owner, station, TRANSPORT_RAIL);
++			if (tile == INVALID_TILE) {
++				tile = _last_built_train_depot_tile;
++				do {
++					if (IsTileDepotType(tile, TRANSPORT_RAIL) && IsTileOwner(tile, _local_player)) {
++						ShowTrainDepotWindow(tile);
++						ShowBuildTrainWindow(tile);
++						return;
++					}
+ 
+-				tile = TILE_MASK(tile + 1);
+-			} while(tile != _last_built_train_depot_tile);
++					tile = TILE_MASK(tile + 1);
++				} while(tile != _last_built_train_depot_tile);
+ 
+-			ShowBuildTrainWindow(0);
++				ShowBuildTrainWindow(0);
++			} else {
++				ShowTrainDepotWindow(tile);
++				ShowBuildTrainWindow(tile);
++			}
+ 		} break;
+ 		case 10: {
+ 			if (!IsWindowOfPrototype(w, _player_trains_widgets))
+Index: station.h
+===================================================================
+--- station.h	(revision 2765)
++++ station.h	(working copy)
+@@ -32,8 +32,6 @@
+ 	ROAD_STOP_LIMIT = 8,
+ };
+ 
+-typedef uint16 StationID;
+-
+ typedef struct RoadStop {
+ 	TileIndex xy;
+ 	bool used;
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 2765)
++++ ship_gui.c	(working copy)
+@@ -1108,19 +1108,24 @@
+ 			if (!IsWindowOfPrototype(w, _player_ships_widgets))
+ 				break;
+ 
++			tile = FindNearestDepot(owner, station, TRANSPORT_WATER);
++			if (tile == INVALID_TILE) {
++				tile = _last_built_ship_depot_tile;
++				do {
++					if (IsTileDepotType(tile, TRANSPORT_WATER) && IsTileOwner(tile, _local_player)) {
++						ShowShipDepotWindow(tile);
++						ShowBuildShipWindow(tile);
++						return;
++					}
+ 
+-			tile = _last_built_ship_depot_tile;
+-			do {
+-				if (IsTileDepotType(tile, TRANSPORT_WATER) && IsTileOwner(tile, _local_player)) {
+-					ShowShipDepotWindow(tile);
+-					ShowBuildShipWindow(tile);
+-					return;
+-				}
++					tile = TILE_MASK(tile + 1);
++				} while(tile != _last_built_ship_depot_tile);
+ 
+-				tile = TILE_MASK(tile + 1);
+-			} while(tile != _last_built_ship_depot_tile);
+-
+-			ShowBuildShipWindow(0);
++				ShowBuildShipWindow(0);
++			} else {
++				ShowShipDepotWindow(tile);
++				ShowBuildShipWindow(tile);
++			}
+ 		} break;
+ 
+ 		case 10: {

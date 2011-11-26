@@ -1,0 +1,242 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 3007)
++++ train_cmd.c	(working copy)
+@@ -1,6 +1,7 @@
+ /* $Id$ */
+ 
+ #include "stdafx.h"
++#include <math.h>
+ #include "openttd.h"
+ #include "debug.h"
+ #include "functions.h"
+@@ -186,29 +187,44 @@
+ 	return true;
+ }
+ 
+-//new acceleration
++//newer acceleration
++#define MASS2KILOS 1000.f
++#define KMH2MS (1.f/3.6f)
++#define POWER2WATT 746
++#define timestep 1.0f // not that 1 tick is 27ms, so 100% realism would be 0.027f
++
++//table of top speed/drag
++//top speed (mph)	<16	16	24	32	48	64	96	128	196	256	...
++//c2	            192	128	96	64	48	32	24	16	12	8
++// (from ttdpatch)
++// -> 2048/mph = 3276.8/kph
++
+ static int GetTrainAcceleration(Vehicle *v, bool mode)
+ {
+ 	const Vehicle *u;
+ 	int num = 0;	//number of vehicles, change this into the number of axles later
+-	int power = 0;
+-	int mass = 0;
++	float power = 0;
++	float mass = 0;
+ 	int max_speed = 2000;
+-	int area = 120;
+-	int friction = 35; //[1e-3]
+-	int drag_coeff = 20;	//[1e-4]
+-	int incl = 0;
+-	int resistance;
+-	int speed = v->cur_speed; //[mph]
+-	int force = 0x3FFFFFFF;
++	float railfriction = 0.003; // times mass times G
++	float drag_coeff = 20; // plus 3 per car
++	float incl = 0;
++	float resistance; // can never change train dir
++	float force = 0;
++	float reqforce = 0; // the force requested by targetspeed
++	const float slope = 0.05f;
++	const float traction = 0.3; // times mass times G!
++	float slopefactor;
++	float speed = ((float)v->cur_speed + (v->subspeed/256.0f)) * KMH2MS; //[kmh] -2- m/s
++
+ 	int pos = 0;
+ 	int lastpos = -1;
+ 	int curvecount[2] = {0, 0};
+ 	int sum = 0;
+ 	int numcurve = 0;
+ 
+-	speed *= 10;
+-	speed /= 16;
++	float area = 50.f / (float)v->u.rail.cached_max_speed;
++	// for newgrf: 12.f * c2 / 3276.8f; to come to the same amount (kph.mph)
+ 
+ 	//first find the curve speed limit
+ 	for (u = v; u->next != NULL; u = u->next, pos++) {
+@@ -271,62 +287,99 @@
+ 		}
+ 	}
+ 
+-	mass = v->u.rail.cached_weight;
+-	power = v->u.rail.cached_power * 746;
++	mass = v->u.rail.cached_weight * MASS2KILOS;
+ 	max_speed = min(max_speed, v->u.rail.cached_max_speed);
+ 
++	slopefactor = sin(atan(slope)); // Thats the drag factor
++
+ 	for (u = v; u != NULL; u = u->next) {
+ 		num++;
+-		drag_coeff += 3;
++		drag_coeff += 3.f; // per wagon drag addition
+ 
+ 		if (u->u.rail.track == 0x80)
+ 			max_speed = min(61, max_speed);
+ 
+ 		if (HASBIT(u->u.rail.flags, VRF_GOINGUP)) {
+-			incl += u->u.rail.cached_veh_weight * 60;		//3% slope, quite a bit actually
++			incl -= u->u.rail.cached_veh_weight * MASS2KILOS * 9.81f * slopefactor;		//3% slope, quite a bit actually
+ 		} else if (HASBIT(u->u.rail.flags, VRF_GOINGDOWN)) {
+-			incl -= u->u.rail.cached_veh_weight * 60;
++			incl += u->u.rail.cached_veh_weight * MASS2KILOS * 9.81f * slopefactor;
+ 		}
+ 	}
+ 
+-	v->max_speed = max_speed;
++	resistance = -area * drag_coeff * speed * speed; // air drag
++	if (v->u.rail.railtype != 2 && v->cur_speed>0) // not maglev
++		resistance -= 9.81f * mass * railfriction; // rolling friction, number of wheels don't matter
+ 
+-	if (v->u.rail.railtype != 2) {
+-		resistance = 13 * mass / 10;
+-		resistance += 60 * num;
+-		resistance += friction * mass * speed / 1000;
+-		resistance += (area * drag_coeff * speed * speed) / 10000;
+-	} else
+-		resistance = (area * (drag_coeff / 2) * speed * speed) / 10000;
+-	resistance += incl;
+-	resistance *= 4; //[N]
++	// Calculate TARGETSPEED
++	{
++		float max = max_speed * KMH2MS;
++		float targetspeed = mode==AM_BRAKE?0.f:max;
++		float dspeed = targetspeed - speed;
++		float reqaccel = dspeed / timestep;
++		reqforce = mass * reqaccel / timestep;
++		reqforce -= resistance;
++		reqforce -= incl;
++		// if positive: engine power requested
++	}
+ 
+-	if (speed > 0) {
+-		switch (v->u.rail.railtype) {
+-			case 0:
+-			case 1:
+-				force = power / speed; //[N]
+-				force *= 22;
+-				force /= 10;
+-				break;
++	if (reqforce>0) { // engine power requested
++		for (u = v; u != NULL; u = u->next) {
++			const RailVehicleInfo * vehinfo = RailVehInfo(u->engine_type);
++			if (mode == AM_ACCEL && vehinfo->power>0) { // engine
++				float maxTE = vehinfo->weight * MASS2KILOS * 9.81f * 0.30f;
++				float TE = (vehinfo->power * POWER2WATT) / (vehinfo->max_speed * KMH2MS);
++				float relvel = v->cur_speed / (float)vehinfo->max_speed; // same units, no conversion
++				float vehmaxspeed = vehinfo->max_speed * KMH2MS;
++				v->max_speed = max_speed; 
+ 
+-			case 2:
+-				force = power / 25;
+-				break;
++				if (vehinfo->engclass==0)// steam
++					TE *= 10.0f - 9.f*relvel; // at v=0, 10x, at v=max, 1x
++				else // diesel or elect
++					TE *= 2.0f - relvel; // twice as much as max power (realistic) at v=0
++
++				if (TE>0) {// if the train is going so fast that this engine cannot pull anymore,
++					if (v->u.rail.railtype!=2 || TE<maxTE)
++						force += TE; // ... it will not hold the train back. (idle mode)
++					else
++						force += maxTE; // ... but never pulls more than it can apply to the rails
++				}
++			}
+ 		}
+-	} else {
+-		//"kickoff" acceleration
+-		force = (mass * 8) + resistance;
++
++		// Cap the power to the requested power
++		if (force>reqforce)
++			force = reqforce;
+ 	}
++	else {// brake a bit
++		// braking force is exactly the amount that all the wheels of the train
++		// can apply to the rail (mass * G * traction)
++		force = -(mass * 9.81f * traction);
+ 
+-	if (force <= 0) force = 10000;
++		// Cap the brake power to the requested brake power
++		if (force<reqforce)
++			force = reqforce;
++	}
+ 
+-	if (v->u.rail.railtype != 2) force = min(force, mass * 10 * 200);
++	// accel is force*timestep (actually, a better integrator would be nice)
++	// multiply by timestep, otherwise it has to be done by UpdateTrainSpeed and we lose
++	// info because we return an integer here...
++	{
++		float accel = timestep * (incl + force + resistance) / mass;
++		float dspeed = timestep * accel;
++		int dsubspeed = 0.5f + 256.f * dspeed;
++		int newspeed, curspd = (v->cur_speed<<8) + v->subspeed;
+ 
+-	if (mode == AM_ACCEL) {
+-		return (force - resistance) / (mass * 4);
+-	} else {
+-		return min((-force - resistance) / (mass * 4), 10000 / (mass * 4));
++		// Creative rounding to make a train reach max_speed instead of 1 subspeed less
++		if (dspeed>0 && dsubspeed==0)
++			dsubspeed = 1;
++
++		// calc new speed
++		newspeed = curspd + dsubspeed;
++
++		// 'emergency brake': if speed would become <0, don't let it.
++		if (newspeed<0)
++			return -curspd;
++		return dsubspeed;
+ 	}
+ }
+ 
+@@ -2288,28 +2341,29 @@
+ 
+ static int UpdateTrainSpeed(Vehicle *v)
+ {
+-	uint spd;
+-	uint accel;
++	int spd;
++	int accel;
+ 
+ 	if (v->vehstatus & VS_STOPPED || HASBIT(v->u.rail.flags, VRF_REVERSING)) {
+ 		if (_patches.realistic_acceleration)
+-			accel = GetTrainAcceleration(v, AM_BRAKE) * 2;
++			accel = GetTrainAcceleration(v, AM_BRAKE);
+ 		else
+-			accel = v->acceleration * -2;
++			accel = v->acceleration * -4;
+ 	} else {
+ 		if (_patches.realistic_acceleration)
+ 			accel = GetTrainAcceleration(v, AM_ACCEL);
+ 		else
+-			accel = v->acceleration;
++			accel = v->acceleration * 2;
+ 	}
+ 
+-	spd = v->subspeed + accel * 2;
+-	v->subspeed = (byte)spd;
++	spd = v->subspeed + accel;
++	v->subspeed = (byte)spd&0xFF;
+ 	{
+ 		int tempmax = v->max_speed;
+ 		if (v->cur_speed > v->max_speed)
+ 			tempmax = v->cur_speed - (v->cur_speed / 10) - 1;
+-		v->cur_speed = spd = clamp(v->cur_speed + ((int)spd >> 8), 0, tempmax);
++//		v->cur_speed = spd = clamp(v->cur_speed + ((int)spd >> 8), 0, tempmax);
++		v->cur_speed = spd = v->cur_speed + ((int)spd >> 8);
+ 	}
+ 
+ 	if (!(v->direction & 1)) spd = spd * 3 >> 2;

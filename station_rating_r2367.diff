@@ -1,0 +1,181 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2367)
++++ station_cmd.c	(working copy)
+@@ -2476,26 +2476,87 @@
+ 	StationID index;
+ 	int waiting;
+ 	bool waiting_changed = false;
++	byte lastv_type, age, days;
++	int b, tr;
+ 
+ 	byte_inc_sat(&st->time_since_load);
+ 	byte_inc_sat(&st->time_since_unload);
+ 
+ 	ge = st->goods;
++
++	_patches.nsr_speed = true;
++	_patches.nsr_age = true;
++	_patches.nsr_wait_days = true;
++	_patches.nsr_wait_cargo = false;
++	_patches.nsr_town_rating = true;
++
+ 	do {
+ 		if (ge->enroute_from != INVALID_STATION) {
+ 			byte_inc_sat(&ge->enroute_time);
+ 			byte_inc_sat(&ge->days_since_pickup);
+ 
+ 			rating = 0;
++			lastv_type = GetVehicle(st->last_vehicle)->type;
+ 
++			b = ge->last_speed;
++			if (_patches.nsr_speed)
+ 			{
+-				int b = ge->last_speed;
++				if (st->last_vehicle != INVALID_VEHICLE)
++				{
++					switch (lastv_type)
++					{
++						case VEH_Train:
++							b -= (ge == &st->goods[CT_PASSENGERS]) ? 85 : 70;
++							break;
++						case VEH_Road:
++							b -= (ge == &st->goods[CT_PASSENGERS]) ? 60 : 40;
++							break;
++						case VEH_Ship:
++							b -= (ge == &st->goods[CT_PASSENGERS]) ? 50 : 30;
++							break;
++						case VEH_Aircraft:
++							b -= 85;
++							break;
++					}
++					b = clamp(b,0,170); // dont touch max-points for speedrating (yet?)
++					rating += b >> 2;
++				}
++			}
++			else
++			{
+ 				if ((b-=85) >= 0)
+ 					rating += b >> 2;
+ 			}
+ 
++			age = ge->last_age;
++			if (_patches.nsr_age)
+ 			{
+-				byte age = ge->last_age;
++				switch (age)
++				{
++					case 0:	rating += 13;	break;
++					case 1:	rating += 9;	break;
++					case 2:	rating += 6;	break;
++					case 3:	rating += 4;	break;
++					case 4:	rating += 2;	break;
++					case 5:	rating += 1;	break;
++				}
++				// double age effect for Passengers
++				if (ge == &st->goods[CT_PASSENGERS]) age *= 2;
++				// scale age to 20 years
++				if (st->last_vehicle != INVALID_VEHICLE)
++				{
++					switch (lastv_type)
++					{
++						case VEH_Train:		age = clamp(age,0,20);			break;
++						case VEH_Road:		age = clamp(age,0,10) * 10;		break;
++						case VEH_Ship:		age = clamp(age,0,25) * 0.8;	break;
++						case VEH_Aircraft:	age = clamp(age,0,15) * 4 / 3;	break;
++					}
++				}
++				rating += (20 - clamp(age,0,20));
++			}
++			else
++			{
+ 				(age >= 3) ||
+ 				(rating += 10, age >= 2) ||
+ 				(rating += 10, age >= 1) ||
+@@ -2507,11 +2568,54 @@
+ 							rating += _rating_boost[_opt.diff.competitor_intelligence];
+ 			}
+ 
+-			if (st->owner < MAX_PLAYERS && HASBIT(st->town->statues, st->owner))
+-				rating += 26;
++			if (_patches.nsr_town_rating)
++			{
++				if (st->owner < MAX_PLAYERS)
++				{
++					if (HASBIT(st->town->statues, st->owner))
++						rating += 16;
++					tr = st->town->ratings[st->owner];
++					// if townratings are not changed this will be within -10..+10
++					rating += tr / 100;
++				}
++			}
++			else
++			{
++				if (st->owner < MAX_PLAYERS && HASBIT(st->town->statues, st->owner))
++					rating += 26;
++			}
+ 
++			days = ge->days_since_pickup;
++			if (_patches.nsr_wait_days)
+ 			{
+-				byte days = ge->days_since_pickup;
++				switch (days)
++				{
++					case 0:	rating += 18;	break;
++					case 1:	rating += 17;	break;
++					case 2:	rating += 16;	break;
++					case 3:	rating += 10;	break;
++					case 4:	rating += 9;	break;
++					case 5:	rating += 8;	break;
++					case 6:	rating += 2;	break;
++					case 7:	rating += 1;	break;
++				}
++				// double wait effect for Passengers
++				if (ge == &st->goods[CT_PASSENGERS]) days *= 2;
++				// scale waitdays to 28 days
++				if (st->last_vehicle != INVALID_VEHICLE)
++				{
++					switch (lastv_type)
++					{
++						case VEH_Train:		days = clamp(days,0,28);		break;
++						case VEH_Road:		days = clamp(days,0,56) / 2;	break;
++						case VEH_Ship:		days = clamp(days,0,112) / 4;	break;
++						case VEH_Aircraft:	days = clamp(days,0,28);		break;
++					}
++				}
++				rating += (112 - clamp(days,0,28) *3);
++			}
++			else
++			{
+ 				if (st->last_vehicle != INVALID_VEHICLE &&
+ 						GetVehicle(st->last_vehicle)->type == VEH_Ship)
+ 							days >>= 2;
+@@ -2522,7 +2626,11 @@
+ 				(rating += 35, true);
+ 			}
+ 
++			if (_patches.nsr_wait_cargo)
+ 			{
++			}
++			else
++			{
+ 				waiting = ge->waiting_acceptance & 0xFFF;
+ 				(rating -= 90, waiting > 1500) ||
+ 				(rating += 55, waiting > 1000) ||
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2367)
++++ variables.h	(working copy)
+@@ -217,6 +217,12 @@
+ 	uint32 npf_water_curve_penalty; /* The penalty for curves */
+ 
+ 	bool population_in_label; // Show the population of a town in his label?
++
++	bool nsr_speed;			// new station rating: vehicle speed
++	bool nsr_age;			// new station rating: vehicle age
++	bool nsr_wait_days;		// new station rating: days since last pickup
++	bool nsr_wait_cargo;	// new station rating: amount of cargo waiting
++	bool nsr_town_rating;	// new station rating: include local authority rating
+ } Patches;
+ 
+ VARDEF Patches _patches;

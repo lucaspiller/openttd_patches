@@ -1,0 +1,151 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2902)
++++ lang/english.txt	(working copy)
+@@ -286,8 +286,10 @@
+ STR_013E_CAPACITIES                                             :{BLACK}Capacities
+ STR_013E_TOTAL_CARGO                                            :{BLACK}Total Cargo
+ STR_013F_CAPACITY                                               :{BLACK}Capacity: {LTBLUE}{STRING1}
++STR_013F_CAPACITY_MULT                                          :{BLACK}Capacity: {LTBLUE}{STRING1} (x{NUM})
+ STR_013F_TOTAL_CAPACITY_TEXT                                    :{BLACK}Total cargo capacity of this train:
+ STR_013F_TOTAL_CAPACITY                                         :{LTBLUE}- {CARGO} ({SHORTCARGO})
++STR_013F_TOTAL_CAPACITY_MULT                                    :{LTBLUE}- {CARGO} ({SHORTCARGO}) (x{NUM})
+ STR_0140_NEW_GAME                                               :{BLACK}New Game
+ STR_0141_LOAD_GAME                                              :{BLACK}Load Game
+ STR_SINGLE_PLAYER                                               :{BLACK}Single player
+@@ -971,6 +973,7 @@
+ STR_CONFIG_PATCHES_BRIBE                                        :{LTBLUE}Allow bribing of the local authority: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_NONUNIFORM_STATIONS                          :{LTBLUE}Nonuniform stations: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_NEW_PATHFINDING_ALL                          :{LTBLUE}New global pathfinding (NPF, overrides NTP): {ORANGE}{STRING1}
++STR_CONFIG_PATCHES_FREIGHT_TRAINS                               :{LTBLUE}Multiply weight of freight to simulate heavy trains: {ORANGE}{STRING}
+ 
+ STR_CONFIG_PATCHES_SMALL_AIRPORTS                               :{LTBLUE}Always allow small airports: {ORANGE}{STRING1}
+ 
+@@ -2357,6 +2360,7 @@
+ STR_UNKNOWN_DESTINATION                                         :unknown destination
+ STR_8812_EMPTY                                                  :{LTBLUE}Empty
+ STR_8813_FROM                                                   :{LTBLUE}{CARGO} from {STATION}
++STR_8813_FROM_MULT                                              :{LTBLUE}{CARGO} from {STATION} (x{NUM})
+ STR_8814_TRAIN_IS_WAITING_IN_DEPOT                              :{WHITE}Train {COMMA} is waiting in depot
+ STR_8815_NEW_VEHICLES                                           :{BLACK}New Vehicles
+ STR_8816                                                        :{BLACK}-
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2902)
++++ variables.h	(working copy)
+@@ -199,6 +199,7 @@
+  	uint32 npf_crossing_penalty; /* The penalty for level crossings */
+ 
+ 	bool population_in_label; // Show the population of a town in his label?
++	uint8 freight_trains; ///< Multiply the weight of cargo to give semi-realistics weights...
+ } Patches;
+ 
+ VARDEF Patches _patches;
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2902)
++++ train_cmd.c	(working copy)
+@@ -48,7 +48,7 @@
+ 
+ 		// vehicle weight is the sum of the weight of the vehicle and the weight of its cargo
+ 		vweight += rvi->weight;
+-		vweight += (_cargoc.weights[u->cargo_type] * u->cargo_count) / 16;
++		vweight += ((_cargoc.weights[u->cargo_type] * u->cargo_count) / 16) * (FreightWagonMult(u) ? _patches.freight_trains : 1);
+ 		// powered wagons have extra weight added
+ 		if (HASBIT(u->u.rail.flags, VRF_POWEREDWAGON))
+ 			vweight += RailVehInfo(v->engine_type)->pow_wag_weight;
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2902)
++++ vehicle.c	(working copy)
+@@ -106,6 +106,11 @@
+ 	return v;
+ }
+ 
++bool FreightWagonMult(const Vehicle *v)
++{
++	return _patches.freight_trains > 1 && v->cargo_type != CT_PASSENGERS && v->cargo_type != CT_MAIL;
++}
++
+ static inline uint Correct_Z(uint tileh)
+ {
+ 	// needs z correction for slope-type graphics that have the NORTHERN tile lowered
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2902)
++++ vehicle.h	(working copy)
+@@ -300,6 +300,7 @@
+ void VehicleInTheWayErrMsg(Vehicle *v);
+ Vehicle *FindVehicleBetween(TileIndex from, TileIndex to, byte z);
+ TileIndex GetVehicleOutOfTunnelTile(const Vehicle *v);
++bool FreightWagonMult(const Vehicle *v);
+ 
+ bool UpdateSignalsOnSegment(TileIndex tile, byte direction);
+ void SetSignalsOnBothDir(TileIndex tile, byte track);
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2902)
++++ settings.c	(working copy)
+@@ -891,6 +891,7 @@
+ 	{"realistic_acceleration",SDT_BOOL, (void*)false,	&_patches.realistic_acceleration,	NULL},
+ 	{"forbid_90_deg",				SDT_BOOL, 	(void*)false, &_patches.forbid_90_deg,					NULL},
+ 	{"improved_load",				SDT_BOOL,		(void*)false,	&_patches.improved_load,				NULL},
++	{"freight_trains",				SDT_UINT8,	(void*)1,			&_patches.freight_trains,				NULL},
+ 
+ 	{"max_trains",					SDT_UINT16,	(void*)500,		&_patches.max_trains,						NULL},
+ 	{"max_roadveh",					SDT_UINT16,	(void*)500,		&_patches.max_roadveh,					NULL},
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2902)
++++ train_gui.c	(working copy)
+@@ -1079,6 +1079,10 @@
+ 			SetDParam(1, num);
+ 			SetDParam(2, v->cargo_source);
+ 			str = STR_8813_FROM;
++			if (FreightWagonMult(v)) {
++				SetDParam(3, _patches.freight_trains);
++				str = STR_8813_FROM_MULT;
++			}
+ 		}
+ 		DrawString(x, y, str, 0);
+ 	}
+@@ -1105,7 +1109,12 @@
+ 	if (v->cargo_cap != 0) {
+ 		SetDParam(0, _cargoc.names_long[v->cargo_type]);
+ 		SetDParam(1, v->cargo_cap);
+-		DrawString(x, y, STR_013F_CAPACITY, 0);
++		if (FreightWagonMult(v)) {
++			SetDParam(2, _patches.freight_trains);
++			DrawString(x, y, STR_013F_CAPACITY_MULT, 0);
++		} else {
++			DrawString(x, y, STR_013F_CAPACITY, 0);
++		}
+ 	}
+ }
+ 
+@@ -1219,7 +1228,12 @@
+ 				SetDParam(1, tot_cargo[i][0]);	// {CARGO} #2
+ 				SetDParam(2, i);								// {SHORTCARGO} #1
+ 				SetDParam(3, tot_cargo[i][1]);	// {SHORTCARGO} #2
+-				DrawString(x, y, STR_013F_TOTAL_CAPACITY, 0);
++				if (_patches.freight_trains > 1 && i != CT_PASSENGERS && i != CT_MAIL) {
++					SetDParam(4, _patches.freight_trains);
++					DrawString(x, y, STR_013F_TOTAL_CAPACITY_MULT, 0);
++				} else {
++					DrawString(x, y, STR_013F_TOTAL_CAPACITY, 0);
++				}
+ 			}
+ 		} while (++i != NUM_CARGO);
+ 	}
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2902)
++++ settings_gui.c	(working copy)
+@@ -721,6 +721,7 @@
+ 	{PE_UINT16, PF_0ISDIS, STR_CONFIG_PATCHES_SERVINT_AIRCRAFT, "servint_aircraft", &_patches.servint_aircraft, 5,800,  5, &InValidateDetailsWindow},
+ 	{PE_UINT16, PF_0ISDIS, STR_CONFIG_PATCHES_SERVINT_SHIPS,		"servint_ships",    &_patches.servint_ships,		5,800,  5, &InValidateDetailsWindow},
+ 	{PE_BOOL,   0,         STR_CONFIG_PATCHES_NOSERVICE,        "no_servicing_if_no_breakdowns", &_patches.no_servicing_if_no_breakdowns, 0, 0, 0, NULL},
++	{PE_UINT8,  0,         STR_CONFIG_PATCHES_FREIGHT_TRAINS,   "freight_trains",                &_patches.freight_trains,                1, 32, 1, NULL},
+ };
+ 
+ static const PatchEntry _patches_stations[] = {

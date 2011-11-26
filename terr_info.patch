@@ -1,0 +1,401 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2545)
++++ lang/english.txt	(working copy)
+@@ -358,6 +358,7 @@
+ STR_015F_QUIT                                                   :Exit
+ STR_0160_ARE_YOU_SURE_YOU_WANT_TO                               :{YELLOW}Are you sure you want to abandon this game?
+ STR_0161_QUIT_GAME                                              :{WHITE}Abandon Game
++
+ STR_SORT_ORDER_TIP                                              :{BLACK}Select sorting order (descending/ascending)
+ STR_SORT_CRITERIA_TIP                                           :{BLACK}Select sorting criteria
+ SRT_SORT_BY                                                     :{BLACK}Sort by
+@@ -735,6 +736,7 @@
+ STR_FULL                                                        :Full
+ STR_02BA                                                        :{SILVER}- -  {STRING}  - -
+ STR_02BB_TOWN_DIRECTORY                                         :Town directory
++STR_TERRITORY_MENU                                         :Territory Information
+ STR_02BC_VEHICLE_DESIGN_NAMES                                   :{BLACK}Vehicle design names
+ STR_02BD                                                        :{BLACK}{STRING}
+ STR_02BE_DEFAULT                                                :Default
+@@ -795,6 +797,18 @@
+ STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW                                :{BLACK}Paste from viewport
+ STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT                             :{BLACK}Paste the location of this viewport to the global view
+ 
++STR_TERRITORY_INFORMATION                                         :{WHITE}Territory Information
++STR_PRESIDENT                                         :{WHITE}{STRING}{}{GOLD}(Prime Minister)
++STR_FAVOURITE_COMPANY_TEXT                                            :{BLACK}Favourite Company:
++STR_FAVOURITE_COMPANY                                            :{ORANGE}{STRING}
++STR_UNDECIDED                                            :{ORANGE}-- Undecided --
++STR_OIL_PAYMENT                                            :{BLACK}Oil Payment: {ORANGE}{CURRENCY64}
++STR_CARGO_LAST_MONTH_MAX                              :{BLACK}Cargo units last month: {ORANGE}{COMMA32}{BLACK}  max: {ORANGE}{COMMA32}
++
++STR_SAME_PRESIDENT                               :{BIGFONT}{BLACK}The votes are in!{}{}Another five years of hell with {STRING} face us...
++STR_NEW_PRESIDENT_GOOD_ECONOMY                               :{BIGFONT}{BLACK}New Prime Minister!{}{}The economy booms as {STRING} is among us!
++STR_NEW_PRESIDENT_RECESSION                               :{BIGFONT}{BLACK}New Prime Minister!{}{}Could {STRING} end this recession?
++
+ STR_02E0_CURRENCY_UNITS                                         :{BLACK}Currency units
+ STR_02E1                                                        :{BLACK}{SKIP}{STRING}
+ STR_02E2_CURRENCY_UNITS_SELECTION                               :{BLACK}Currency units selection
+Index: economy_gui.c
+===================================================================
+--- economy_gui.c	(revision 0)
++++ economy_gui.c	(revision 0)
+@@ -0,0 +1,94 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "debug.h"
++#include "strings.h"
++#include "table/sprites.h"
++#include "table/strings.h"
++#include "town.h"
++#include "window.h"
++#include "gfx.h"
++#include "viewport.h"
++#include "gui.h"
++#include "command.h"
++#include "player.h"
++#include "network.h"
++#include "economy.h"
++#include "debug.h"
++
++extern void DrawPlayerIcon(int p, int x, int y);
++
++static const Widget _territory_economy_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5, STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    13,    11,   347,     0,    13, STR_TERRITORY_INFORMATION, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    13,   338,   349,     0,    13, 0x0,      STR_STICKY_BUTTON},
++{     WWT_IMGBTN,   RESIZE_NONE,    13,     0,   349,    14,   158, 0x0,      STR_NULL},
++{   WIDGETS_END},
++};
++
++static void TerritoryEconomyWndProc(Window *w, WindowEvent *e)
++{
++	
++	switch (e->event) {
++	case WE_PAINT: {
++	
++		DrawWindowWidgets(w);
++
++		// Face and president name
++		DrawPlayerFace(_economy.face, 0, 2, 16);
++
++		SetDParam(0, _economy.president_name_1);
++		SetDParam(1, _economy.president_name_2);
++		DrawStringMultiCenter(48, 141, STR_PRESIDENT, 94);
++
++		// Statistics
++		DrawString(110, 22, STR_FAVOURITE_COMPANY_TEXT, 0);
++		if (_economy.max > RATING_POOR)
++		{
++			SetDParam(0, _economy.best->name_1);
++			SetDParam(1, _economy.best->name_2);
++			DrawString(140, 32, STR_FAVOURITE_COMPANY, 0);
++			DrawPlayerIcon(_economy.best->index, 110, 32);
++		} else {
++			DrawString(110, 32, STR_UNDECIDED, 0);
++		}
++		
++		SetDParam64(0, (uint64)GetTransportedGoodsIncome(10, 20, 10,3));
++		DrawString(110, 52, STR_OIL_PAYMENT, 0);
++		
++		SetDParam(0, _economy.pop);
++		SetDParam(1, _economy.houses);
++		DrawString(110,72,STR_2006_POPULATION,0);
++
++		SetDParam(0, _economy.pass);
++		SetDParam(1, _economy.max_pass);
++		DrawString(110,92,STR_200D_PASSENGERS_LAST_MONTH_MAX,0);
++
++		SetDParam(0, _economy.mail);
++		SetDParam(1, _economy.max_mail);
++		DrawString(110,112,STR_200E_MAIL_LAST_MONTH_MAX,0);
++		
++		SetDParam(0, _economy.cargo);
++		SetDParam(1, _economy.max_cargo);
++		DrawString(110,132,STR_CARGO_LAST_MONTH_MAX,0);		
++		
++		} break;
++	case WE_4:
++		SetWindowDirty(w);
++		break;				
++	}
++}
++
++static const WindowDesc _territory_economy_desc = {
++	-1, -1, 350, 159,
++	WC_TERRITORY_ECONOMY,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_territory_economy_widgets,
++	TerritoryEconomyWndProc
++};
++
++void ShowTerritoryEconomy(void)
++{
++	Window *w;
++
++	w = AllocateWindowDescFront(&_territory_economy_desc, 0);
++}
+Index: gui.h
+===================================================================
+--- gui.h	(revision 2545)
++++ gui.h	(working copy)
+@@ -87,6 +87,7 @@
+ void ShowPlayerFinances(int player);
+ void ShowPlayerCompany(int player);
+ void ShowSignList(void);
++void ShowTerritoryEconomy(void);
+ 
+ void ShowEstimatedCostOrIncome(int32 cost, int x, int y);
+ void ShowErrorMessage(StringID msg_1, StringID msg_2, int x, int y);
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 2545)
++++ openttd.c	(working copy)
+@@ -1372,6 +1372,8 @@
+ 	vp->virtual_width = vp->width << vp->zoom;
+ 	vp->virtual_height = vp->height << vp->zoom;
+ 
++	// Update territory statistics
++	UpdateTerritoryInformation();
+ 
+ 	// in version 4.0 of the savegame, is_active was introduced to determine
+ 	// if a player does exist, rather then checking name_1
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2545)
++++ openttd.h	(working copy)
+@@ -442,6 +442,7 @@
+ 	WC_HIGHSCORE = 0x4D,
+ 	WC_ENDSCREEN = 0x4E,
+ 	WC_SIGN_LIST = 0x4F,
++	WC_TERRITORY_ECONOMY = 0x50,
+ };
+ 
+ 
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2545)
++++ misc.c	(working copy)
+@@ -303,6 +303,8 @@
+ 		for(i=0x500; i!=0; i--)
+ 			RunTileLoop();
+ 	}
++	
++	UpdateTerritoryInformation();
+ 
+ 	ResetObjectToPlace();
+ }
+Index: economy.c
+===================================================================
+--- economy.c	(revision 2545)
++++ economy.c	(working copy)
+@@ -788,6 +788,27 @@
+ 	_economy.infl_amount_pr = max(0, _opt.diff.initial_interest - 1);
+ 	_economy.max_loan_unround = _economy.max_loan = _opt.diff.max_loan * 1000;
+ 	_economy.fluct = (byte)(Random()) + 168;
++	
++	// president
++	_economy.face = Random();
++	_economy.president_name_2 = Random();
++	_economy.president_name_1 = SPECSTR_PRESIDENT_NAME;
++	_economy.president_length = 0;
++	
++	// favourite company
++	_economy.max = RATING_POOR;
++	_economy.best = 0;
++	
++	// other statistics
++	_economy.pop = 0;
++	_economy.houses = 0;
++	_economy.pass = 0;
++	_economy.max_pass = 0;
++	_economy.mail = 0;
++	_economy.max_mail = 0;
++	_economy.cargo = 0;
++	_economy.max_cargo = 0;
++		
+ }
+ 
+ Pair SetupSubsidyDecodeParam(Subsidy *s, bool mode)
+@@ -1498,6 +1519,90 @@
+ 	return result;
+ }
+ 
++void UpdateTerritoryInformation(void)
++{
++		int64 ratings[MAX_PLAYERS];
++		uint16 num[MAX_PLAYERS];
++		Town *t;
++		Player *p;
++		Industry *i;
++		
++		_economy.max = RATING_POOR;
++		_economy.best = 0;
++	
++		_economy.pop = 0;
++		_economy.houses = 0;
++		_economy.pass = 0;
++		_economy.max_pass = 0;
++		_economy.mail = 0;
++		_economy.max_mail = 0;
++		_economy.cargo = 0;
++		_economy.max_cargo = 0;
++		
++		FOR_ALL_PLAYERS(p) {
++					ratings[p->index] = 0;
++					num[p->index] = 0;
++		}
++		
++		FOR_ALL_TOWNS(t) {
++				_economy.pop += t->population;
++				_economy.houses += t->num_houses;
++				_economy.pass += t->act_pass;
++				_economy.max_pass += t->max_pass;
++				_economy.mail += t->act_mail;
++				_economy.max_mail += t->max_mail;
++				FOR_ALL_PLAYERS(p) {
++					if (HASBIT(t->have_ratings, p->index)) {
++						ratings[p->index] += t->ratings[p->index];
++						num[p->index]++;
++					}
++				}
++		}
++
++		FOR_ALL_PLAYERS(p) {
++					if (num[p->index] > 0)  {
++						ratings[p->index] /= num[p->index];
++						if (ratings[p->index] > _economy.max) {
++							_economy.max = ratings[p->index];
++							_economy.best = p;
++						}
++					}
++		}
++		
++		FOR_ALL_INDUSTRIES(i) {
++			_economy.cargo += i->pct_transported[0];
++			_economy.max_cargo += i->total_production[0];
++		}		
++		
++		// election time? (every 5 years)
++		if (_economy.president_length++ > 58)
++		{
++			// keep the same president?
++			if (CHANCE16(1,4)) {
++				_economy.president_length = 0;
++				
++				SetDParam(0, _economy.president_name_1);
++				SetDParam(1, _economy.president_name_2);				
++				AddNewsItem(STR_SAME_PRESIDENT, NEWS_FLAGS(NM_NORMAL,0,NT_ECONOMY,0), 0, 0);
++			// new president?
++			} else {
++				_economy.president_name_2 = Random();
++				_economy.president_name_1 = SPECSTR_PRESIDENT_NAME;
++				_economy.face = Random();
++				_economy.president_length = 0;
++			
++				SetDParam(0, _economy.president_name_1);
++				SetDParam(1, _economy.president_name_2);
++				
++				// recession?
++				if (_economy.fluct <= 0)
++					AddNewsItem(STR_NEW_PRESIDENT_RECESSION, NEWS_FLAGS(NM_NORMAL,0,NT_ECONOMY,0), 0, 0);
++				else
++					AddNewsItem(STR_NEW_PRESIDENT_GOOD_ECONOMY, NEWS_FLAGS(NM_NORMAL,0,NT_ECONOMY,0), 0, 0);
++			}
++		}
++}
++
+ void PlayersMonthlyLoop(void)
+ {
+ 	PlayersGenStatistics();
+@@ -1508,6 +1613,7 @@
+ 	_current_player = OWNER_NONE;
+ 	HandleEconomyFluctuations();
+ 	SubsidyMonthlyHandler();
++	UpdateTerritoryInformation();
+ }
+ 
+ static void DoAcquireCompany(Player *p)
+Index: economy.h
+===================================================================
+--- economy.h	(revision 2545)
++++ economy.h	(working copy)
+@@ -11,6 +11,23 @@
+ 	byte interest_rate;
+ 	byte infl_amount;
+ 	byte infl_amount_pr;
++	
++	uint32 face;
++	uint16 president_name_1;
++	uint32 president_name_2;
++	uint president_length;
++	
++	uint32 pop;
++	uint32 houses;
++	uint32 pass;
++	uint32 max_pass;
++	uint32 mail;
++	uint32 max_mail;
++	uint32 cargo;
++	uint32 max_cargo;
++	
++	int16 max;
++	Player *best;
+ } Economy;
+ 
+ VARDEF Economy _economy;
+@@ -64,8 +81,8 @@
+ 
+ int UpdateCompanyRatingAndValue(Player *p, bool update);
+ void UpdatePlayerHouse(Player *p, uint score);
++void UpdateTerritoryInformation(void);
+ 
+-
+ VARDEF Subsidy _subsidies[MAX_PLAYERS];
+ Pair SetupSubsidyDecodeParam(Subsidy *s, bool mode);
+ void DeleteSubsidyWithIndustry(uint16 index);
+@@ -75,4 +92,6 @@
+ int32 GetTransportedGoodsIncome(uint num_pieces, uint dist, byte transit_days, byte cargo_type);
+ uint MoveGoodsToStation(TileIndex tile, int w, int h, int type, uint amount);
+ 
++void ShowTerritoryEconomy(void);
++
+ #endif /* ECONOMY_H */
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2545)
++++ main_gui.c	(working copy)
+@@ -234,7 +234,10 @@
+ 
+ static void MenuClickTown(int index)
+ {
+-	ShowTownDirectory();
++	switch(index) {
++	case 0: ShowTownDirectory(); break;
++	case 1: ShowTerritoryEconomy(); break;
++	}
+ }
+ 
+ static void MenuClickScenMap(int index)
+@@ -779,7 +782,7 @@
+ 
+ static void ToolbarTownClick(Window *w)
+ {
+-	PopupMainToolbMenu(w, 118, 5, STR_02BB_TOWN_DIRECTORY, 1);
++	PopupMainToolbMenu(w, 118, 5, STR_02BB_TOWN_DIRECTORY, 2);
+ }
+ 
+ static void ToolbarSubsidiesClick(Window *w)
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2545)
++++ Makefile	(working copy)
+@@ -626,6 +626,7 @@
+ C_SOURCES += dock_gui.c
+ C_SOURCES += dummy_land.c
+ C_SOURCES += economy.c
++C_SOURCES += economy_gui.c
+ C_SOURCES += engine.c
+ C_SOURCES += engine_gui.c
+ C_SOURCES += fileio.c

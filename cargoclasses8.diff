@@ -1,0 +1,435 @@
+Index: engine.c
+===================================================================
+--- engine.c	(revision 3024)
++++ engine.c	(working copy)
+@@ -52,46 +52,29 @@
+ 	CT_INVALID,   CT_INVALID                                                                                      /* 29-30 */
+ };
+ 
+-#define MC(cargo) (1 << cargo)
+-/** Bitmasked value where the global cargo ID is available in landscape
+- * 0: LT_NORMAL, 1: LT_HILLY, 2: LT_DESERT, 3: LT_CANDY */
+-const uint32 _landscape_global_cargo_mask[NUM_LANDSCAPE] =
+-{ /* LT_NORMAL: temperate */
+-	MC(GC_PASSENGERS)|MC(GC_COAL)|MC(GC_MAIL)|MC(GC_OIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|
+-	MC(GC_IRON_ORE)|MC(GC_STEEL)|MC(GC_VALUABLES)|MC(GC_FOOD)|MC(GC_UNDEFINED),
+-	/* LT_HILLY: arctic */
+-	MC(GC_PASSENGERS)|MC(GC_COAL)|MC(GC_MAIL)|MC(GC_OIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|
+-	MC(GC_GRAIN)|MC(GC_WOOD)|MC(GC_VALUABLES)|MC(GC_PAPER)|MC(GC_FOOD)|MC(GC_UNDEFINED),
+-	/* LT_DESERT: rainforest/desert */
+-	MC(GC_PASSENGERS)|MC(GC_MAIL)|MC(GC_OIL)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|
+-	MC(GC_VALUABLES)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_COPPER_ORE)|MC(GC_WATER)|MC(GC_RUBBER),
+-	/* LT_CANDY: toyland */
+-	MC(GC_PASSENGERS)|MC(GC_MAIL)|MC(GC_SUGAR)|MC(GC_TOYS)|MC(GC_BATTERIES)|MC(GC_CANDY)|
+-	MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS)
+-};
+-/** END   --- TRANSLATE FROM GLOBAL CARGO TO LOCAL CARGO ID'S **/
++/**
++ * Flag whether the given engine type is refittable.
++ * @param engine_type Index of engine type.
++ * @return True if the engine can carry two or more cargo types.
++ */
++bool IsEngineRefittable(EngineID engine_type)
++{
++	uint32 refit_mask = _engine_info[engine_type].refit_mask;
++	int i, count = 0;
+ 
+-/** Bitmasked values of what type of cargo is refittable for the given vehicle-type.
+- * This coupled with the landscape information (_landscape_global_cargo_mask) gives
+- * us exactly what is refittable and what is not */
+-const uint32 _default_refitmasks[NUM_VEHICLE_TYPES] = {
+-	/* Trains */
+-	MC(GC_PASSENGERS)|MC(GC_COAL)|MC(GC_MAIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|MC(GC_IRON_ORE)|
+-	MC(GC_STEEL)|MC(GC_VALUABLES)|MC(GC_PAPER)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_COPPER_ORE)|MC(GC_WATER)|MC(GC_SUGAR)|
+-	MC(GC_TOYS)|MC(GC_CANDY)|MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS),
+-	/* Road vehicles (not refittable by default) */
+-	0,
+-	/* Ships */
+-	MC(GC_COAL)|MC(GC_MAIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|MC(GC_IRON_ORE)|MC(GC_STEEL)|MC(GC_VALUABLES)|
+-	MC(GC_PAPER)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_COPPER_ORE)|MC(GC_WATER)|MC(GC_RUBBER)|MC(GC_SUGAR)|MC(GC_TOYS)|MC(GC_BATTERIES)|
+-	MC(GC_CANDY)|MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS),
+-	/* Aircraft */
+-	MC(GC_PASSENGERS)|MC(GC_MAIL)|MC(GC_GOODS)|MC(GC_VALUABLES)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_SUGAR)|MC(GC_TOYS)|
+-	MC(GC_BATTERIES)|MC(GC_CANDY)|MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS),
+-	/* Special/Disaster */
+-	0,0
+-};
+-#undef MC
++	if (refit_mask == 0)
++		return false;
++
++	for (i = 0; i < NUM_GLOBAL_CID; i++) {
++		if (HASBIT(refit_mask, i)) {
++			count++;
++			if (count >= 2)
++				return true;
++		}
++	}
++
++	return false;
++}
+ 
+ void ShowEnginePreviewWindow(EngineID engine);
+ 
+@@ -232,8 +215,6 @@
+ 	AdjustAvailAircraft();
+ }
+ 
+-uint32 _engine_refit_masks[TOTAL_NUM_ENGINES];
+-
+ 
+ // TODO: We don't support cargo-specific wagon overrides. Pretty exotic... ;-) --pasky
+ 
+Index: engine.h
+===================================================================
+--- engine.h	(revision 3024)
++++ engine.h	(working copy)
+@@ -71,6 +71,7 @@
+ 	byte lifelength;
+ 	byte base_life;
+ 	byte railtype_climates; ///< contains the railtype in the lower four bits, and a mask to the climates where the vehicle is available in the upper four
++	uint32 refit_mask;      ///< Cargos this engine can be refitted to.
+ } EngineInfo;
+ 
+ typedef struct Engine {
+@@ -166,12 +167,9 @@
+ 	CALLBACK_FAILED = 0xFFFF
+ };
+ 
+-VARDEF const uint32 _default_refitmasks[NUM_VEHICLE_TYPES];
+ VARDEF const CargoID _global_cargo_id[NUM_LANDSCAPE][NUM_CARGO];
+-VARDEF const uint32 _landscape_global_cargo_mask[NUM_LANDSCAPE];
+ VARDEF const CargoID _local_cargo_id_ctype[NUM_GLOBAL_CID];
+ 
+-VARDEF uint32 _engine_refit_masks[256];
+ void SetWagonOverrideSprites(EngineID engine, struct SpriteGroup *group, byte *train_id, int trains);
+ void SetCustomEngineSprites(EngineID engine, byte cargo, struct SpriteGroup *group);
+ // loaded is in percents, overriding_engine 0xffff is none
+@@ -180,6 +178,7 @@
+ bool UsesWagonOverride(const Vehicle *v);
+ #define GetCustomVehicleSprite(v, direction) GetCustomEngineSprite(v->engine_type, v, direction)
+ #define GetCustomVehicleIcon(et, direction) GetCustomEngineSprite(et, NULL, direction)
++bool IsEngineRefittable(EngineID engine_type);
+ 
+ typedef enum VehicleTrigger {
+ 	VEHICLE_TRIGGER_NEW_CARGO = 1,
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 3024)
++++ vehicle_gui.c	(working copy)
+@@ -225,18 +225,10 @@
+ 		cmask = 0;
+ 		u = v;
+ 		do {
+-			if (_engine_refit_masks[u->engine_type] != 0) { // newgrf custom refit mask
+-				cmask |= _engine_refit_masks[u->engine_type];
+-			} else if (u->cargo_cap != 0) {
+-				// rail wagons cant be refitted by default
+-				if (v->type != VEH_Train || !(RailVehInfo(u->engine_type)->flags & RVI_WAGON))
+-					cmask |= _default_refitmasks[v->type - VEH_Train];
+-			}
++			cmask |= _engine_info[u->engine_type].refit_mask;
+ 			u = u->next;
+ 		} while (v->type == VEH_Train && u != NULL);
+ 
+-		cmask &= _landscape_global_cargo_mask[_opt_ptr->landscape];
+-
+ 		/* Check which cargo has been selected from the refit window and draw list */
+ 		for (cid = 0; cmask != 0; cmask >>= 1, cid++) {
+ 			if (HASBIT(cmask, 0)) // vehicle is refittable to this cargo
+Index: table/engines.h
+===================================================================
+--- table/engines.h	(revision 3024)
++++ table/engines.h	(working copy)
+@@ -15,7 +15,7 @@
+   * @param e Rail Type of the vehicle
+   * @param f Bitmask of the climates
+   */
+-#define MK(a,b,c,d,e,f) {a,b,c,d,((e)<<4)|(f)}
++#define MK(a,b,c,d,e,f) {a,b,c,d,((e)<<4)|(f),0}
+ /** Writes the properties of a train carriage into the EngineInfo struct.
+   * @see EngineInfo
+   * @param a Introduction date
+@@ -23,7 +23,7 @@
+   * @param f Bitmask of the climates
+   * @note the 0x80 in parameter b sets the "is carriage bit"
+   */
+-#define MW(a,b,c,d,e,f) {a,b|0x80,c,d,((e)<<4)|(f)}
++#define MW(a,b,c,d,e,f) {a,b|0x80,c,d,((e)<<4)|(f),0}
+ 
+ const EngineInfo orig_engine_info[TOTAL_NUM_ENGINES] = {
+ 	MK(  1827,  20,  15,  30,   0,   1), /*   0 Kirby Paul Tank (Steam) */
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 3024)
++++ vehicle.c	(working copy)
+@@ -560,15 +560,7 @@
+ 
+ 	if (cid == GC_INVALID) return false;
+ 
+-	if (_engine_refit_masks[v->engine_type]) {
+-		if (!HASBIT(_engine_refit_masks[v->engine_type], cid)) return false;
+-	} else {
+-		/* If we are talking about normal vehicles (no newgrf), you can only refit engines */
+-		if (v->type == VEH_Train && (RailVehInfo(v->engine_type)->flags & RVI_WAGON)) return false;
+-		if (!HASBIT(_default_refitmasks[v->type - VEH_Train], cid)) return false;
+-	}
+-
+-	return true;
++	return HASBIT(_engine_info[v->engine_type].refit_mask, cid) != 0;
+ }
+ 
+ static void DoDrawVehicle(const Vehicle *v)
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 3024)
++++ train_gui.c	(working copy)
+@@ -90,7 +90,7 @@
+ void DrawTrainWagonPurchaseInfo(int x, int y, EngineID engine_number)
+ {
+ 	const RailVehicleInfo *rvi = RailVehInfo(engine_number);
+-	bool refittable = (_engine_refit_masks[engine_number] != 0);
++	bool refittable = IsEngineRefittable(engine_number);
+ 
+ 	/* Purchase cost */
+ 	SetDParam(0, (rvi->base_cost * _price.build_railwagon) >> 8);
+@@ -922,7 +922,7 @@
+ 
+ 		/* See if any vehicle can be refitted */
+ 		for ( u = v; u != NULL; u = u->next) {
+-			if (_engine_refit_masks[u->engine_type] != 0 ||
++			if (IsEngineRefittable(u->engine_type) ||
+ 						 (!(RailVehInfo(v->engine_type)->flags & RVI_WAGON) && v->cargo_cap != 0)) {
+ 				CLRBIT(w->disabled_state, 12);
+ 				/* We have a refittable carriage, bail out */
+Index: newgrf.c
+===================================================================
+--- newgrf.c	(revision 3024)
++++ newgrf.c	(working copy)
+@@ -70,6 +70,64 @@
+ 	/* GSF_AIRCRAFT */ AIRCRAFT_ENGINES_INDEX,
+ };
+ 
++#define MC(cargo) (1 << cargo)
++/** Bitmasked value where the global cargo ID is available in landscape
++ *  * 0: LT_NORMAL, 1: LT_HILLY, 2: LT_DESERT, 3: LT_CANDY */
++static const uint32 landscape_global_cargo_mask[NUM_LANDSCAPE] =
++{ /* LT_NORMAL: temperate */
++	MC(GC_PASSENGERS)|MC(GC_COAL)|MC(GC_MAIL)|MC(GC_OIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|
++	MC(GC_IRON_ORE)|MC(GC_STEEL)|MC(GC_VALUABLES),
++	/* LT_HILLY: arctic */
++	MC(GC_PASSENGERS)|MC(GC_COAL)|MC(GC_MAIL)|MC(GC_OIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|
++	MC(GC_GRAIN)|MC(GC_WOOD)|MC(GC_VALUABLES)|MC(GC_PAPER)|MC(GC_FOOD),
++	/* LT_DESERT: rainforest/desert */
++	MC(GC_PASSENGERS)|MC(GC_MAIL)|MC(GC_OIL)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|
++	MC(GC_VALUABLES)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_COPPER_ORE)|MC(GC_WATER)|MC(GC_RUBBER),
++	/* LT_CANDY: toyland */
++	MC(GC_PASSENGERS)|MC(GC_MAIL)|MC(GC_SUGAR)|MC(GC_TOYS)|MC(GC_BATTERIES)|MC(GC_CANDY)|
++	MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS)
++};
++/** END   --- TRANSLATE FROM GLOBAL CARGO TO LOCAL CARGO ID'S **/
++
++/** Bitmasked values of what type of cargo is refittable for the given vehicle-type.
++ * This coupled with the landscape information (_landscape_global_cargo_mask) gives
++ * us exactly what is refittable and what is not */
++static const uint32 default_refitmasks[NUM_VEHICLE_TYPES] = {
++	/* Trains */
++	MC(GC_PASSENGERS)|MC(GC_COAL)|MC(GC_MAIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|MC(GC_IRON_ORE)|
++	MC(GC_STEEL)|MC(GC_VALUABLES)|MC(GC_PAPER)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_COPPER_ORE)|MC(GC_WATER)|MC(GC_SUGAR)|
++	MC(GC_TOYS)|MC(GC_CANDY)|MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS),
++	/* Road vehicles (not refittable by default) */
++	0,
++	/* Ships */
++	MC(GC_COAL)|MC(GC_MAIL)|MC(GC_LIVESTOCK)|MC(GC_GOODS)|MC(GC_GRAIN)|MC(GC_WOOD)|MC(GC_IRON_ORE)|MC(GC_STEEL)|MC(GC_VALUABLES)|
++	MC(GC_PAPER)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_COPPER_ORE)|MC(GC_WATER)|MC(GC_RUBBER)|MC(GC_SUGAR)|MC(GC_TOYS)|MC(GC_BATTERIES)|
++	MC(GC_CANDY)|MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS),
++	/* Aircraft */
++	MC(GC_PASSENGERS)|MC(GC_MAIL)|MC(GC_GOODS)|MC(GC_VALUABLES)|MC(GC_FOOD)|MC(GC_FRUIT)|MC(GC_SUGAR)|MC(GC_TOYS)|
++	MC(GC_BATTERIES)|MC(GC_CANDY)|MC(GC_TOFFEE)|MC(GC_COLA)|MC(GC_COTTON_CANDY)|MC(GC_BUBBLES)|MC(GC_PLASTIC)|MC(GC_FIZZY_DRINKS),
++	/* Special/Disaster */
++	0,0
++};
++
++/**
++ * Bitmask of classes for cargo types.
++ */
++static const uint32 cargo_classes[] = {
++	/* Passengers */ MC(GC_PASSENGERS),
++	/* Mail       */ MC(GC_MAIL),
++	/* Express    */ MC(GC_GOODS)|MC(GC_FOOD)|MC(GC_CANDY),
++	/* Armoured   */ MC(GC_VALUABLES),
++	/* Bulk       */ MC(GC_COAL)|MC(GC_GRAIN)|MC(GC_IRON_ORE)|MC(GC_COPPER_ORE)|MC(GC_FRUIT)|MC(GC_SUGAR)|MC(GC_TOFFEE)|MC(GC_COTTON_CANDY),
++	/* Piece      */ MC(GC_LIVESTOCK)|MC(GC_WOOD)|MC(GC_STEEL)|MC(GC_PAPER)|MC(GC_TOYS)|MC(GC_BATTERIES)|MC(GC_BUBBLES)|MC(GC_FIZZY_DRINKS),
++	/* Liquids    */ MC(GC_OIL)|MC(GC_WATER)|MC(GC_RUBBER)|MC(GC_COLA)|MC(GC_PLASTIC),
++	/* Chilled    */ MC(GC_FOOD)|MC(GC_FRUIT),
++};
++#undef MC
++
++static uint16 cargo_allowed[TOTAL_NUM_ENGINES];
++static uint16 cargo_disallowed[TOTAL_NUM_ENGINES];
++
+ 
+ /* Debugging messages policy:
+  *
+@@ -357,7 +415,7 @@
+ 			FOR_EACH_OBJECT {
+ 				uint32 refit_mask = grf_load_dword(&buf);
+ 
+-				_engine_refit_masks[engine + i] = refit_mask;
++				ei[i].refit_mask = refit_mask;
+ 			}
+ 		} break;
+ 		case 0x1E: { /* Callback */
+@@ -389,6 +447,16 @@
+ 				rvi[i].pow_wag_weight = wag_weight;
+ 			}
+ 		} break;
++		case 0x28: { /* Cargo classes allowed */
++			FOR_EACH_OBJECT {
++				cargo_allowed[engine + i] = grf_load_word(&buf);
++			}
++		} break;
++		case 0x29: { /* Cargo classes disallowed */
++			FOR_EACH_OBJECT {
++				cargo_disallowed[engine + i] = grf_load_word(&buf);
++			}
++		} break;
+ 		/* TODO */
+ 		/* Fall-through for unimplemented one byte long properties. */
+ 		case 0x1A:	/* Sort order */
+@@ -414,6 +482,7 @@
+ 
+ static bool RoadVehicleChangeInfo(uint engine, int numinfo, int prop, byte **bufp, int len)
+ {
++	EngineInfo *ei = &_engine_info[ROAD_ENGINES_INDEX + engine];
+ 	RoadVehicleInfo *rvi = &_road_vehicle_info[engine];
+ 	byte *buf = *bufp;
+ 	int i;
+@@ -494,7 +563,17 @@
+ 			FOR_EACH_OBJECT {
+ 				uint32 refit_mask = grf_load_dword(&buf);
+ 
+-				_engine_refit_masks[ROAD_ENGINES_INDEX + engine + i] = refit_mask;
++				ei[i].refit_mask = refit_mask;
++			}
++		} break;
++		case 0x1D: { /* Cargo classes allowed */
++			FOR_EACH_OBJECT {
++				cargo_allowed[ROAD_ENGINES_INDEX + engine + i] = grf_load_word(&buf);
++			}
++		} break;
++		case 0x1E: { /* Cargo classes disallowed */
++			FOR_EACH_OBJECT {
++				cargo_disallowed[ROAD_ENGINES_INDEX + engine + i] = grf_load_word(&buf);
+ 			}
+ 		} break;
+ 		case 0x17:      /* Callback */
+@@ -502,6 +581,7 @@
+ 		case 0x19:      /* Air drag */
+ 		case 0x1A:      /* Refit cost */
+ 		case 0x1B:      /* Retire vehicle early */
++		case 0x1C:      /* Miscellaneous flags */
+ 			{
+ 			/* TODO */
+ 			FOR_EACH_OBJECT {
+@@ -520,6 +600,7 @@
+ 
+ static bool ShipVehicleChangeInfo(uint engine, int numinfo, int prop, byte **bufp, int len)
+ {
++	EngineInfo *ei = &_engine_info[SHIP_ENGINES_INDEX + engine];
+ 	ShipVehicleInfo *svi = &_ship_vehicle_info[engine];
+ 	byte *buf = *bufp;
+ 	int i;
+@@ -597,14 +678,25 @@
+ 			FOR_EACH_OBJECT {
+ 				uint32 refit_mask = grf_load_dword(&buf);
+ 
+-				_engine_refit_masks[SHIP_ENGINES_INDEX + engine + i] = refit_mask;
++				ei[i].refit_mask = refit_mask;
+ 			}
+ 		}	break;
++		case 0x18: { /* Cargo classes allowed */
++			FOR_EACH_OBJECT {
++				cargo_allowed[SHIP_ENGINES_INDEX + engine + i] = grf_load_word(&buf);
++			}
++		} break;
++		case 0x19: { /* Cargo classes disallowed */
++			FOR_EACH_OBJECT {
++				cargo_disallowed[SHIP_ENGINES_INDEX + engine + i] = grf_load_word(&buf);
++			}
++		} break;
+ 		case 0x12: /* Callback */
+ 		case 0x13: /* Refit cost */
+ 		case 0x14: /* Ocean speed fraction */
+ 		case 0x15: /* Canal speed fraction */
+ 		case 0x16: /* Retire vehicle early */
++		case 0x17: /* Miscellaneous flags */
+ 		{
+ 			/* TODO */
+ 			FOR_EACH_OBJECT {
+@@ -622,6 +714,7 @@
+ 
+ static bool AircraftVehicleChangeInfo(uint engine, int numinfo, int prop, byte **bufp, int len)
+ {
++	EngineInfo *ei = &_engine_info[AIRCRAFT_ENGINES_INDEX + engine];
+ 	AircraftVehicleInfo *avi = &_aircraft_vehicle_info[engine];
+ 	byte *buf = *bufp;
+ 	int i;
+@@ -706,12 +799,23 @@
+ 			FOR_EACH_OBJECT {
+ 				uint32 refit_mask = grf_load_dword(&buf);
+ 
+-				_engine_refit_masks[AIRCRAFT_ENGINES_INDEX + engine + i] = refit_mask;
++				ei[i].refit_mask = refit_mask;
+ 			}
+ 		}	break;
++		case 0x18: { /* Cargo classes allowed */
++			FOR_EACH_OBJECT {
++				cargo_allowed[AIRCRAFT_ENGINES_INDEX + engine + i] = grf_load_word(&buf);
++			}
++		} break;
++		case 0x19: { /* Cargo classes disallowed */
++			FOR_EACH_OBJECT {
++				cargo_disallowed[AIRCRAFT_ENGINES_INDEX + engine + i] = grf_load_word(&buf);
++			}
++		} break;
+ 		case 0x14: /* Callback */
+ 		case 0x15: /* Refit cost */
+ 		case 0x16: /* Retire vehicle early */
++		case 0x17: /* Miscellaneous flags */
+ 		{
+ 			/* TODO */
+ 			FOR_EACH_OBJECT {
+@@ -2566,4 +2670,32 @@
+ 			DEBUG(spritecache, 2) ("Currently %i sprites are loaded", load_index);
+ 		}
+ 	}
++
++	// Calculate all refit masks after loading GRF files
++	{
++		EngineID engine;
++
++		for (engine = 0; engine < TOTAL_NUM_ENGINES; engine++) {
++			uint32 mask = 0;
++			uint32 not_mask = 0;
++			uint32 xor_mask = _engine_info[engine].refit_mask;
++			byte i;
++
++			if (cargo_allowed[engine] != 0) {
++				// Build up the list of cargo types from the set cargo classes.
++				for (i = 0; i < lengthof(cargo_classes); i++) {
++					if (HASBIT(cargo_allowed[engine], i))
++						mask |= cargo_classes[i];
++					if (HASBIT(cargo_disallowed[engine], i))
++						not_mask |= cargo_classes[i];
++				}
++			} else {
++				// Don't apply default refit mask to wagons or engines with no capacity
++				if (xor_mask == 0 && !(GetEngine(engine)->type == VEH_Train && (RailVehInfo(engine)->capacity == 0 || RailVehInfo(engine)->flags & RVI_WAGON)))
++					xor_mask = default_refitmasks[GetEngine(engine)->type - VEH_Train];
++			}
++
++			_engine_info[engine].refit_mask = ((mask & ~not_mask) ^ xor_mask) & landscape_global_cargo_mask[_opt.landscape];
++		}
++	}
+ }

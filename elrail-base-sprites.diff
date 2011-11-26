@@ -1,0 +1,265 @@
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2512)
++++ table/sprites.h	(working copy)
+@@ -47,6 +47,8 @@
+ 	SPR_AUTORAIL_BASE		= SPR_SLOPES_BASE + 78,
+ 	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
+ 
++	SPR_ELRAIL_BASE = 5428,
++
+ 	SPR_BLOT = SPR_OPENTTD_BASE + 32, // colored circle (mainly used as vehicle profit marker and for sever compatibility)
+ 
+ 	SPR_PIN_UP        = SPR_OPENTTD_BASE + 62,   // pin icon
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2512)
++++ rail_cmd.c	(working copy)
+@@ -1326,6 +1326,198 @@
+ 	AddSortableSpriteToDraw(image, ti->x + x, ti->y + y, xsize, ysize, zsize, ti->z + z);
+ }
+ 
++typedef struct {
++	SpriteID image;
++	uint8 x_offset;
++	uint8 y_offset;
++	uint8 x_size;
++	uint8 y_size;
++	uint8 z_size;
++	uint8 z_offset;
++} SortableSpriteStruct;
++
++static inline void DrawCatenarySprite(SortableSpriteStruct sss, const TileInfo *ti)
++{
++	AddSortableSpriteToDraw(SPR_ELRAIL_BASE + sss.image, ti->x + sss.x_offset, ti->y + sss.y_offset,
++		sss.x_size, sss.y_size, sss.z_size, GetSlopeZ(ti->x, ti->y) + sss.z_offset);
++}
++
++static SortableSpriteStruct CatenarySpriteData[] = {
++	/* 0 */
++	{11, 0, 8, 16, 1, 1, 10},     //! Line in X direction, no slope, odd Y coordinate
++	{19, 0, 8, 16, 1, 1, 10},     //! Line in X direction, no slope, even Y coordinate
++	{34, 8, 11, 1, 1, 10, 0},	    //! Mast for above line, odd Y coordinate
++	{33,  8,  4,  1,  1, 10,  0}, //! Mast for above line, even Y coordinate
++	{12,  8,  0,  1, 16,  1, 10}, //! Line in Y direction, no slope, odd X coodinate
++	{20,  8,  0,  1, 16,  1, 10},//Line in X direction, no slope, even Y coordinate
++	{32, 11,  8,  1,  1, 10,  0},	//Mast for above line, odd X coordinate
++	{31,  4,  8,  1,  1, 10,  0},	//Mast for above line, even X coordinate
++  /* 8 */
++	{21,  8,  0,  8,  8,  1, 10},	//Nothern line in W-E direction
++	{35,  1,  1,  1,  1, 10,  0},	//Mast for above
++	{13, 16,  8,  8,  8,  1, 10},	//Southern line in W-E direction
++	{36, 15, 15,  1,  1, 10,  0},	//Mast
++	{22,  8,  0,  8,  8,  1, 10},	//Western line in N-S direction
++	{37, 14,  1,  1,  1, 10,  0},	//Mast
++	{14,  0,  8,  8,  8,  1, 10},	//Eastern line in N-S direction
++	{38,  1, 14,  1,  1, 10,  0},	//Mast
++  /* 16 */
++	{17,  0,  8,  8,  8,  1, 18},	//Line in X direction (SW up), odd Y /* 3 */
++	{25,  0,  8,  8,  8,  1, 18},	//same for even Y
++	{34,  8, 11,  1,  1, 10,  4},	//Mast
++	{33,  8,  4,  1,  1, 10,  4},
++	{16,  8,  0,  8,  8,  1,  18},	//Line in Y direction, (SE up)  /* 6 */
++	{24,  8,  0,  8,  8,  1,  18},	//even
++	{32, 11,  8,  1,  1, 10,  4},
++	{31,  4,  8,  1,  1, 10,   4},
++	/* 24 */
++	{18, 8, 0, 8, 8, 1, 10},	//X o	//same as above, but going down  /* 9 */
++	{26, 8, 0, 8, 8, 1, 10},	//X e
++	{32, 11, 8, 1, 1, 10, -4},
++	{31, 3, 8, 1, 1, 10, -4},
++	{15, 0, 8, 8, 8, 1, 10},  //Y o	/* 12 */
++	{23, 0, 8, 8, 8, 1, 10},  //Y e
++	{34, 8, 11, 1, 1, 10, -4},
++	{33, 8, 4, 1, 1, 10, -4},
++};
++
++typedef enum {
++	WIRE_X_FLAT_ODD,
++	WIRE_X_FLAT_EVEN,
++	PYLON_X_FLAT_ODD,
++	PYLON_X_FLAT_EVEN,
++	WIRE_Y_FLAT_ODD,
++	WIRE_Y_FLAT_EVEN,
++	PYLON_Y_FLAT_ODD,
++	PYLON_Y_FLAT_EVEN,
++	WIRE_UPPER,
++	PYLON_UPPER,
++	WIRE_LOWER,
++	PYLON_LOWER,
++	WIRE_LEFT,
++	PYLON_LEFT,
++	WIRE_RIGHT,
++	PYLON_RIGHT,
++
++	WIRE_X_UP_ODD,
++	WIRE_X_UP_EVEN,
++  PYLON_X_UP_ODD,
++	PYLON_X_UP_EVEN,	
++	WIRE_Y_UP_ODD,
++	WIRE_Y_UP_EVEN,
++  PYLON_Y_UP_ODD,
++	PYLON_Y_UP_EVEN,	
++
++	WIRE_Y_DOWN_ODD,
++	WIRE_Y_DOWN_EVEN,
++  PYLON_Y_DOWN_ODD,
++	PYLON_Y_DOWN_EVEN,	
++	WIRE_X_DOWN_ODD,
++	WIRE_X_DOWN_EVEN,
++  PYLON_X_DOWN_ODD,
++	PYLON_X_DOWN_EVEN,	
++} CATENARY_SPRITE;
++
++typedef enum {
++	DIRECTION_X,
++	DIRECTION_Y,
++	DIRECTION_INVARIANT
++} LINE_DIRECTION;
++
++static inline void DrawCatenaryItem(CATENARY_SPRITE cs_base, const TileInfo *ti, LINE_DIRECTION dir)
++{
++	CATENARY_SPRITE cs = cs_base;
++
++	switch (dir) {
++	case DIRECTION_X: //our wire is running in X direction, so have different
++		                //configuration on even and odd Y-coordinates
++		cs += !!HASBIT(ti->y, 4);
++		break;
++
++	case DIRECTION_Y:	//the other way round
++		cs += !!HASBIT(ti->x, 4);
++		break;
++
++	case DIRECTION_INVARIANT:	//the direction doesn't matter
++		break;
++	}
++
++	DrawCatenarySprite(CatenarySpriteData[cs], ti);
++}
++
++static void DrawSlopedCatenary(const TileInfo *ti)
++{
++	switch (ti->tileh) {
++	case 3:
++		if (_map5[ti->tile] & TRACK_BIT_DIAG1) {
++			DrawCatenaryItem(WIRE_X_UP_ODD, ti, DIRECTION_X);
++			DrawCatenaryItem(PYLON_X_UP_ODD, ti, DIRECTION_X);
++		}
++		break;
++	case 6:
++		if (_map5[ti->tile] & TRACK_BIT_DIAG2) {
++			DrawCatenaryItem(WIRE_Y_UP_ODD, ti, DIRECTION_Y);
++			DrawCatenaryItem(PYLON_Y_UP_ODD, ti, DIRECTION_Y);
++		}
++		break;
++	case 9:
++		if (_map5[ti->tile] & TRACK_BIT_DIAG2) {
++			DrawCatenaryItem(WIRE_Y_DOWN_ODD, ti, DIRECTION_Y);
++			DrawCatenaryItem(PYLON_Y_DOWN_ODD, ti, DIRECTION_Y);
++		}
++		break;
++	case 12:
++		if (_map5[ti->tile] & TRACK_BIT_DIAG1) {
++			DrawCatenaryItem(WIRE_X_DOWN_ODD, ti, DIRECTION_X);
++			DrawCatenaryItem(PYLON_X_DOWN_ODD, ti, DIRECTION_X);
++		}
++		break;
++	}
++}
++
++static void DrawCatenary(const TileInfo *ti)
++{
++	byte m5 = _map5[ti->tile];
++
++	if ((ti->tileh % 3 == 0) && (ti->tileh != 0)) {
++		DrawSlopedCatenary(ti);
++		return;
++	}
++
++	if (m5 & TRACK_BIT_DIAG1) {
++		DrawCatenaryItem(WIRE_X_FLAT_ODD,  ti, DIRECTION_X);
++		if (!(m5 & TRACK_BIT_DIAG2))
++			DrawCatenaryItem(PYLON_X_FLAT_ODD, ti, DIRECTION_X);
++	}
++
++	if (m5 & TRACK_BIT_DIAG2) {
++		DrawCatenaryItem(WIRE_Y_FLAT_ODD,  ti, DIRECTION_Y);
++		if (!(m5 & TRACK_BIT_DIAG1))
++			DrawCatenaryItem(PYLON_Y_FLAT_ODD, ti, DIRECTION_Y);
++	}
++
++	if (m5 & TRACK_BIT_UPPER) {
++		DrawCatenaryItem(WIRE_UPPER, ti, DIRECTION_INVARIANT);
++		DrawCatenaryItem(PYLON_UPPER, ti, DIRECTION_INVARIANT);
++	}
++
++	if (m5 & TRACK_BIT_LOWER) {
++		DrawCatenaryItem(WIRE_LOWER, ti, DIRECTION_INVARIANT);
++		DrawCatenaryItem(PYLON_LOWER, ti, DIRECTION_INVARIANT);
++	}
++
++	if (m5 & TRACK_BIT_RIGHT) {
++		DrawCatenaryItem(WIRE_RIGHT, ti, DIRECTION_INVARIANT);
++		DrawCatenaryItem(PYLON_RIGHT, ti, DIRECTION_INVARIANT);
++	}
++
++	if (m5 & TRACK_BIT_LEFT) {
++		DrawCatenaryItem(WIRE_LEFT, ti, DIRECTION_INVARIANT);
++		DrawCatenaryItem(PYLON_LEFT, ti, DIRECTION_INVARIANT);
++	}
++
++}
++
+ static void DrawTile_Track(TileInfo *ti)
+ {
+ 	uint32 tracktype_offs, image;
+@@ -1333,7 +1525,7 @@
+ 
+ 	_drawtile_track_palette = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)));
+ 
+-	tracktype_offs = (_map3_lo[ti->tile] & 0xF) * TRACKTYPE_SPRITE_PITCH;
++	tracktype_offs = ( (_map3_lo[ti->tile] & 0xF) == 3) ? 0 : (_map3_lo[ti->tile] & 0xF) * TRACKTYPE_SPRITE_PITCH;
+ 
+ 	m5 = (byte)ti->map5;
+ 	if (!(m5 & RAIL_TYPE_SPECIAL)) {
+@@ -1378,6 +1570,9 @@
+ 
+ 		DrawGroundSprite(image + tracktype_offs);
+ 
++		if ( (_map3_lo[ti->tile] & 0xF) == 3)
++			DrawCatenary(ti);
++
+ 		if (special) {
+ 			if (m5 & TRACK_BIT_DIAG1) DrawGroundSprite(0x3ED + tracktype_offs);
+ 			if (m5 & TRACK_BIT_DIAG2) DrawGroundSprite(0x3EE + tracktype_offs);
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2512)
++++ spritecache.c	(working copy)
+@@ -70,7 +70,7 @@
+ } MD5File;
+ 
+ typedef struct FileList {
+-	const MD5File basic[5];     // grf files that always have to be loaded
++	const MD5File basic[6];     // grf files that always have to be loaded
+ 	const MD5File landscape[3]; // landscape specific grf files
+ } FileList;
+ 
+@@ -297,7 +297,7 @@
+ 	_skip_specials = 1;
+ 	_skip_sprites = 0;
+ 
+-	DEBUG(spritecache, 2) ("Reading grf-file ``%s''", filename);
++	DEBUG(spritecache, 2) ("Reading grf-file \"%s\" at offset %u", filename, load_index);
+ 
+ 	while (LoadNextSprite(load_index, file_index)) {
+ 		load_index++;
+@@ -906,6 +906,7 @@
+ 		load_index += LoadGrfFile("canalsw.grf", load_index, i++);
+ 
+ 		load_index = SPR_OPENTTD_BASE + OPENTTD_SPRITES_COUNT + 1;
++		load_index += LoadGrfFile("elrailsw.grf", load_index, i++);
+ 
+ 
+ 		/* Load newgrf sprites

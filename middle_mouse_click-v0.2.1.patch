@@ -1,0 +1,185 @@
+Index: video/sdl_v.c
+===================================================================
+--- video/sdl_v.c	(revision 3137)
++++ video/sdl_v.c	(working copy)
+@@ -321,6 +321,9 @@
+ 				_right_button_down = true;
+ 				_right_button_clicked = true;
+ 				break;
++			case SDL_BUTTON_MIDDLE:
++				_middle_button_down = true;
++				break;
+ 			case SDL_BUTTON_WHEELUP:
+ 				_cursor.wheel--;
+ 				break;
+@@ -342,6 +345,9 @@
+ 			_left_button_clicked = false;
+ 		} else if (ev.button.button == SDL_BUTTON_RIGHT) {
+ 			_right_button_down = false;
++		} else if (ev.button.button == SDL_BUTTON_MIDDLE) {
++			_middle_button_down = false;
++			_middle_button_clicked = false;
+ 		}
+ 		break;
+ 
+Index: video/win32_v.c
+===================================================================
+--- video/win32_v.c	(revision 3137)
++++ video/win32_v.c	(working copy)
+@@ -254,6 +254,17 @@
+ 		_right_button_down = false;
+ 		return 0;
+ 
++	case WM_MBUTTONDOWN:
++		ReleaseCapture();
++		_middle_button_down = true;
++		return 0;
++
++	case WM_MBUTTONUP:
++		ReleaseCapture();
++		_middle_button_down = false;
++		_middle_button_clicked = false;
++		return 0;
++
+ 	case WM_MOUSEMOVE: {
+ 		int x = (int16)LOWORD(lParam);
+ 		int y = (int16)HIWORD(lParam);
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3137)
++++ lang/english.txt	(working copy)
+@@ -1033,6 +1033,7 @@
+ STR_CONFIG_PATCHES_TOOLBAR_POS_RIGHT                            :Right
+ STR_CONFIG_PATCHES_SNAP_RADIUS                                  :{LTBLUE}Window snap radius: {ORANGE}{STRING1} px
+ STR_CONFIG_PATCHES_SNAP_RADIUS_DISABLED                         :{LTBLUE}Window snap radius: {ORANGE}disabled
++STR_CONFIG_PATCHES_SET_MIDDLE_KEY_BIND                         :{LTBLUE}Set middle mouse button key binding
+ 
+ STR_CONFIG_PATCHES_GUI                                          :{BLACK}Interface
+ STR_CONFIG_PATCHES_CONSTRUCTION                                 :{BLACK}Construction
+Index: variables.h
+===================================================================
+--- variables.h	(revision 3137)
++++ variables.h	(working copy)
+@@ -200,6 +200,9 @@
+  	uint32 npf_crossing_penalty; /* The penalty for level crossings */
+ 
+ 	bool population_in_label; // Show the population of a town in his label?
++
++	uint32 middle_key_bind; // key code for middle mouse button binding
++	bool set_middle_key_bind; // the key code of the next key press will be recorded for the middle mouse button binding (not saved)
+ } Patches;
+ 
+ VARDEF Patches _patches;
+Index: settings.c
+===================================================================
+--- settings.c	(revision 3137)
++++ settings.c	(working copy)
+@@ -854,6 +854,8 @@
+ 
+ 	{"population_in_label",	SDT_BOOL,		(void*)true,	&_patches.population_in_label,	NULL},
+ 
++	{"middle_key_bind",	SDT_UINT32,		(void*)0,	&_patches.middle_key_bind,	NULL},
++
+ 	{NULL,									0,					NULL,					NULL,																						NULL}
+ };
+ 
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 3137)
++++ settings_gui.c	(working copy)
+@@ -677,6 +677,8 @@
+ 	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_INVISIBLE_TREES,	"invisible_trees", &_patches.invisible_trees,					0,  1,  1, &InvisibleTreesActive},
+ 	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_POPULATION_IN_LABEL, "population_in_label", &_patches.population_in_label, 0, 1, 1, &PopulationInLabelActive},
+ 
++	{PE_BOOL,		PF_PLAYERBASED, STR_CONFIG_PATCHES_SET_MIDDLE_KEY_BIND, "set_middle_key_binding", &_patches.set_middle_key_bind, 0, 1, 1, NULL},
++
+ 	{PE_INT32, 0, STR_CONFIG_PATCHES_MAP_X, "map_x", &_patches.map_x, 6, 11, 1, NULL},
+ 	{PE_INT32, 0, STR_CONFIG_PATCHES_MAP_Y, "map_y", &_patches.map_y, 6, 11, 1, NULL},
+ };
+Index: window.c
+===================================================================
+--- window.c	(revision 3137)
++++ window.c	(working copy)
+@@ -139,7 +139,16 @@
+ 	}
+ }
+ 
++void DispatchMiddleClickEvent(Window *w, int x, int y)
++{
++	WindowEvent e;
+ 
++	e.event = WE_MCLICK;
++	e.click.pt.x = x;
++	e.click.pt.y = y;
++	w->wndproc(w, &e);
++}
++
+ void DrawOverlappedWindowForAll(int left, int top, int right, int bottom)
+ {
+ 	Window *w;
+@@ -1457,6 +1466,8 @@
+ 				_scrolling_viewport = true;
+ 				_cursor.fix_at = true;
+ 			}
++		} else if (click == 3) {
++			HandleKeypress(_patches.middle_key_bind);
+ 		}
+ 	} else {
+ 		if (mousewheel)
+@@ -1466,6 +1477,8 @@
+ 			DispatchLeftClickEvent(w, x - w->left, y - w->top);
+ 		else if (click == 2)
+ 			DispatchRightClickEvent(w, x - w->left, y - w->top);
++		else if (click == 3 && !mousewheel) // Prevent accidental scrolling and clicking
++			DispatchMiddleClickEvent(w, x - w->left, y - w->top);
+ 	}
+ }
+ 
+@@ -1477,7 +1490,11 @@
+ 	_current_player = _local_player;
+ 
+ 	// Handle pressed keys
+-	if (_pressed_key) {
++	if (_patches.set_middle_key_bind && _pressed_key) {
++		_patches.middle_key_bind = _pressed_key;
++		_patches.set_middle_key_bind = 0;
++		_pressed_key = false;
++	} else if (_pressed_key) {
+ 		uint32 key = _pressed_key; _pressed_key = 0;
+ 		HandleKeypress(key);
+ 	}
+@@ -1490,6 +1507,9 @@
+ 	} else if (_right_button_clicked) {
+ 		_right_button_clicked = false;
+ 		click = 2;
++	} else if (_middle_button_down && !_middle_button_clicked) {
++		_middle_button_clicked = true;
++		click = 3;
+ 	}
+ 
+ 	mousewheel = 0;
+Index: window.h
+===================================================================
+--- window.h	(revision 3137)
++++ window.h	(working copy)
+@@ -476,7 +476,9 @@
+ 	WE_MOUSEOVER = 20,
+ 	WE_ON_EDIT_TEXT_CANCEL = 21,
+ 	WE_RESIZE = 22,
+-	WE_MESSAGE = 23
++	WE_MESSAGE = 23,
++	WE_SCROLL = 24,
++	WE_MCLICK = 25
+ };
+ 
+ 
+@@ -624,6 +626,9 @@
+ VARDEF bool _right_button_down;
+ VARDEF bool _right_button_clicked;
+ 
++VARDEF bool _middle_button_down;
++VARDEF bool _middle_button_clicked;
++
+ VARDEF int _alloc_wnd_parent_num;
+ 
+ VARDEF int _scrollbar_start_pos;

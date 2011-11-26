@@ -1,0 +1,1328 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 3090)
++++ station_cmd.c	(working copy)
+@@ -2171,6 +2171,8 @@
+ 	// but this is something else. If AI builds station with 114 it looks all weird
+ 	DrawGroundSprite(image);
+ 
++	if (GB(_m[ti->tile].m3, 0, 4) == RAILTYPE_ELECTRIC) DrawCatenary(ti);
++
+ 	if (_debug_pbs_level >= 1) {
+ 		byte pbs = PBSTileReserved(ti->tile);
+ 		if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(rti->base_sprites.single_y | PALETTE_CRASH);
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 3090)
++++ vehicle_gui.c	(working copy)
+@@ -68,6 +68,7 @@
+ 
+ static const StringID _rail_types_list[] = {
+ 	STR_RAIL_VEHICLES,
++	STR_ELRAIL_VEHICLES,
+ 	STR_MONORAIL_VEHICLES,
+ 	STR_MAGLEV_VEHICLES,
+ 	INVALID_STRING_ID
+Index: rail.h
+===================================================================
+--- rail.h	(revision 3090)
++++ rail.h	(working copy)
+@@ -53,9 +53,10 @@
+ } SignalType;
+ 
+ typedef enum RailTypes {
+-	RAILTYPE_RAIL   = 0,
+-	RAILTYPE_MONO   = 1,
+-	RAILTYPE_MAGLEV = 2,
++	RAILTYPE_RAIL     = 0,
++	RAILTYPE_ELECTRIC = 1,
++	RAILTYPE_MONO     = 2,
++	RAILTYPE_MAGLEV   = 3,
+ 	RAILTYPE_END,
+ 	RAILTYPE_MASK   = 0x3,
+ 	INVALID_RAILTYPE = 0xFF,
+@@ -597,4 +598,13 @@
+ void DrawTrackBits(TileInfo *ti, TrackBits track, bool earth, bool snow, bool flat);
+ void DrawTrainDepotSprite(int x, int y, int image, RailType railtype);
+ void DrawDefaultWaypointSprite(int x, int y, RailType railtype);
++
++/**
++ * Draws overhead wires and pylons for electric railways.
++ * @param ti The TileInfo struct of the tile being drawn
++ * @see DrawCatenaryRailway
++ */
++void DrawCatenary(const TileInfo *ti);
++
++uint GetRailFoundation(uint tileh, uint bits);
+ #endif /* RAIL_H */
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3090)
++++ lang/english.txt	(working copy)
+@@ -1401,6 +1401,7 @@
+ STR_1007_ALREADY_BUILT                                          :{WHITE}...already built
+ STR_1008_MUST_REMOVE_RAILROAD_TRACK                             :{WHITE}Must remove railway track first
+ STR_100A_RAILROAD_CONSTRUCTION                                  :{WHITE}Railway Construction
++STR_TITLE_ELRAIL_CONSTRUCTION                                   :{WHITE}Electrified Railway Construction
+ STR_100B_MONORAIL_CONSTRUCTION                                  :{WHITE}Monorail Construction
+ STR_100C_MAGLEV_CONSTRUCTION                                    :{WHITE}MagLev Construction
+ STR_100D_SELECT_RAIL_BRIDGE                                     :{WHITE}Select Rail Bridge
+@@ -1412,6 +1413,7 @@
+ STR_1013_CAN_T_REMOVE_SIGNALS_FROM                              :{WHITE}Can't remove signals from here...
+ STR_1014_TRAIN_DEPOT_ORIENTATION                                :{WHITE}Train Depot Orientation
+ STR_1015_RAILROAD_CONSTRUCTION                                  :Railway construction
++STR_TOOLB_ELRAIL_CONSTRUCTION                                   :Electrified Railway construction
+ STR_1016_MONORAIL_CONSTRUCTION                                  :Monorail construction
+ STR_1017_MAGLEV_CONSTRUCTION                                    :MagLev construction
+ STR_1018_BUILD_RAILROAD_TRACK                                   :{BLACK}Build railway track
+@@ -2369,6 +2371,7 @@
+ STR_881A_TRAINS_CAN_ONLY_BE_ALTERED                             :{WHITE}Trains can only be altered when stopped inside a depot
+ STR_881B_TRAINS                                                 :{WHITE}{COMPANY} - {COMMA} Train{P "" s}
+ STR_881C_NEW_RAIL_VEHICLES                                      :{WHITE}New Rail Vehicles
++STR_NEW_ELRAIL_VEHICLES                                         :{WHITE}New Electric Rail Vehicles
+ STR_881D_NEW_MONORAIL_VEHICLES                                  :{WHITE}New Monorail Vehicles
+ STR_881E_NEW_MAGLEV_VEHICLES                                    :{WHITE}New Maglev Vehicles
+ STR_881F_BUILD_VEHICLE                                          :{BLACK}Build Vehicle
+@@ -2758,6 +2761,7 @@
+ ############ Lists rail types
+ 
+ STR_RAIL_VEHICLES                                               :Rail Vehicles
++STR_ELRAIL_VEHICLES                                             :Electrified Rail Vehicles
+ STR_MONORAIL_VEHICLES                                           :Monorail Vehicles
+ STR_MAGLEV_VEHICLES                                             :Maglev Vehicles
+ 
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 3090)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -940,7 +940,7 @@
+ 
+ 
+ // fast routine for getting the height of a middle bridge tile. 'tile' MUST be a middle bridge tile.
+-static uint GetBridgeHeight(const TileInfo *ti)
++uint GetBridgeHeight(const TileInfo *ti)
+ {
+ 	TileIndexDiff delta;
+ 	TileIndex tile = ti->tile;
+@@ -1065,6 +1065,7 @@
+ 
+ 		image += GB(ti->map5, 0, 2) * 2;
+ 		DrawGroundSprite(image);
++		if (GB(_m[ti->tile].m3, 0, 3) == RAILTYPE_ELECTRIC) DrawCatenary(ti);
+ 
+ 		AddSortableSpriteToDraw(image+1, ti->x + 15, ti->y + 15, 1, 1, 8, (byte)ti->z);
+ 	// draw bridge?
+@@ -1113,6 +1114,8 @@
+ 				DrawGroundSprite(SPR_FLAT_SNOWY_TILE + _tileh_to_sprite[ti->tileh]);
+ 			}
+ 
++			if (GB(_m[ti->tile].m3, 0, 3) == RAILTYPE_ELECTRIC) DrawCatenary(ti);
++
+ 			// draw ramp
+ 			if (_display_opt & DO_TRANS_BUILDINGS) MAKE_TRANSPARENT(image);
+ 			AddSortableSpriteToDraw(image, ti->x, ti->y, 16, 16, 7, ti->z);
+@@ -1161,6 +1164,8 @@
+ 				DrawGroundSprite(image);
+ 			}
+ 
++			if ( (GB(_m[ti->tile].m3, 4, 3) == RAILTYPE_ELECTRIC) || (HASBIT(ti->map5, 5) && GB(_m[ti->tile].m3, 0, 3) == RAILTYPE_ELECTRIC)) DrawCatenary(ti);
++
+ 			/* Cope for the direction of the bridge */
+ 			if (HASBIT(ti->map5, 0)) base_offset += 4;
+ 
+Index: elrail.c
+===================================================================
+--- elrail.c	(revision 0)
++++ elrail.c	(revision 0)
+@@ -0,0 +1,763 @@
++/* $Id$ */
++/** @file elrail.c
++  * This file deals with displaying wires and pylons for electric railway systems.
++  * In the end, two different kind of drawing systems will exist for normal Railway tiles: ...
++  */
++
++#include "stdafx.h"
++#include "openttd.h"
++#include "table/sprites.h"
++#include "tile.h"
++#include "viewport.h"
++#include "functions.h" /* We should REALLY get rid of this goddamn file, as it is butt-ugly */
++#include "variables.h" /* ... same here */
++#include "rail.h"
++#include "debug.h"
++#include "bridge.h"
++
++typedef struct {
++	SpriteID image;
++	int8 x_offset;
++	int8 y_offset;
++	int8 x_size;
++	int8 y_size;
++	int8 z_size;
++	int8 z_offset;
++} SortableSpriteStruct;
++
++static inline void DrawCatenarySprite(const SortableSpriteStruct* sss, const TileInfo* ti)
++{
++	AddSortableSpriteToDraw(
++		sss->image,
++		ti->x + sss->x_offset, ti->y + sss->y_offset,
++		sss->x_size, sss->y_size, sss->z_size,
++		GetSlopeZ(ti->x, ti->y) + sss->z_offset
++	);
++}
++
++static inline void DrawCatenarySpriteDirect(const SortableSpriteStruct* sss, uint x, uint y, uint z)
++{
++	AddSortableSpriteToDraw(
++		sss->image,
++		x + sss->x_offset, y + sss->y_offset,
++		sss->x_size, sss->y_size, sss->z_size,
++		GetSlopeZ(x, y) + z
++	);
++}
++
++static const SortableSpriteStruct CatenarySpriteData[] = {
++/* X direction */
++	/* Flat tiles: */
++		/* Wires */
++	{ SPR_WIRE_X_SW,          0,  8, 16,  1,  1, 10 }, //! 0: Wire in X direction, pylon on the SW end only
++	{ SPR_WIRE_X_NE,          0,  8, 16,  1,  1, 10 }, //! 1: Wire in X direction, pylon on the NE end
++	{ SPR_WIRE_X_SHORT,       0,  8, 16,  1,  1, 10 }, //! 2: Wire in X direction, pylon on both ends
++
++		/* Pylons */
++	{ SPR_PYLON_X_SE,         0, 11,  1,  1, 10,  0 }, //! 3: Pylon for X direction, on the SE side, for NE end of tile
++	{ SPR_PYLON_X_SE,        15, 11,  1,  1, 10,  0 }, //! 4: Pylon for X direction, on the SE side, for SW end of tile
++	{ SPR_PYLON_X_NW,         0,  4,  1,  1, 10,  0 }, //! 5: Pylon for X direction, on the NW side, for NE end of tile
++	{ SPR_PYLON_X_NW,        15,  4,  1,  1, 10,  0 }, //! 6: Pylon for X direction, on the NW side, for SW end of tile
++
++	/* "up" tiles */
++		/* Wires */
++	{ SPR_WIRE_X_SW_UP,       0,  8, 16,  8,  1, 18 }, //! 7: Wire in X pitch up, pylon on the SW end only 
++	{ SPR_WIRE_X_NE_UP,       0,  8, 16,  8,  1, 18 }, //! 8: Wire in X pitch up, pylon on the NE end
++	{ SPR_WIRE_X_SHORT_UP,    0,  8, 16,  8,  1, 18 }, //! 9: Wire in X pitch up, pylon on both ends
++
++		/* Pylons */
++	{ SPR_PYLON_X_SE,         0, 11,  1,  1, 10,  0 }, //! 10: Pylon for X pitch up, on the SE side, for NE end of tile
++	{ SPR_PYLON_X_SE,        15, 11,  1,  1, 10,  8 }, //! 11: Pylon for X pitch up, on the SE side, for SW end of tile
++	{ SPR_PYLON_X_NW,         0,  4,  1,  1, 10,  0 }, //! 12: Pylon for X pitch up, on the NW side, for NE end of tile
++	{ SPR_PYLON_X_NW,        15,  4,  1,  1, 10,  8 }, //! 13: Pylon for X pitch up, on the NW side, for SW end of tile
++
++	/* "down" tiles */
++		/* Wires */
++	{ SPR_WIRE_X_SW_DOWN,     0,  8, 16,  8,  1, 11 }, //! 14: Wire in X pitch down, pylon on the SW end
++	{ SPR_WIRE_X_NE_DOWN,     0,  8, 16,  8,  1, 11 }, //! 15: Wire in X pitch down, pylon on the NE end
++	{ SPR_WIRE_X_SHORT_DOWN,  0,  8, 16,  8,  1, 11 }, //! 16: Wire in X pitch down, pylon on both ends
++
++		/* Pylons */
++	{ SPR_PYLON_X_SE,         0, 11,  1,  1, 10,  0 }, //! 17: Pylon for X pitch down, on the SE side, for NE end of tile
++	{ SPR_PYLON_X_SE,        15, 11,  1,  1, 10, -8 }, //! 18: Pylon for X pitch down, on the SE side, for SW end of tile
++	{ SPR_PYLON_X_NW,         0,  4,  1,  1, 10,  0 }, //! 19: Pylon for X pitch down, on the NW side, for NE end of tile
++	{ SPR_PYLON_X_NW,        15,  4,  1,  1, 10, -8 }, //! 20: Pylon for X pitch down, on the NW side, for SW end of tile
++
++
++/* Y direction */
++	/* Flat tiles: */
++		/* Wires */
++	{ SPR_WIRE_Y_SE,          8,  0,  1, 16,  1, 10 }, //! 21: Wire in Y direction, pylon on the SE end only
++	{ SPR_WIRE_Y_NW,          8,  0,  1, 16,  1, 10 }, //! 22: Wire in Y direction, pylon on the NW end
++	{ SPR_WIRE_Y_SHORT,       8,  0,  1, 16,  1, 10 }, //! 23: Wire in Y direction, pylon on both ends
++
++		/* Pylons */
++	{ SPR_PYLON_Y_SW,        11,  0,  1,  1, 10,  0 }, //! 24: Pylon for Y direction, on the SW side, for NW end of tile
++	{ SPR_PYLON_Y_SW,        11, 15,  1,  1, 10,  0 }, //! 25: Pylon for Y direction, on the SW side, for SE end of tile
++	{ SPR_PYLON_Y_NE,         4,  0,  1,  1, 10,  0 }, //! 26: Pylon for Y direction, on the NE side, for NW end of tile
++	{ SPR_PYLON_Y_NE,         4, 15,  1,  1, 10,  0 }, //! 27: Pylon for Y direction, on the NE side, for SE end of tile
++
++	/* "up" tiles */
++		/* Wires */
++	{ SPR_WIRE_Y_SE_UP,       8,  0,  8, 16,  1, 18 }, //! 28: Wire in Y pitch up, pylon on the SE end only 
++	{ SPR_WIRE_Y_NW_UP,       8,  0,  8, 16,  1, 18 }, //! 29: Wire in Y pitch up, pylon on the NW end
++	{ SPR_WIRE_Y_SHORT_UP,    8,  0,  8, 16,  1, 18 }, //! 30: Wire in Y pitch up, pylon on both ends
++
++		/* Pylons */
++	{ SPR_PYLON_Y_SW,        11,  0,  1,  1, 10,  0 }, //! 31: Pylon for Y pitch up, on the SW side, for NW end of tile
++	{ SPR_PYLON_Y_SW,        11, 15,  1,  1, 10,  8 }, //! 32: Pylon for Y pitch up, on the SW side, for SW end of tile
++	{ SPR_PYLON_Y_NE,         4,  0,  1,  1, 10,  0 }, //! 33: Pylon for Y pitch up, on the NE side, for NE end of tile
++	{ SPR_PYLON_Y_NE,         4, 15,  1,  1, 10,  8 }, //! 34: Pylon for Y pitch up, on the NE side, for SE end of tile
++
++	/* "down" tiles */
++		/* Wires */
++	{ SPR_WIRE_Y_SE_DOWN,     8,  0,  8, 16,  1, 10 }, //! 35: Wire in Y pitch down, pylon on the SE end
++	{ SPR_WIRE_Y_NW_DOWN,     8,  0,  8, 16,  1, 10 }, //! 36: Wire in Y pitch down, pylon on the NW end
++	{ SPR_WIRE_Y_SHORT_DOWN,  8,  0,  8, 16,  1, 10 }, //! 37: Wire in Y pitch down, pylon on both ends
++
++		/* Pylons */
++	{ SPR_PYLON_Y_SW,        11,  0,  1,  1, 10,  0 }, //! 38: Pylon for Y pitch down, on the SW side, for NW end of tile
++	{ SPR_PYLON_Y_SW,        11, 15,  1,  1, 10, -8 }, //! 39: Pylon for Y pitch down, on the SW side, for SW end of tile
++	{ SPR_PYLON_Y_NE,         4,  0,  1,  1, 10,  0 }, //! 40: Pylon for Y pitch down, on the NE side, for NE end of tile
++	{ SPR_PYLON_Y_NE,         4, 15,  1,  1, 10, -8 }, //! 41: Pylon for Y pitch down, on the NE side, for SE end of tile
++
++/* NS Direction */
++		/* Wires */
++	{ SPR_WIRE_NS_SHORT,      8,  0,  8,  8,  1, 10 },
++	{ SPR_WIRE_NS_SHORT,      0,  8,  8,  8,  1, 10 },
++	{ SPR_WIRE_NS_N,          8,  0,  8,  8,  1, 10 },
++	{ SPR_WIRE_NS_N,          0,  8,  8,  8,  1, 10 },
++	{ SPR_WIRE_NS_S,          8,  0,  8,  8,  1, 10 },
++	{ SPR_WIRE_NS_S,          0,  8,  8,  8,  1, 10 },
++
++		/* Pylons */
++	{ SPR_PYLON_NS_E,         1, 14,  1,  1, 10,  0 },
++	{ SPR_PYLON_NS_W,        14,  1,  1,  1, 10,  0 },
++
++/* EW Direction */
++		/* Wires */
++	{ SPR_WIRE_EW_SHORT,      8,  0,  8,  8,  1, 10 },
++	{ SPR_WIRE_EW_SHORT,     16,  8,  8,  8,  1, 10 },
++	{ SPR_WIRE_EW_SHORT,     16,  8,  8,  8,  1, 18 },
++	{ SPR_WIRE_EW_SHORT,     16,  8,  8,  8,  1,  2 },
++	{ SPR_WIRE_EW_W,          8,  0,  8,  8,  1, 10 },
++	{ SPR_WIRE_EW_W,         16,  8,  8,  8,  1, 10 },
++	{ SPR_WIRE_EW_E,          8,  0,  8,  8,  1, 10 },
++	{ SPR_WIRE_EW_E,         16,  8,  8,  8,  1, 10 },
++
++	{ SPR_PYLON_EW_N,         1,  1,  1,  1, 10,  0 },
++	{ SPR_PYLON_EW_S,        14, 14,  1,  1, 10,  0 },
++
++/* Tunnels */
++	{ SPR_WIRE_TUNNEL_SW,     6, 11,  8,  1,  1, 10 },
++	{ SPR_WIRE_TUNNEL_NW,     8,  0,  1,  8,  1, 10 },
++	{ SPR_WIRE_TUNNEL_NE,     0,  8,  8,  1,  1, 10 },
++	{ SPR_WIRE_TUNNEL_SE,    11,  6,  1,  8,  1, 10 },
++
++/* Bridge stuff */
++	{ SPR_WIRE_X_SHORT,       0,  8, 16,  1,  1, 18 }, //! 2: Wire in X direction, pylon on both ends
++	{ SPR_WIRE_Y_SHORT,       8,  0,  1, 16,  1, 18 }, //! 2: Wire in Y direction, pylon on both ends
++	{ SPR_WIRE_X_SHORT_DOWN,  0,  8, 16,  8,  1, 18 }, //! 16: Wire in X pitch down, pylon on both ends
++	{ SPR_WIRE_Y_SHORT_DOWN,  8,  0,  8, 16,  1, 18 }, //! 16: Wire in Y pitch down, pylon on both ends
++
++
++	/* OLD DUMP */
++	{ SPR_WIRE_Y_SE,        8,  0,  1, 16,  1, 10 }, //! Line in Y direction, no slope, odd Y coodinate
++	{ SPR_WIRE_Y_NW,        8,  0,  1, 16,  1, 10 }, // Line in X direction, no slope, even Y coordinate
++	{ SPR_PYLON_Y_SW,      11,  8,  1,  1, 10,  0 }, // Mast for above line, odd X coordinate
++	{ SPR_PYLON_Y_NE,       4,  8,  1,  1, 10,  0 }, // Mast for above line, even X coordinate
++	{ SPR_WIRE_EW_W,        8,  0,  8,  8,  1, 10 }, // Nothern line in W-E direction
++	{ SPR_PYLON_EW_N,       1,  1,  1,  1, 10,  0 }, // Mast for above
++	{ SPR_WIRE_EW_E,       16,  8,  8,  8,  1, 10 }, // Southern line in W-E direction
++	{ SPR_PYLON_EW_S,      15, 15,  1,  1, 10,  0 }, // Mast
++	{ SPR_WIRE_NS_N,        8,  0,  8,  8,  1, 10 }, // Western line in N-S direction
++	{ SPR_PYLON_NS_W,      14,  1,  1,  1, 10,  0 }, // Mast
++	{ SPR_WIRE_NS_S,        0,  8,  8,  8,  1, 10 }, // Eastern line in N-S direction
++	{ SPR_PYLON_NS_E,       1, 14,  1,  1, 10,  0 }, // Mast
++	/* 16 */
++	{ SPR_WIRE_X_SW_UP,     0,  8,  8,  8,  1, 18 }, // Line in X direction (SW up) /* 3 */
++	{ SPR_WIRE_X_NE_UP,     0,  8,  8,  8,  1, 18 }, // same for even Y
++	{ SPR_PYLON_X_SE,       8, 11,  1,  1, 10,  4 }, // Mast
++	{ SPR_PYLON_X_NW,       8,  4,  1,  1, 10,  4 },
++	{ SPR_WIRE_Y_SE_UP,     8,  0,  8,  8,  1, 18 }, // Line in Y direction, (SE up)  /* 6 */
++	{ SPR_WIRE_Y_NW_UP,     8,  0,  8,  8,  1, 18 }, // even
++	{ SPR_PYLON_Y_SW,      11,  8,  1,  1, 10,  4 },
++	{ SPR_PYLON_Y_NE,       4,  8,  1,  1, 10,  4 },
++	/* 24 */
++	{ SPR_WIRE_Y_SE_DOWN,   8,  0,  8,  8,  1, 10 }, // X o  //same as above, but going down  /* 9 */
++	{ SPR_WIRE_Y_NW_DOWN,   8,  0,  8,  8,  1, 10 }, // X e
++	{ SPR_PYLON_Y_SW,      11,  8,  1,  1, 10, -4 },
++	{ SPR_PYLON_Y_NE,       3,  8,  1,  1, 10, -4 },
++	{ SPR_WIRE_X_SW_DOWN,   0,  8,  8,  8,  1, 10 }, // Y o  /* 12 */
++	{ SPR_WIRE_X_NE_DOWN,   0,  8,  8,  8,  1, 10 }, // Y e
++	{ SPR_PYLON_X_SE,       8, 11,  1,  1, 10, -4 },
++	{ SPR_PYLON_X_NW,       8,  4,  1,  1, 10, -4 },
++};
++
++/** Refers to a certain element of the catenary.
++  * Identifiers for Wires:
++  * <ol><li>Direction of the wire</li>
++  * <li>Slope of the tile for diagonals, placement inside the track for horiz/vertical pieces</li>
++  * <li>Place where a pylon shoule be</li></ol>
++  * <li>RAISED/LOWERED flag to cope for north corner offset</li>
++  * Identifiers for Pylons:
++  * <ol><li>Direction of the wire</li>
++  * <li>Slope of the tile</li>
++  * <li>Position of the Pylon relative to the track</li>
++  * <li>Position of the Pylon inside the tile</li></ol>
++  */
++typedef enum {
++	WIRE_X_FLAT_SW,
++	WIRE_X_FLAT_NE,
++	WIRE_X_FLAT_BOTH,
++
++	PYLON_X_FLAT_NE_SE,
++	PYLON_X_FLAT_SW_SE,
++	PYLON_X_FLAT_NE_NW,
++	PYLON_X_FLAT_SW_NW,
++
++	WIRE_X_UP_SW,
++	WIRE_X_UP_NE,
++	WIRE_X_UP_BOTH,
++
++	PYLON_X_UP_NE_SE,
++	PYLON_X_UP_SW_SE,
++	PYLON_X_UP_NE_NW,
++	PYLON_X_UP_SW_NW,
++
++	WIRE_X_DOWN_SW,
++	WIRE_X_DOWN_NE,
++	WIRE_X_DOWN_BOTH,
++
++	PYLON_X_DOWN_NE_SE,
++	PYLON_X_DOWN_SW_SE,
++	PYLON_X_DOWN_NE_NW,
++	PYLON_X_DOWN_SW_NW,
++
++	WIRE_Y_FLAT_SE,
++	WIRE_Y_FLAT_NW,
++	WIRE_Y_FLAT_BOTH,
++
++	PYLON_Y_FLAT_NW_SW,
++	PYLON_Y_FLAT_SE_SW,
++	PYLON_Y_FLAT_NW_NE,
++	PYLON_Y_FLAT_SE_NE,
++
++	WIRE_Y_UP_SE,
++	WIRE_Y_UP_NW,
++	WIRE_Y_UP_BOTH,
++
++	PYLON_Y_UP_NW_SW,
++	PYLON_Y_UP_SE_SW,
++	PYLON_Y_UP_NW_NE,
++	PYLON_Y_UP_SE_NE,
++
++	WIRE_Y_DOWN_SE,
++	WIRE_Y_DOWN_NW,
++	WIRE_Y_DOWN_BOTH,
++
++	PYLON_Y_DOWN_NW_SW,
++	PYLON_Y_DOWN_SE_NE,
++	PYLON_Y_DOWN_NW_NE,
++	PYLON_Y_DOWN_SE_SW,
++
++	WIRE_NS_W_BOTH,
++	WIRE_NS_E_BOTH,
++	WIRE_NS_W_N,
++	WIRE_NS_E_N,
++	WIRE_NS_W_S,
++	WIRE_NS_E_S,
++
++	PYLON_NS_E,
++	PYLON_NS_W,
++
++	WIRE_EW_N_BOTH,
++	WIRE_EW_S_BOTH,
++	WIRE_EW_S_BOTH_RAISED,
++	WIRE_EW_S_BOTH_LOWERED,
++	WIRE_EW_N_W,
++	WIRE_EW_S_W,
++	WIRE_EW_N_E,
++	WIRE_EW_S_E,
++
++	PYLON_EW_N,
++	PYLON_EW_S,
++
++	WIRE_TUNNEL_SW,
++	WIRE_TUNNEL_NW,
++	WIRE_TUNNEL_NE,
++	WIRE_TUNNEL_SE,
++
++	WIRE_X_FLAT_BRIDGEHEAD,
++	WIRE_Y_FLAT_BRIDGEHEAD,
++	WIRE_X_DOWN_BRIDGEHEAD,
++	WIRE_Y_DOWN_BRIDGEHEAD,
++
++	/* OLD DUMP */
++	WIRE_Y_FLAT_ODD,
++	WIRE_Y_FLAT_EVEN,
++	PYLON_Y_FLAT_ODD,
++	PYLON_Y_FLAT_EVEN,
++
++	WIRE_UPPER,
++	PYLON_UPPER,
++	WIRE_LOWER,
++	PYLON_LOWER,
++	WIRE_LEFT,
++	PYLON_LEFT,
++	WIRE_RIGHT,
++	PYLON_RIGHT,
++
++	WIRE_X_UP_ODD,
++	WIRE_X_UP_EVEN,
++	PYLON_X_UP_ODD,
++	PYLON_X_UP_EVEN,
++	WIRE_Y_UP_ODD,
++	WIRE_Y_UP_EVEN,
++	PYLON_Y_UP_ODD,
++	PYLON_Y_UP_EVEN,
++
++	WIRE_Y_DOWN_ODD,
++	WIRE_Y_DOWN_EVEN,
++	PYLON_Y_DOWN_ODD,
++	PYLON_Y_DOWN_EVEN,
++	WIRE_X_DOWN_ODD,
++	WIRE_X_DOWN_EVEN,
++	PYLON_X_DOWN_ODD,
++	PYLON_X_DOWN_EVEN,
++} CatenarySprite;
++
++typedef enum {
++	DIRECTION_X,
++	DIRECTION_Y,
++	DIRECTION_INVARIANT
++} LineDirection;
++
++static inline void DrawCatenaryItem(CatenarySprite cs_base, const TileInfo* ti)
++{
++	DrawCatenarySprite(&CatenarySpriteData[cs_base], ti);
++}
++
++static inline void DrawCatenaryItemDirect(CatenarySprite cs_base, uint x, uint y, uint z)
++{
++	DrawCatenarySpriteDirect(&CatenarySpriteData[cs_base], x, y, z);
++}
++
++static inline bool IsEvenX(const TileInfo *ti)
++{
++	return (TileX(ti->tile) & 0x01) == 0x00;
++}
++
++static inline bool IsEvenY(const TileInfo *ti)
++{
++	return (TileY(ti->tile) & 0x01) == 0x00;
++}
++
++static inline bool IsQuarterX(const TileInfo *ti)
++{
++	return (TileX(ti->tile) & 0x03) == 0x00;
++}
++
++static inline bool IsQuarterY(const TileInfo *ti)
++{
++	return (TileY(ti->tile) & 0x03) == 0x00;
++}
++
++static void DrawCatenaryRailwaySimple(const TileInfo *ti)
++{
++	byte m5 = _m[ti->tile].m5 & TRACK_BIT_MASK;
++	bool has_pylon = false;
++	uint XY = TileX(ti->tile) & 0x01;
++	XY += (TileY(ti->tile) & 0x01) << 1;
++
++	if (IsTileType(ti->tile, MP_TUNNELBRIDGE)) {
++		m5 = (HASBIT(ti->map5, 0)) ? TRACK_BIT_DIAG1 : TRACK_BIT_DIAG2;
++	}
++
++	switch (ti->tileh) {
++		/* Flat tracks on a flat tile */
++		case 0:
++		/* Flat tracks on non-flat tile where level of track == level of north corner */
++		case 1: case 2: case 4: case 11: case 13: case 14:
++			if (m5 & TRACK_BIT_DIAG1) {
++				TileIndex ne = ti->tile + TileDiffXY(-1, 0);
++				TileIndex sw = ti->tile + TileDiffXY( 1, 0);
++				byte m5ne = 0;
++				byte m5sw = 0;
++
++				if (IsTileType(ne, MP_RAILWAY))
++					m5ne = _m[ne].m5 & TRACK_BIT_MASK;
++
++				if (IsTileType(sw, MP_RAILWAY))
++					m5sw = _m[sw].m5 & TRACK_BIT_MASK;
++
++				if (IsEvenX(ti)) {
++					DrawCatenaryItem(WIRE_X_FLAT_NE, ti);
++					if (IsQuarterX(ti))
++						DrawCatenaryItem(PYLON_X_FLAT_NE_NW, ti);
++					else
++						DrawCatenaryItem(PYLON_X_FLAT_NE_SE, ti);
++
++					if (m5sw == 0)
++						DrawCatenaryItem(PYLON_X_FLAT_SW_SE, ti);
++				} else {
++					if (m5ne == TRACK_BIT_DIAG1)
++						DrawCatenaryItem(WIRE_X_FLAT_SW, ti);
++					else
++						DrawCatenaryItem(WIRE_X_FLAT_BOTH, ti);
++					if (m5sw == 0)
++						DrawCatenaryItem(PYLON_X_FLAT_SW_NW, ti);
++
++					if (m5ne == 0)
++						DrawCatenaryItem(PYLON_X_FLAT_NE_NW, ti);
++				}
++			}
++
++			if (m5 & TRACK_BIT_DIAG2) {
++				TileIndex nw = ti->tile + TileDiffXY(0, -1);
++				TileIndex se = ti->tile + TileDiffXY(0,  1);
++				byte m5nw = 0;
++				byte m5se = 0;
++
++				if (IsTileType(nw, MP_RAILWAY))
++					m5nw = _m[nw].m5 & TRACK_BIT_MASK;
++
++				if (IsTileType(se, MP_RAILWAY))
++					m5se = _m[se].m5 & TRACK_BIT_MASK;
++
++				if (IsEvenY(ti)) {
++					if (m5se & TRACK_BIT_UPPER)
++						DrawCatenaryItem(WIRE_Y_FLAT_BOTH, ti);
++					else
++						DrawCatenaryItem(WIRE_Y_FLAT_NW, ti);
++
++					if (IsQuarterY(ti))
++						DrawCatenaryItem(PYLON_Y_FLAT_NW_NE, ti);
++					else {
++						if (m5nw & TRACK_BIT_LOWER)
++							DrawCatenaryItem(PYLON_Y_FLAT_NW_NE, ti);
++						else
++							DrawCatenaryItem(PYLON_Y_FLAT_NW_SW, ti);
++					}
++				} else {
++
++					if ((m5 & TRACK_BIT_UPPER) || (m5nw & TRACK_BIT_LOWER)) {
++						DrawCatenaryItem(WIRE_Y_FLAT_BOTH, ti); 
++						DrawCatenaryItem(PYLON_Y_FLAT_NW_NE, ti);
++					} else {
++						DrawCatenaryItem(WIRE_Y_FLAT_SE, ti);
++					}
++				}
++			}
++
++			if (m5 & TRACK_BIT_UPPER) {
++				if (!( (m5 & TRACK_BIT_DIAG1) || (m5 & TRACK_BIT_DIAG2))) {
++					TileIndex ne = ti->tile + TileDiffXY(-1, 0);
++					TileIndex nw = ti->tile + TileDiffXY(0, -1);
++					byte m5ne = 0;
++					byte m5nw = 0;
++
++					if (IsTileType(ne, MP_RAILWAY))
++						m5ne = _m[ne].m5 & TRACK_BIT_MASK;
++
++					if (IsTileType(nw, MP_RAILWAY))
++						m5nw = _m[nw].m5 & TRACK_BIT_MASK;
++
++					if ( m5nw & TRACK_BIT_DIAG2 ) {
++						DrawCatenaryItem(PYLON_Y_FLAT_NW_SW, ti);
++					}
++
++					switch (XY) {
++						case 0x1: 
++							if (m5ne & TRACK_BIT_DIAG1)
++								DrawCatenaryItem(WIRE_EW_N_BOTH, ti);
++							else
++								DrawCatenaryItem(WIRE_EW_N_W, ti);
++
++							if ( (!(m5ne & TRACK_BIT_DIAG1)) && (!(m5nw & TRACK_BIT_DIAG2))) {
++								DrawCatenaryItem(PYLON_EW_N, ti);
++							} 
++
++							if ( m5ne & TRACK_BIT_DIAG1 ) {
++								DrawCatenaryItem(PYLON_X_FLAT_NE_SE, ti);
++							}
++
++							break;
++						case 0x2:
++						case 0x0: {
++							if (m5ne & TRACK_BIT_DIAG1) {
++								DrawCatenaryItem(WIRE_EW_N_BOTH, ti);
++								DrawCatenaryItem(PYLON_X_FLAT_NE_SE, ti);
++							} else {
++								if ((XY == 0x2) && !(m5nw & TRACK_BIT_DIAG2))
++									DrawCatenaryItem(PYLON_EW_N, ti);
++
++								DrawCatenaryItem(WIRE_EW_N_W, ti);
++							}
++					  	} break;
++						case 0x3:
++							if (m5ne & TRACK_BIT_DIAG1)
++								DrawCatenaryItem(WIRE_EW_N_BOTH, ti);
++							else
++								DrawCatenaryItem(WIRE_EW_N_W, ti);
++							if (m5ne & TRACK_BIT_DIAG1) {
++								DrawCatenaryItem(PYLON_X_FLAT_NE_SE, ti);
++							}
++					}
++				} else if (m5 & TRACK_BIT_DIAG1) {
++					switch (XY) {
++						case 0x0: case 0x2:
++							DrawCatenaryItem(WIRE_EW_N_BOTH, ti);
++							break;
++						case 0x1: case 0x3:
++							DrawCatenaryItem(WIRE_EW_N_W, ti);
++							break;
++					}
++				} else if (m5 & TRACK_BIT_DIAG2) {
++					switch (XY) {
++						case 0x1: case 0x0: case 0x2: case 0x3: 
++							DrawCatenaryItem(WIRE_EW_N_W, ti);
++							break;
++						default:
++							DrawCatenaryItem(WIRE_EW_N_E, ti);
++							break;
++					}
++				}
++			}
++
++			if (m5 & TRACK_BIT_LOWER) {
++				if (!( (m5 & TRACK_BIT_DIAG1) || (m5 & TRACK_BIT_DIAG2))) {
++					TileIndex sw = ti->tile + TileDiffXY(1, 0);
++					TileIndex se = ti->tile + TileDiffXY(0, 1);
++					byte m5sw = 0;
++					byte m5se = 0;
++
++					if (IsTileType(sw, MP_RAILWAY))
++						m5sw = _m[sw].m5 & TRACK_BIT_MASK;
++
++					if (IsTileType(se, MP_RAILWAY))
++						m5se = _m[se].m5 & TRACK_BIT_MASK;
++
++					switch (XY) {
++						case 0x0:
++							if (m5sw & TRACK_BIT_DIAG1) {
++								DrawCatenaryItem(PYLON_X_FLAT_SW_NW, ti);
++								DrawCatenaryItem(WIRE_EW_S_BOTH, ti);
++							} else {
++								DrawCatenaryItem(WIRE_EW_S_E, ti);
++							}
++
++							break;
++						case 0x1:
++							if (m5sw & TRACK_BIT_DIAG1) {
++								DrawCatenaryItem(WIRE_EW_S_BOTH, ti);
++							} else {
++								DrawCatenaryItem(WIRE_EW_S_E, ti);
++								if (!(m5se & TRACK_BIT_DIAG2))
++									DrawCatenaryItem(PYLON_EW_S, ti);
++							}
++							break;
++						case 0x2:
++							if (m5sw & TRACK_BIT_DIAG1) {
++								DrawCatenaryItem(PYLON_X_FLAT_SW_NW, ti);
++								DrawCatenaryItem(WIRE_EW_S_BOTH, ti);
++							} else {
++								DrawCatenaryItem(WIRE_EW_S_E, ti);
++								if (!(m5se & TRACK_BIT_DIAG2))
++									DrawCatenaryItem(PYLON_EW_S, ti);
++							}
++							break;
++						case 0x3:
++							if (m5sw & TRACK_BIT_DIAG1)
++								DrawCatenaryItem(WIRE_EW_S_BOTH, ti);
++							else
++								DrawCatenaryItem(WIRE_EW_S_E, ti);
++							break;
++					}
++				}
++			}
++
++			if (m5 & TRACK_BIT_RIGHT) {
++				switch (XY) {
++					case 0x0:
++						DrawCatenaryItem(WIRE_NS_E_N, ti);
++						DrawCatenaryItem(PYLON_NS_E, ti);
++						break;
++					case 0x1:
++						DrawCatenaryItem(WIRE_NS_E_N, ti);
++						break;
++					case 0x2:
++						DrawCatenaryItem(WIRE_NS_E_N, ti);
++						break;
++					case 0x3:
++						DrawCatenaryItem(WIRE_NS_E_N, ti);
++						DrawCatenaryItem(PYLON_NS_E, ti);
++						break;
++				}
++			}
++			if (m5 & TRACK_BIT_LEFT) {
++				switch (XY) {
++					case 0x0:
++						DrawCatenaryItem(WIRE_NS_W_S, ti);
++						DrawCatenaryItem(PYLON_NS_W, ti);
++						break;
++					case 0x1:
++						DrawCatenaryItem(WIRE_NS_W_S, ti);
++						break;
++					case 0x2:
++						DrawCatenaryItem(WIRE_NS_W_S, ti);
++						break;
++					case 0x3:
++						DrawCatenaryItem(WIRE_NS_W_S, ti);
++						DrawCatenaryItem(PYLON_NS_W, ti);
++						break;
++				}
++			}
++			break;
++		/* Slopes */
++		case 3:
++			if (IsEvenX(ti)) {
++				DrawCatenaryItem(WIRE_X_UP_NE, ti);
++				if (IsQuarterX(ti))
++					DrawCatenaryItem(PYLON_X_UP_NE_NW, ti);
++				else
++					DrawCatenaryItem(PYLON_X_UP_NE_SE, ti);
++			} else {
++				DrawCatenaryItem(WIRE_X_UP_SW, ti);
++			}
++			break;
++		case 6:
++			if (IsEvenY(ti)) {
++				DrawCatenaryItem(WIRE_Y_UP_NW, ti);
++				if (IsQuarterX(ti))
++					DrawCatenaryItem(PYLON_Y_UP_NW_NE, ti);
++				else
++					DrawCatenaryItem(PYLON_Y_UP_NW_SW, ti);
++			} else {
++				DrawCatenaryItem(WIRE_Y_UP_SE, ti);
++			}
++			break;
++		case 9:
++			if (IsEvenY(ti)) {
++				DrawCatenaryItem(WIRE_Y_DOWN_NW, ti);
++				if (IsQuarterX(ti))
++					DrawCatenaryItem(PYLON_Y_DOWN_NW_NE, ti);
++				else
++					DrawCatenaryItem(PYLON_Y_DOWN_NW_SW, ti);
++			} else {
++				DrawCatenaryItem(WIRE_Y_DOWN_SE, ti);
++			}
++			break;
++		case 12:
++			if (IsEvenX(ti)) {
++				DrawCatenaryItem(WIRE_X_DOWN_NE, ti);
++				if (IsQuarterX(ti))
++					DrawCatenaryItem(PYLON_X_DOWN_NE_NW, ti);
++				else
++					DrawCatenaryItem(PYLON_X_DOWN_NE_SE, ti);
++			} else {
++				DrawCatenaryItem(WIRE_X_DOWN_SW, ti);
++			}
++			break;
++
++		/* Flat tracks on non-flat tiles, where level of track != level of north corner */
++		case 7:
++			if (m5 == TRACK_BIT_LOWER) {
++				DrawCatenaryItem(WIRE_EW_S_BOTH_RAISED, ti);
++			}
++			break;
++		case 8:
++			if (m5 == TRACK_BIT_LOWER) {
++				DrawCatenaryItem(WIRE_EW_S_BOTH_LOWERED, ti);
++			}
++			break;
++
++		/* Not allowed stuff */
++		case 5: case 10: default:
++			DEBUG(misc, 0) ("ELRAIL: Track configuration %x not supported for virtual tileh %d", m5, ti->tileh);
++			break;
++
++	}
++
++}
++
++void DrawCatenary(const TileInfo *ti)
++{
++	switch (GetTileType(ti->tile)) {
++	case MP_RAILWAY:
++		if (_display_opt & DO_FULL_DETAIL)
++			/* DrawCatenaryRailway(ti); */
++			DrawCatenaryRailwaySimple(ti);
++		else
++			DrawCatenaryRailwaySimple(ti);
++		break;
++	case MP_STREET:
++		if (HASBIT(_m[ti->tile].m5, 3)) {
++			DrawCatenaryItem(WIRE_X_FLAT_BOTH, ti);
++		} else {
++			DrawCatenaryItem(WIRE_Y_FLAT_BOTH, ti);
++		}
++		break;
++	case MP_STATION:
++		if (HASBIT(_m[ti->tile].m5, 0)) {
++			DrawCatenaryItem(WIRE_Y_FLAT_BOTH, ti);
++		} else {
++			DrawCatenaryItem(WIRE_X_FLAT_BOTH, ti);
++		}
++		break;
++	case MP_TUNNELBRIDGE:
++		switch (_m[ti->tile].m5 & 0xC0) {
++			case 0x00: /* Tunnel */
++				DrawCatenaryItem(WIRE_TUNNEL_SW + GB(_m[ti->tile].m5, 0, 2), ti);
++				switch (GB(_m[ti->tile].m5, 0, 2)) {
++					case 1:
++						DrawCatenaryItem(PYLON_Y_FLAT_NW_NE, ti);
++						break;
++					case 2:
++						DrawCatenaryItem(PYLON_X_FLAT_NE_NW, ti);
++						break;
++				}
++				break;
++			case 0x80: { /* Bridge head */
++				switch (_m[ti->tile].m5 & 0x21) {
++					/* Note: Only the southern ends need the Z correction */
++					case 0x00: /* northern bridge end, X direction */
++						if (ti->tileh != GetTileSlope(ti->tile, NULL))
++							DrawCatenaryItem(ti->tileh != 0 ? WIRE_X_FLAT_BRIDGEHEAD : WIRE_X_UP_BOTH, ti);
++						else
++							DrawCatenaryItem(ti->tileh != 0 ? WIRE_X_FLAT_BOTH : WIRE_X_UP_BOTH, ti);
++						break;
++					case 0x01: /* northern end, Y direction */
++						if (ti->tileh != GetTileSlope(ti->tile, NULL))
++							DrawCatenaryItem(ti->tileh != 0 ? WIRE_Y_FLAT_BRIDGEHEAD : WIRE_Y_UP_BOTH, ti);
++						else	
++							DrawCatenaryItem(ti->tileh != 0 ? WIRE_Y_FLAT_BOTH : WIRE_Y_UP_BOTH, ti);
++						break;
++					case 0x20: /* southern bridge end, X direction */
++						DrawCatenaryItem(ti->tileh != 0 ? WIRE_X_FLAT_BRIDGEHEAD : WIRE_X_DOWN_BRIDGEHEAD, ti);
++						break;
++					case 0x21: /* southern end, Y direction */
++						DrawCatenaryItem(ti->tileh != 0 ? WIRE_Y_FLAT_BRIDGEHEAD : WIRE_Y_DOWN_BRIDGEHEAD, ti);
++				}
++				} break;
++			case 0xC0:
++				if (GB(_m[ti->tile].m3, 4, 3) == RAILTYPE_ELECTRIC) {
++					/* On the bridge */
++					uint z = GetBridgeHeight(ti) + TILE_HEIGHT + 1;
++					z -= TilePixelHeight(ti->tile) - TILE_HEIGHT;
++					if (!HASBIT(_m[ti->tile].m5, 0)) {
++						DrawCatenaryItemDirect(WIRE_X_FLAT_BOTH, ti->x, ti->y, z);
++					} else {
++						DrawCatenaryItemDirect(WIRE_Y_FLAT_BOTH, ti->x, ti->y, z);
++					}
++				}
++
++				if (HASBIT(_m[ti->tile].m5, 5) && GB(_m[ti->tile].m3, 0, 3) == RAILTYPE_ELECTRIC) {
++					DrawCatenaryRailwaySimple(ti);
++				}
++				break;
++		}
++	default:
++		break;
++	}
++}
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3090)
++++ openttd.c	(working copy)
+@@ -1300,6 +1300,63 @@
+ 		}
+ 	}
+ 
++	if (version < 0x1100) {
++		Vehicle* v;
++		TileIndex i;
++
++		for (i = 0; i < lengthof(_engines); i++) {
++			Engine* e = GetEngine(i);
++			if (e->type == VEH_Train &&
++					(e->railtype != RAILTYPE_RAIL || RailVehInfo(i)->engclass == 2)) {
++				e->railtype++;
++			}
++		}
++
++		FOR_ALL_VEHICLES(v) {
++			if (v->type == VEH_Train && RailVehInfo(v->engine_type)->engclass == 2) {
++				v->u.rail.railtype++;
++			}
++		}
++
++		for (i = 0; i < MapSize(); i++) {
++			switch (GetTileType(i)) {
++				case MP_RAILWAY:
++					AB(_m[i].m3, 0, 4, 1);
++					break;
++
++				case MP_STREET:
++					if (IsLevelCrossing(i)) AB(_m[i].m4, 0, 4, 1);
++					break;
++
++				case MP_STATION:
++					if (_m[i].m5 < 8) AB(_m[i].m3, 0, 4, 1);
++					break;
++
++				case MP_TUNNELBRIDGE:
++					if (GB(_m[i].m5, 4, 4) == 0) { // tunnel?
++						if (GB(_m[i].m5, 2, 2) == 0) { // railway tunnel?
++							AB(_m[i].m3, 0, 4, 1);
++						}
++					} else {
++						if (GB(_m[i].m5, 1, 2) == 0) { // railway bridge?
++							if (GB(_m[i].m5, 6, 1) == 0) { // bridge ending?
++								AB(_m[i].m3, 0, 4, 1);
++							} else {
++								AB(_m[i].m3, 4, 4, 1);
++								if ((_m[i].m5 & 0x38) == 0x20) { // rail under bridge?
++									AB(_m[i].m3, 0, 4, 1);
++								}
++							}
++						}
++					}
++					break;
++
++				default:
++					break;
++			}
++		}
++	}
++
+ 	FOR_ALL_PLAYERS(p) {
+ 		p->avail_railtypes = GetPlayerRailtypes(p->index);
+ 	}
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 3090)
++++ saveload.c	(working copy)
+@@ -29,7 +29,7 @@
+ #include <setjmp.h>
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 16,
++	SAVEGAME_MAJOR_VERSION = 17,
+ 	SAVEGAME_MINOR_VERSION = 0,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 3090)
++++ train_cmd.c	(working copy)
+@@ -1726,7 +1726,7 @@
+ 
+ 		// no smoke?
+ 		if (RailVehInfo(engtype)->flags & 2 ||
+-				GetEngine(engtype)->railtype > RAILTYPE_RAIL ||
++				GetEngine(engtype)->railtype > RAILTYPE_ELECTRIC ||
+ 				(v->vehstatus & VS_HIDDEN) || (v->u.rail.track & 0xC0))
+ 			continue;
+ 
+@@ -1764,24 +1764,16 @@
+ {
+ 	static const SoundFx sfx[] = {
+ 		SND_04_TRAIN,
+-		SND_0A_TRAIN_HORN,
+ 		SND_0A_TRAIN_HORN
+ 	};
+ 
+ 	EngineID engtype = v->engine_type;
+ 
+ 	switch (GetEngine(engtype)->railtype) {
+-		case RAILTYPE_RAIL:
+-			SndPlayVehicleFx(sfx[RailVehInfo(engtype)->engclass], v);
+-			break;
+-
+-		case RAILTYPE_MONO:
+-			SndPlayVehicleFx(SND_47_MAGLEV_2, v);
+-			break;
+-
+-		case RAILTYPE_MAGLEV:
+-			SndPlayVehicleFx(SND_41_MAGLEV, v);
+-			break;
++		case RAILTYPE_RAIL:     SndPlayVehicleFx(sfx[RailVehInfo(engtype)->engclass], v); break;
++		case RAILTYPE_ELECTRIC: SndPlayVehicleFx(SND_0A_TRAIN_HORN, v); break;
++		case RAILTYPE_MONO:     SndPlayVehicleFx(SND_47_MAGLEV_2,   v); break;
++		case RAILTYPE_MAGLEV:   SndPlayVehicleFx(SND_41_MAGLEV,     v); break;
+ 	}
+ }
+ 
+@@ -2474,9 +2466,10 @@
+ 	byte z_down; // fraction to remove when moving down
+ } RailtypeSlowdownParams;
+ 
+-static const RailtypeSlowdownParams _railtype_slowdown[3] = {
++static const RailtypeSlowdownParams _railtype_slowdown[] = {
+ 	// normal accel
+ 	{256/4, 256/2, 256/4, 2}, // normal
++	{256/4, 256/2, 256/4, 2}, // electrified
+ 	{256/4, 256/2, 256/4, 2}, // monorail
+ 	{0,     256/2, 256/4, 2}, // maglev
+ };
+Index: player.h
+===================================================================
+--- player.h	(revision 3090)
++++ player.h	(working copy)
+@@ -243,6 +243,7 @@
+ {
+ 	if (HasRailtypeAvail(p, RAILTYPE_MAGLEV)) return RAILTYPE_MAGLEV;
+ 	if (HasRailtypeAvail(p, RAILTYPE_MONO)) return RAILTYPE_MONO;
++	if (HasRailtypeAvail(p, RAILTYPE_ELECTRIC)) return RAILTYPE_ELECTRIC;
+ 	return RAILTYPE_RAIL;
+ }
+ 
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 3090)
++++ table/sprites.h	(working copy)
+@@ -51,7 +51,8 @@
+ 	SPR_CANALS_BASE   = 5382,
+ 	SPR_SLOPES_BASE   = SPR_CANALS_BASE + 70,
+ 	SPR_AUTORAIL_BASE = SPR_SLOPES_BASE + 78,
+-	SPR_OPENTTD_BASE  = SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
++	SPR_ELRAIL_BASE   = SPR_AUTORAIL_BASE + 55,
++	SPR_OPENTTD_BASE  = SPR_ELRAIL_BASE + 53, // can be lowered once autorail.grf is finalized
+ 
+ 	SPR_BLOT = SPR_OPENTTD_BASE + 32, // colored circle (mainly used as vehicle profit marker and for sever compatibility)
+ 
+@@ -204,6 +205,54 @@
+ 	OFFSET_TILEH_13							= 19,
+ 	OFFSET_TILEH_14							= 16,
+ 
++	/* Elrail stuff */
++	/* Wires. First identifier is the direction of the track, second is the required placement of the pylon.
++	   "short" denotes a wire that requires a pylon on each end. Third identifier is the direction of the slope
++	   (in positive coordinate direction) */
++	SPR_WIRE_X_SHORT = SPR_ELRAIL_BASE + 3,
++	SPR_WIRE_Y_SHORT = SPR_ELRAIL_BASE + 4,
++	SPR_WIRE_EW_SHORT = SPR_ELRAIL_BASE + 5,
++	SPR_WIRE_NS_SHORT = SPR_ELRAIL_BASE + 6,
++	SPR_WIRE_X_SHORT_DOWN = SPR_ELRAIL_BASE + 7,
++	SPR_WIRE_Y_SHORT_UP = SPR_ELRAIL_BASE + 8,
++	SPR_WIRE_X_SHORT_UP = SPR_ELRAIL_BASE + 9,
++	SPR_WIRE_Y_SHORT_DOWN = SPR_ELRAIL_BASE + 10,
++	
++	SPR_WIRE_X_SW = SPR_ELRAIL_BASE + 11,
++	SPR_WIRE_Y_SE = SPR_ELRAIL_BASE + 12,
++	SPR_WIRE_EW_E = SPR_ELRAIL_BASE + 13,
++	SPR_WIRE_NS_S = SPR_ELRAIL_BASE + 14,
++	SPR_WIRE_X_SW_DOWN = SPR_ELRAIL_BASE + 15,
++	SPR_WIRE_Y_SE_UP = SPR_ELRAIL_BASE + 16,
++	SPR_WIRE_X_SW_UP = SPR_ELRAIL_BASE + 17,
++	SPR_WIRE_Y_SE_DOWN = SPR_ELRAIL_BASE + 18,
++
++	SPR_WIRE_X_NE = SPR_ELRAIL_BASE + 19,
++	SPR_WIRE_Y_NW = SPR_ELRAIL_BASE + 20,
++	SPR_WIRE_EW_W = SPR_ELRAIL_BASE + 21,
++	SPR_WIRE_NS_N = SPR_ELRAIL_BASE + 22,
++	SPR_WIRE_X_NE_DOWN = SPR_ELRAIL_BASE + 23,
++	SPR_WIRE_Y_NW_UP = SPR_ELRAIL_BASE + 24,
++	SPR_WIRE_X_NE_UP = SPR_ELRAIL_BASE + 25,
++	SPR_WIRE_Y_NW_DOWN = SPR_ELRAIL_BASE + 26,
++
++	/* Tunnel entries */
++	SPR_WIRE_TUNNEL_SW = SPR_ELRAIL_BASE + 27,
++	SPR_WIRE_TUNNEL_NW = SPR_ELRAIL_BASE + 28,
++	SPR_WIRE_TUNNEL_NE = SPR_ELRAIL_BASE + 29,
++	SPR_WIRE_TUNNEL_SE = SPR_ELRAIL_BASE + 30,
++
++
++	/* Pylons, first identifier is the direction of the track, second the placement relative to the track */
++	SPR_PYLON_Y_NE = SPR_ELRAIL_BASE + 31,
++	SPR_PYLON_Y_SW = SPR_ELRAIL_BASE + 32,
++	SPR_PYLON_X_NW = SPR_ELRAIL_BASE + 33,
++	SPR_PYLON_X_SE = SPR_ELRAIL_BASE + 34,
++	SPR_PYLON_EW_N = SPR_ELRAIL_BASE + 35,
++	SPR_PYLON_EW_S = SPR_ELRAIL_BASE + 36,
++	SPR_PYLON_NS_W = SPR_ELRAIL_BASE + 37,
++	SPR_PYLON_NS_E = SPR_ELRAIL_BASE + 38,
++
+ 	/* sprites for airports and airfields*/
+ 	/* Small airports are AIRFIELD, everything else is AIRPORT */
+ 	SPR_HELIPORT										= 2633,
+@@ -882,6 +931,13 @@
+ 	SPR_BUBBLE_ABSORB_3 = 4761,
+ 	SPR_BUBBLE_ABSORB_4 = 4762,
+ 
++	/* Electrified rail build menu */
++	SPR_BUILD_NS_ELRAIL = SPR_ELRAIL_BASE + 39,
++	SPR_BUILD_X_ELRAIL  = SPR_ELRAIL_BASE + 40,
++	SPR_BUILD_EW_ELRAIL = SPR_ELRAIL_BASE + 41,
++	SPR_BUILD_Y_ELRAIL  = SPR_ELRAIL_BASE + 42,
++	SPR_BUILD_TUNNEL_ELRAIL = SPR_ELRAIL_BASE + 47,
++
+ 	/* road_gui.c */
+ 	SPR_IMG_ROAD_NW				= 1309,
+ 	SPR_IMG_ROAD_NE				= 1310,
+@@ -942,10 +998,16 @@
+ 	SPR_CURSOR_EW_MAGLEV      = 1273,
+ 	SPR_CURSOR_NWSE_MAGLEV    = 1274,
+ 
++	SPR_CURSOR_NS_ELRAIL      = SPR_ELRAIL_BASE + 43,
++	SPR_CURSOR_SWNE_ELRAIL    = SPR_ELRAIL_BASE + 44,
++	SPR_CURSOR_EW_ELRAIL      = SPR_ELRAIL_BASE + 45,
++	SPR_CURSOR_NWSE_ELRAIL    = SPR_ELRAIL_BASE + 46,
++
+ 	SPR_CURSOR_RAIL_DEPOT     = 1296,
+ 	SPR_CURSOR_RAIL_STATION   = 1300,
+ 
+ 	SPR_CURSOR_TUNNEL_RAIL    = 2434,
++	SPR_CURSOR_TUNNEL_ELRAIL  = SPR_ELRAIL_BASE + 48,
+ 	SPR_CURSOR_TUNNEL_MONO    = 2435,
+ 	SPR_CURSOR_TUNNEL_MAGLEV  = 2436,
+ 
+Index: table/engines.h
+===================================================================
+--- table/engines.h	(revision 3090)
++++ table/engines.h	(working copy)
+@@ -27,11 +27,13 @@
+ 
+ // Rail types
+ // R = Conventional railway
++// E = Electrified railway
+ // M = Monorail
+ // L = MagLev
+ #define R 0
+-#define M 1
+-#define L 2
++#define E 1
++#define M 2
++#define L 3
+ // Climates
+ // T = Temperate
+ // A = Arctic
+@@ -65,10 +67,10 @@
+ 	MK( 20454,  20,  22,  30, R,   A|S  ), /*  20 Turner Turbo (Diesel) */
+ 	MK( 16071,  20,  22,  30, R,   A|S  ), /*  21 MJS 1000 (Diesel) */
+ 	MK( 20820,  20,  20,  25, R, T      ), /*  22 SH '125' (Diesel) */
+-	MK( 16437,  20,  23,  30, R, T      ), /*  23 SH '30' (Electric) */
+-	MK( 19359,  20,  23,  80, R, T      ), /*  24 SH '40' (Electric) */
+-	MK( 23376,  20,  25,  30, R, T      ), /*  25 'T.I.M.' (Electric) */
+-	MK( 26298,  20,  25,  50, R, T      ), /*  26 'AsiaStar' (Electric) */
++	MK( 16437,  20,  23,  30, E, T      ), /*  23 SH '30' (Electric) */
++	MK( 19359,  20,  23,  80, E, T      ), /*  24 SH '40' (Electric) */
++	MK( 23376,  20,  25,  30, E, T      ), /*  25 'T.I.M.' (Electric) */
++	MK( 26298,  20,  25,  50, E, T      ), /*  26 'AsiaStar' (Electric) */
+ 	MW(  1827,  20,  20,  50, R, T|A|S|Y), /*  27 Passenger Carriage */
+ 	MW(  1827,  20,  20,  50, R, T|A|S|Y), /*  28 Mail Van */
+ 	MW(  1827,  20,  20,  50, R, T|A    ), /*  29 Coal Truck */
+Index: road_cmd.c
+===================================================================
+--- road_cmd.c	(revision 3090)
++++ road_cmd.c	(working copy)
+@@ -865,6 +865,7 @@
+ 		}
+ 
+ 		DrawGroundSprite(image);
++		if (GB(_m[ti->tile].m4, 0, 4) == RAILTYPE_ELECTRIC) DrawCatenary(ti);
+ 
+ 		if (_debug_pbs_level >= 1) {
+ 			byte pbs = PBSTileReserved(ti->tile);
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 3090)
++++ rail_cmd.c	(working copy)
+@@ -1432,6 +1432,8 @@
+ 		if (track & TRACK_BIT_RIGHT) DrawGroundSprite(rti->base_sprites.single_e);
+ 	}
+ 
++	if (GB(_m[ti->tile].m3, 0, 4) == RAILTYPE_ELECTRIC) DrawCatenary(ti);
++
+ 	if (_debug_pbs_level >= 1) {
+ 		byte pbs = PBSTileReserved(ti->tile) & track;
+ 		if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(rti->base_sprites.single_y | PALETTE_CRASH);
+Index: bridge.h
+===================================================================
+--- bridge.h	(revision 3090)
++++ bridge.h	(working copy)
+@@ -22,4 +22,5 @@
+ extern const Bridge orig_bridge[MAX_BRIDGES];
+ Bridge _bridge[MAX_BRIDGES];
+ 
++uint GetBridgeHeight(const TileInfo *ti);
+ #endif /* BRIDGE_H */
+Index: gfxinit.c
+===================================================================
+--- gfxinit.c	(revision 3090)
++++ gfxinit.c	(working copy)
+@@ -343,6 +343,9 @@
+ 	load_index = SPR_AUTORAIL_BASE;
+ 	load_index += LoadGrfFile("autorail.grf", load_index, i++);
+ 
++	assert(load_index == SPR_ELRAIL_BASE);
++	load_index += LoadGrfFile("elrailsw.grf", load_index, i++);
++
+ 	assert(load_index == SPR_OPENTTD_BASE);
+ 	LoadGrfIndexed("openttd.grf", _openttd_grf_indexes, i++);
+ 	load_index = SPR_OPENTTD_BASE + OPENTTD_SPRITES_COUNT + 1;
+Index: railtypes.h
+===================================================================
+--- railtypes.h	(revision 3090)
++++ railtypes.h	(working copy)
+@@ -37,7 +37,7 @@
+ 		SPR_RAIL_SNOW_OFFSET,
+ 
+ 		/* Compatible railtypes */
+-		(1 << RAILTYPE_RAIL),
++		(1 << RAILTYPE_RAIL | 1 << RAILTYPE_ELECTRIC),
+ 
+ 		/* main offset */
+ 		0,
+@@ -46,6 +46,53 @@
+ 		0,
+ 	},
+ 
++	/** Electrified railway */
++	{ /* Main Sprites */
++		{ SPR_RAIL_TRACK_Y, SPR_RAIL_TRACK_N_S, SPR_RAIL_TRACK_BASE, SPR_RAIL_SINGLE_Y, SPR_RAIL_SINGLE_X,
++			SPR_RAIL_SINGLE_NORTH, SPR_RAIL_SINGLE_SOUTH, SPR_RAIL_SINGLE_EAST, SPR_RAIL_SINGLE_WEST,
++			SPR_CROSSING_OFF_X_RAIL,
++			SPR_TUNNEL_ENTRY_REAR_RAIL
++		},
++
++		/* GUI sprites */
++		{
++			SPR_BUILD_NS_ELRAIL,
++			SPR_BUILD_X_ELRAIL,
++			SPR_BUILD_EW_ELRAIL,
++			SPR_BUILD_Y_ELRAIL,
++			SPR_OPENTTD_BASE + 0,
++			0x50E,
++			SPR_BUILD_TUNNEL_ELRAIL,
++			SPR_OPENTTD_BASE + 25
++		},
++
++		{
++			SPR_CURSOR_NS_ELRAIL,
++			SPR_CURSOR_SWNE_ELRAIL,
++			SPR_CURSOR_EW_ELRAIL,
++			SPR_CURSOR_NWSE_ELRAIL,
++			SPR_CURSOR_AUTORAIL,
++			SPR_CURSOR_RAIL_DEPOT,
++			SPR_CURSOR_TUNNEL_ELRAIL,
++			SPR_CURSOR_CONVERT_RAIL
++		},
++
++		/* strings */
++		{ STR_TITLE_ELRAIL_CONSTRUCTION },
++
++		/* Offset of snow tiles */
++		SPR_RAIL_SNOW_OFFSET,
++
++		/* Compatible railtypes */
++		(1 << RAILTYPE_ELECTRIC),
++
++		/* main offset */
++		0,
++
++		/* bridge offset */
++		0
++	},
++
+ 	/** Monorail */
+ 	{ /* Main Sprites */
+ 		{ SPR_MONO_TRACK_Y, SPR_MONO_TRACK_N_S, SPR_MONO_TRACK_BASE, SPR_MONO_SINGLE_Y, SPR_MONO_SINGLE_X,
+Index: Makefile
+===================================================================
+--- Makefile	(revision 3090)
++++ Makefile	(working copy)
+@@ -604,6 +604,7 @@
+ C_SOURCES += driver.c
+ C_SOURCES += dummy_land.c
+ C_SOURCES += economy.c
++C_SOURCES += elrail.c
+ C_SOURCES += engine.c
+ C_SOURCES += engine_gui.c
+ C_SOURCES += fileio.c
+Index: engine_gui.c
+===================================================================
+--- engine_gui.c	(revision 3090)
++++ engine_gui.c	(working copy)
+@@ -19,9 +19,10 @@
+ {
+ 	if (engine < NUM_TRAIN_ENGINES) {
+ 		switch (GetEngine(engine)->railtype) {
+-			case RAILTYPE_RAIL:   return STR_8102_RAILROAD_LOCOMOTIVE;
+-			case RAILTYPE_MONO:   return STR_8106_MONORAIL_LOCOMOTIVE;
+-			case RAILTYPE_MAGLEV: return STR_8107_MAGLEV_LOCOMOTIVE;
++			case RAILTYPE_RAIL:     return STR_8102_RAILROAD_LOCOMOTIVE;
++			case RAILTYPE_ELECTRIC: return STR_8102_RAILROAD_LOCOMOTIVE;
++			case RAILTYPE_MONO:     return STR_8106_MONORAIL_LOCOMOTIVE;
++			case RAILTYPE_MAGLEV:   return STR_8107_MAGLEV_LOCOMOTIVE;
+ 		}
+ 	}
+ 

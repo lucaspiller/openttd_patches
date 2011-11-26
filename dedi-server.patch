@@ -1,0 +1,162 @@
+Index: ttd.c
+===================================================================
+--- ttd.c	(revision 2357)
++++ ttd.c	(working copy)
+@@ -282,34 +282,45 @@
+ static void showhelp(void)
+ {
+ 	char buf[4096], *p;
++#if !defined(DEDICATED)
+ 	const DriverClass *dc = _driver_classes;
+ 	const DriverDesc *dd;
+ 	int i;
++#endif
+ 
+ 	p = strecpy(buf,
+ 		"Command line options:\n"
++		#if !defined(DEDICATED)
+ 		"  -v drv              = Set video driver (see below)\n"
+ 		"  -s drv              = Set sound driver (see below)\n"
+ 		"  -m drv              = Set music driver (see below)\n"
+ 		"  -r res              = Set resolution (for instance 800x600)\n"
++		#endif
+ 		"  -h                  = Display this help text\n"
+ 		"  -t date             = Set starting date\n"
+ 		"  -d [[fac=]lvl[,...]]= Debug mode\n"
+ 		"  -l lng              = Select Language\n"
++		#if !defined(DEDICATED)
+ 		"  -e                  = Start Editor\n"
++		#endif
+ 		"  -g [savegame]       = Start new/save game immediately\n"
+ 		"  -G seed             = Set random seed\n"
++		#if !defined(DEDICATED)
+ 		"  -n [ip#player:port] = Start networkgame\n"
+ 		"  -D                  = Start dedicated server\n"
++		#endif
+ 		#if !defined(__MORPHOS__) && !defined(__AMIGA__)
+ 		"  -f                  = Fork into the background (dedicated only)\n"
+ 		#endif
++		#if !defined(DEDICATED)
+ 		"  -i                  = Force to use the DOS palette (use this if you see a lot of pink)\n"
+ 		"  -p #player          = Player as #player (deprecated) (network only)\n"
++		#endif
+ 		"  -c config_file      = Use 'config_file' instead of 'openttd.cfg'\n",
+ 		lastof(buf)
+ 	);
+ 
++#if !defined(DEDICATED)
+ 	for(i=0; i!=lengthof(_driver_classes); i++,dc++) {
+ 		p += sprintf(p, "List of %s drivers:\n", dc->name);
+ 		dd = dc->descs;
+@@ -317,6 +328,7 @@
+ 			p += sprintf(p, "%10s: %s\n", dd->name, dd->longname);
+ 		} while ((++dd)->name);
+ 	}
++#endif
+ 
+ 	ShowInfo(buf);
+ }
+@@ -413,7 +425,7 @@
+ 	}
+ }
+ 
+-
++#if !defined(DEDICATED)
+ static void ParseResolution(int res[2], char *s)
+ {
+ 	char *t = strchr(s, 'x');
+@@ -425,6 +437,7 @@
+ 	res[0] = clamp(strtoul(s, NULL, 0), 64, MAX_SCREEN_WIDTH);
+ 	res[1] = clamp(strtoul(t + 1, NULL, 0), 64, MAX_SCREEN_HEIGHT);
+ }
++#endif
+ 
+ static void InitializeDynamicVariables(void)
+ {
+@@ -530,6 +543,7 @@
+ 	MyGetOptInit(&mgo, argc-1, argv+1, optformat);
+ 	while ((i = MyGetOpt(&mgo)) != -1) {
+ 		switch(i) {
++#if !defined(DEDICATED)
+ 		case 'm': ttd_strlcpy(musicdriver, mgo.opt, sizeof(musicdriver)); break;
+ 		case 's': ttd_strlcpy(sounddriver, mgo.opt, sizeof(sounddriver)); break;
+ 		case 'v': ttd_strlcpy(videodriver, mgo.opt, sizeof(videodriver)); break;
+@@ -539,9 +553,7 @@
+ 				sprintf(videodriver,"dedicated");
+ 				dedicated = true;
+ 			} break;
+-		case 'f': {
+-				_dedicated_forks = true;
+-			}; break;
++		case 'i': _use_dos_palette = true; break;
+ 		case 'n': {
+ 				network = true;
+ 				if (mgo.opt)
+@@ -551,6 +563,17 @@
+ 					network_conn = NULL;
+ 			} break;
+ 		case 'r': ParseResolution(resolution, mgo.opt); break;
++		case 'e': _switch_mode = SM_EDITOR; break;
++		case 'p': {
++			int i = atoi(mgo.opt);
++			// Play as an other player in network games
++			if (IS_INT_INSIDE(i, 1, MAX_PLAYERS)) _network_playas = i;
++			break;
++		}
++#endif
++		case 'f': {
++				_dedicated_forks = true;
++			}; break;
+ 		case 'l': {
+ 				language = mgo.opt;
+ 			} break;
+@@ -564,8 +587,6 @@
+ 				if (mgo.opt)
+ 					SetDebugString(mgo.opt);
+ 			} break;
+-		case 'e': _switch_mode = SM_EDITOR; break;
+-		case 'i': _use_dos_palette = true; break;
+ 		case 'g':
+ 			if (mgo.opt) {
+ 				strcpy(_file_to_saveload.name, mgo.opt);
+@@ -576,12 +597,6 @@
+ 		case 'G':
+ 			_random_seeds[0][0] = atoi(mgo.opt);
+ 			break;
+-		case 'p': {
+-			int i = atoi(mgo.opt);
+-			// Play as an other player in network games
+-			if (IS_INT_INSIDE(i, 1, MAX_PLAYERS)) _network_playas = i;
+-			break;
+-		}
+ 		case 'c':
+ 			_config_file = strdup(mgo.opt);
+ 			break;
+@@ -592,6 +607,13 @@
+ 		}
+ 	}
+ 
++#if defined(DEDICATED)
++	sprintf(musicdriver,"null");
++	sprintf(sounddriver,"null");
++	sprintf(videodriver,"dedicated");
++	dedicated = true;
++#endif
++
+ 	DeterminePaths();
+ 	CheckExternalFiles();
+ 
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2357)
++++ Makefile	(working copy)
+@@ -517,6 +517,9 @@
+ ifdef QNX
+ LIBS += -lsocket
+ endif
++ifdef DEDICATED
++CDEFS += -DDEDICATED
++endif
+ ifdef UNIX
+ ifndef OSX
+ ifndef MORPHOS

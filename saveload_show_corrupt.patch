@@ -1,0 +1,344 @@
+Index: oldloader.c
+===================================================================
+--- oldloader.c	(revision 2812)
++++ oldloader.c	(working copy)
+@@ -1632,24 +1632,32 @@
+ 	return true;
+ }
+ 
+-void GetOldSaveGameName(char *title, const char *file)
++
++#include "hal.h"
++
++void GetOldSaveGameName(FiosItem *fios, const char *file)
+ {
+ 	FILE *f;
+ 
+ 	f = fopen(file, "rb");
+-	title[0] = 0;
+-	title[48] = 0;
++	fios->title[0] = 0;
++	fios->title[48] = 0;
+ 
+ 	if (f == NULL)
+ 		return;
+ 
+-	if (fread(title, 1, 48, f) != 48)
+-		snprintf(title, 48, "Corrupt file");
++	if (fread(fios->title, 1, 48, f) != 48 || strlen(fios->title) == 0)
++		fios->corrupt = true;
++	else
++		fios->corrupt = false;
++		
++	if (fios->corrupt)
++		snprintf(fios->title, sizeof(fios->title), "%s (Corrupt)", fios->name);
+ 
+ 	fclose(f);
+ }
+ 
+-void GetOldScenarioGameName(char *title, const char *file)
++void GetOldScenarioGameName(FiosItem *fios, const char *file)
+ {
+-	GetOldSaveGameName(title, file);
++	GetOldSaveGameName(fios, file);
+ }
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2812)
++++ misc_gui.c	(working copy)
+@@ -1252,7 +1252,7 @@
+ 		pos = w->vscroll.pos;
+ 		while (pos < _fios_num) {
+ 			item = _fios_list + pos;
+-			DoDrawStringTruncated(item->title, 4, y, _fios_colors[item->type], w->width - 18);
++			DoDrawStringTruncated(item->title, 4, y, item->corrupt ? 10 : _fios_colors[item->type], w->width - 18);
+ 			pos++;
+ 			y+=10;
+ 			if (y >= w->vscroll.cap*10+w->widget[6].top+1)
+@@ -1496,7 +1496,7 @@
+ 		pos = w->vscroll.pos;
+ 		while (pos < _fios_num) {
+ 			item = _fios_list + pos;
+-			DoDrawString(item->title, 4, y, _fios_colors[item->type] );
++			DoDrawString(item->title, 4, y, item->corrupt ? 10 : _fios_colors[item->type]);
+ 			pos++;
+ 			y+=10;
+ 			if (y >= w->vscroll.cap*10+list_start)
+Index: win32.c
+===================================================================
+--- win32.c	(revision 2812)
++++ win32.c	(working copy)
+@@ -626,6 +626,7 @@
+ 		fios = FiosAlloc();
+ 		fios->type = FIOS_TYPE_PARENT;
+ 		fios->mtime = 0;
++		fios->corrupt = false;
+ 		strcpy(fios->name, "..");
+ 		strcpy(fios->title, ".. (Parent directory)");
+ 	}
+@@ -640,6 +641,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+ 				fios->mtime = 0;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
+ 				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", fd.cFileName);
+ 			}
+@@ -668,6 +670,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_FILE;
+ 				fios->mtime = *(uint64*)&fd.ftLastWriteTime;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
+ 
+ 				*t = '\0'; // strip extension
+@@ -686,7 +689,7 @@
+ 					fios->mtime = *(uint64*)&fd.ftLastWriteTime;
+ 					ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
+ 					sprintf(buf, "%s\\%s", _fios_path, fd.cFileName);
+-					GetOldSaveGameName(fios->title, buf);
++					GetOldSaveGameName(fios, buf);
+ 				}
+ 			}
+ 		} while (FindNextFile(h, &fd));
+@@ -704,6 +707,7 @@
+ 		for (s = drives; *s != '\0';) {
+ 			fios = FiosAlloc();
+ 			fios->type = FIOS_TYPE_DRIVE;
++			fios->corrupt = false;
+ 			sprintf(fios->name, "%c:", s[0]);
+ 			sprintf(fios->title, "%c:", s[0]);
+ 			while (*s++ != '\0') {}
+@@ -734,6 +738,7 @@
+ 		fios = FiosAlloc();
+ 		fios->type = FIOS_TYPE_PARENT;
+ 		fios->mtime = 0;
++		fios->corrupt = false;
+ 		strcpy(fios->title, ".. (Parent directory)");
+ 	}
+ 
+@@ -747,6 +752,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+ 				fios->mtime = 0;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
+ 				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", fd.cFileName);
+ 			}
+@@ -774,6 +780,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_SCENARIO;
+ 				fios->mtime = *(uint64*)&fd.ftLastWriteTime;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
+ 
+ 				*t  = '\0'; // strip extension
+@@ -790,8 +797,9 @@
+ 					fios = FiosAlloc();
+ 					fios->type = FIOS_TYPE_OLD_SCENARIO;
+ 					fios->mtime = *(uint64*)&fd.ftLastWriteTime;
++					fios->corrupt = false;
+ 					sprintf(buf, "%s\\%s", _fios_path, fd.cFileName);
+-					GetOldScenarioGameName(fios->title, buf);
++					GetOldScenarioGameName(fios, buf);
+ 					ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
+ 				}
+ 			}
+@@ -810,6 +818,7 @@
+ 		for (s = drives; *s != '\0';) {
+ 			fios = FiosAlloc();
+ 			fios->type = FIOS_TYPE_DRIVE;
++			fios->corrupt = false;
+ 			sprintf(fios->name, "%c:", s[0]);
+ 			sprintf(fios->title, "%c:", s[0]);
+ 			while (*s++ != '\0') {}
+Index: os2.c
+===================================================================
+--- os2.c	(revision 2812)
++++ os2.c	(working copy)
+@@ -99,6 +99,7 @@
+ 		fios = FiosAlloc();
+ 		fios->type = FIOS_TYPE_PARENT;
+ 		fios->mtime = 0;
++		fios->corrupt = false;
+ 		strcpy(fios->name, "..");
+ 		strcpy(fios->title, ".. (Parent directory)");
+ 	}
+@@ -114,6 +115,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+ 				fios->mtime = 0;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", dirent->d_name);
+ 			}
+@@ -151,6 +153,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_FILE;
+ 				fios->mtime = sb.st_mtime;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 
+ 				*t = '\0'; // strip extension
+@@ -164,8 +167,8 @@
+ 					fios = FiosAlloc();
+ 					fios->type = FIOS_TYPE_OLDFILE;
+ 					fios->mtime = sb.st_mtime;
+-					ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+-					GetOldSaveGameName(fios->title, filename);
++					ttd_strlcpy(fios, dirent->d_name, lengthof(fios->name));
++					GetOldSaveGameName(fios, filename);
+ 				}
+ 			}
+ 		}
+@@ -195,6 +198,7 @@
+ 			{
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DRIVE;
++				fios->corrupt = false;
+ 				sprintf(fios->name, "%c:", 'A' + disk - 1);
+ 				sprintf(fios->title, "%c:", 'A' + disk - 1);
+ 			}
+@@ -243,6 +247,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+ 				fios->mtime = 0;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", dirent->d_name);
+ 			}
+@@ -271,6 +276,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_SCENARIO;
+ 				fios->mtime = sb.st_mtime;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 
+ 				*t = '\0'; // strip extension
+@@ -284,7 +290,8 @@
+ 					fios = FiosAlloc();
+ 					fios->type = FIOS_TYPE_OLD_SCENARIO;
+ 					fios->mtime = sb.st_mtime;
+-					GetOldScenarioGameName(fios->title, filename);
++					fios->corrupt = false;
++					GetOldScenarioGameName(fios, filename);
+ 					ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 				}
+ 			}
+@@ -313,6 +320,7 @@
+ 			{
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DRIVE;
++				fios->corrupt = false;
+ 				sprintf(fios->name, "%c:", 'A' + disk - 1);
+ 				sprintf(fios->title, "%c:", 'A' + disk - 1);
+ 			}
+Index: unix.c
+===================================================================
+--- unix.c	(revision 2812)
++++ unix.c	(working copy)
+@@ -65,7 +65,11 @@
+ 	if (_savegame_sort_order < 2) // sort by date
+ 		r = da->mtime < db->mtime ? -1 : 1;
+ 	else
+-		r = strcasecmp(da->title, db->title);
++		r = strcasecmp(
++			da->title[0] != '\0' ? da->title : da->name, 	 
++			db->title[0] != '\0' ? db->title : db->name 	 
++		);
++		//r = strcasecmp(da->title, db->title);
+ 
+ 	if (_savegame_sort_order & 1) r = -r;
+ 	return r;
+@@ -94,6 +98,7 @@
+ 		fios = FiosAlloc();
+ 		fios->type = FIOS_TYPE_PARENT;
+ 		fios->mtime = 0;
++		fios->corrupt = false;
+ 		strcpy(fios->name, "..");
+ 		strcpy(fios->title, ".. (Parent directory)");
+ 	}
+@@ -109,6 +114,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+ 				fios->mtime = 0;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 				snprintf(fios->title, lengthof(fios->title),
+ 					"%s/ (Directory)", dirent->d_name);
+@@ -148,6 +154,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_FILE;
+ 				fios->mtime = sb.st_mtime;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 
+ 				*t = '\0'; // strip extension
+@@ -162,7 +169,7 @@
+ 					fios->type = FIOS_TYPE_OLDFILE;
+ 					fios->mtime = sb.st_mtime;
+ 					ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+-					GetOldSaveGameName(fios->title, filename);
++					GetOldSaveGameName(fios, filename);
+ 				}
+ 			}
+ 		}
+@@ -196,6 +203,7 @@
+ 		fios = FiosAlloc();
+ 		fios->type = FIOS_TYPE_PARENT;
+ 		fios->mtime = 0;
++		fios->corrupt = false;
+ 		strcpy(fios->title, ".. (Parent directory)");
+ 	}
+ 
+@@ -210,6 +218,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_DIR;
+ 				fios->mtime = 0;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 				snprintf(fios->title, lengthof(fios->title), "%s/ (Directory)", dirent->d_name);
+ 			}
+@@ -238,6 +247,7 @@
+ 				fios = FiosAlloc();
+ 				fios->type = FIOS_TYPE_SCENARIO;
+ 				fios->mtime = sb.st_mtime;
++				fios->corrupt = false;
+ 				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
+ 
+ 				*t  = '\0'; // strip extension
+@@ -251,8 +261,9 @@
+ 					fios = FiosAlloc();
+ 					fios->type = FIOS_TYPE_OLD_SCENARIO;
+ 					fios->mtime = sb.st_mtime;
+-					GetOldScenarioGameName(fios->title, filename);
++					fios->corrupt = false;
+ 					ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++					GetOldScenarioGameName(fios, filename);
+ 				}
+ 			}
+ 		}
+Index: hal.h
+===================================================================
+--- hal.h	(revision 2812)
++++ hal.h	(working copy)
+@@ -53,6 +53,7 @@
+ 	uint64 mtime;
+ 	char title[64];
+ 	char name[256-12-64];
++	bool corrupt;
+ } FiosItem;
+ 
+ enum {
+@@ -72,9 +73,9 @@
+ int _saveload_mode;
+ 
+ // get the name of an oldstyle savegame
+-void GetOldSaveGameName(char *title, const char *file);
++void GetOldSaveGameName(FiosItem *fios, const char *file);
+ // get the name of an oldstyle scenario
+-void GetOldScenarioGameName(char *title, const char *file);
++void GetOldScenarioGameName(FiosItem *fios, const char *file);
+ 
+ // Get a list of savegames
+ FiosItem *FiosGetSavegameList(int *num, int mode);

@@ -1,0 +1,464 @@
+diff -ur trunk/clear_cmd.c trunk-new/clear_cmd.c
+--- trunk/clear_cmd.c	Fri Jun 17 20:00:06 2005
++++ trunk-new/clear_cmd.c	Sun Jun 19 13:51:14 2005
+@@ -5,6 +5,8 @@
+ #include "tile.h"
+ #include "viewport.h"
+ #include "command.h"
++#include "variables.h"
++#include "gfx.h"
+ 
+ typedef struct TerraformerHeightMod {
+ 	TileIndex tile;
+@@ -417,6 +419,75 @@
+ }
+ 
+ 
++/* season display of land */
++static byte snow_line[12]={ 0, 0, 32, 64, 128, 192, 250, 250, 128, 64, 32, 0 };
++
++static byte basis_snow_line = 255;  // saves the current darkening state
++static byte last_snow_line = 255;
++static byte current_month;
++
++void DoSeasons(byte switch_off)
++{
++	static byte count_down=0;
++
++	if(switch_off==1) {
++		// switch off
++		count_down = 2;
++		_opt.snow_line = basis_snow_line;
++		basis_snow_line = 255;
++	} else if(switch_off==0) {
++		// switch on
++		_display_opt |= DO_SEASONS;
++		count_down = 255;
++	}
++	// prevent darkenig at intro screen
++	if(_game_mode!=GM_MENU &&  (_display_opt&DO_SEASONS)!=0  &&  _opt.landscape==LT_NORMAL) {
++
++		uint8 new_snow_line;
++		YearMonthDay YMD;
++
++		// check current date
++		ConvertDayToYMD(&YMD, _date);
++
++		// new month
++		if(current_month!=YMD.month) {
++			current_month = YMD.month;
++	
++			// switch off
++			if(count_down<=2) {
++				_opt.snow_line = basis_snow_line;
++				if(--count_down==0) {
++					_display_opt &= ~DO_SEASONS;
++				}
++			}
++			else {
++				// regular change of snow line
++				new_snow_line  = snow_line[current_month];
++				
++				// save old value
++				if(basis_snow_line==255) {
++					last_snow_line = basis_snow_line = _opt.snow_line;
++				}
++		
++				// change snow line
++				if(new_snow_line!=last_snow_line) {
++					_opt.snow_line = new_snow_line;
++					last_snow_line = new_snow_line;
++				}
++			}
++		}
++	
++	}
++	else {
++		if(basis_snow_line!=255) {
++			_opt.snow_line = basis_snow_line;
++			basis_snow_line = 255;
++		}
++	}
++}
++
++
++
+ static int32 ClearTile_Clear(uint tile, byte flags)
+ {
+ 	static const int32 * _clear_price_table[] = {
+@@ -724,7 +795,7 @@
+ 
+ static void TileLoop_Clear(uint tile)
+ {
+-	byte m5,m3;
++	byte m5;
+ 
+ 	TileLoopClearHelper(tile);
+ 
+@@ -732,6 +803,11 @@
+ 		TileLoopClearDesert(tile);
+ 	} else if (_opt.landscape == LT_HILLY) {
+ 		TileLoopClearAlps(tile);
++	} else if(_opt.landscape == LT_NORMAL  &&  (_display_opt&DO_SEASONS)!=0) {
++		if ( (_map5[tile] & 0x1C) != 0xC) {
++			// do not try this on farms!
++			TileLoopClearAlps(tile);
++		}
+ 	}
+ 
+ 	m5 = _map5[tile];
+@@ -756,18 +832,26 @@
+ 		m5++;
+ 	} else if (_game_mode != GM_EDITOR) {
+ 		/* handle farm field */
+-		m5 += 0x20;
+-		if (m5 >= 0x20) {
+-			// Didn't overflow
+-			_map5[tile] = m5;
+-			return;
++		if( _opt.landscape == LT_NORMAL  &&  (_display_opt&DO_SEASONS)!=0) {
++			/* synchronize farm seasons */
++			_map3_lo[tile] = (current_month*3+2)/4;
++		}
++		else {
++			byte m3;
++
++			m5 += 0x20;
++			if (m5 >= 0x20) {
++				// Didn't overflow
++				_map5[tile] = m5;
++				return;
++			}
++			/* overflowed */
++			m3 = _map3_lo[tile] + 1;
++			assert( (m3 & 0xF) != 0);
++			if ( (m3 & 0xF) >= 9) /* NOTE: will not work properly if m3&0xF == 0xF */
++				m3 &= ~0xF;
++			_map3_lo[tile] = m3;
+ 		}
+-		/* overflowed */
+-		m3 = _map3_lo[tile] + 1;
+-		assert( (m3 & 0xF) != 0);
+-		if ( (m3 & 0xF) >= 9) /* NOTE: will not work properly if m3&0xF == 0xF */
+-			m3 &= ~0xF;
+-		_map3_lo[tile] = m3;
+ 	}
+ 
+ 	_map5[tile] = m5;
+diff -ur trunk/gfx.c trunk-new/gfx.c
+--- trunk/gfx.c	Fri Jun 17 20:00:06 2005
++++ trunk-new/gfx.c	Sun Jun 19 12:38:14 2005
+@@ -1515,7 +1515,22 @@
+ #define EXTR(p,q) (((uint16)(_timer_counter * (p)) * (q)) >> 16)
+ #define EXTR2(p,q) (((uint16)(~_timer_counter * (p)) * (q)) >> 16)
+ #define COPY_TRIPLET do {d[0]=s[0+j]; d[1]=s[1+j]; d[2]=s[2+j];d+=3;}while(0)
++#define COPY_TRIPLET_DARK do {d[0]=(byte)((s[0+j]*3)/(new_dark_state+3)); d[1]=(byte)((s[1+j]*3)/(new_dark_state+3)); d[2]=(byte)((s[2+j]*3)/(new_dark_state+3));d+=3;}while(0)
+ 
++// prissi: day to dark state
++static const byte dark_state[31]={ 
++	3, 3, 3, 3, 3,
++	2, 1,
++	0, 0, 0, 0,  0, 0, 0, 0,  
++	0, 0, 0, 0,  0, 0, 0, 0,
++	1, 2, 
++	3, 3, 3, 3, 3, 3 };
++
++
++/*
++ * Creates and animates the palette
++ * the colors before 217 are static and only darkend during the night
++ */
+ void DoPaletteAnimations(void)
+ {
+ 	const byte *s;
+@@ -1523,14 +1538,43 @@
+ 	/* Amount of colors to be rotated.
+ 	 * A few more for the DOS palette, because the water colors are
+ 	 * 245-254 for DOS and 217-226 for Windows.  */
+-	int c = _use_dos_palette?38:28;
+-	int j;
+-	int i;
++	const int c = _use_dos_palette?38:28;
++	byte old_pal[114]; // max(c*(38:28)) = 114
++	int i, j;
+ 	const ExtraPaletteValues *ev = &_extra_palette_values;
+-	byte old_val[114]; // max(c*(38:28)) = 114
+ 
++	// prissi: darkening
++	static uint8 last_dark_state=-1;  // saves the current darkening state
++	uint8 new_dark_state = 0; // no darkening
++	// prevent darkenig at intro screen
++	if(_game_mode != GM_MENU &&  (_display_opt&DO_DAY_NIGHT)!=0  &&  (_display_opt&DO_FULL_ANIMATION)!=0) {
++		YearMonthDay YMD;
++		ConvertDayToYMD(&YMD, _date);
++		new_dark_state = dark_state[YMD.day-1];
++	}
++	// ok, we need to change the palette
++	if(  new_dark_state!=last_dark_state ) {
++		d = _cur_palette;
++		s =  _palettes[_use_dos_palette?1:0];
++		for( i=0*3;  i<217*3;  i++ ) {
++			d[i] = (byte)((s[i]*4)/(new_dark_state+4));
++		}
++		// we changed from the first on
++		last_dark_state = new_dark_state;
++		_pal_first_dirty = 0;
++		_pal_last_dirty = 255;
++	}
++	else {
++		_pal_first_dirty = 217;
++	}
++
++	// special for color 245 (depends on DOS/win)
++	for( i=0;  i<3;  i++ ) {
++		_cur_palette[i+(217+c)*3] = (byte)(444/(last_dark_state+3));
++	}
++
++	// destination current palette
+ 	d = _cur_palette + 217*3;
+-	memcpy(old_val, d, c*3);
+ 
+ 	// Dark blue water
+ 	s = ev->a;
+@@ -1547,7 +1591,7 @@
+ 	if (_opt.landscape == LT_CANDY) s = ev->bc;
+ 	j = EXTR(128, 15) * 3;
+ 	for(i=0; i!=5; i++) {
+-		COPY_TRIPLET;
++		COPY_TRIPLET_DARK;
+ 		j += 9;
+ 		if (j >= 45) j -= 45;
+ 	}
+@@ -1555,7 +1599,7 @@
+ 	s = ev->e;
+ 	j = EXTR2(512, 5) * 3;
+ 	for(i=0; i!=5; i++) {
+-		COPY_TRIPLET;
++		COPY_TRIPLET_DARK;
+ 		j += 3;
+ 		if (j == 3*5) j = 0;
+ 	}
+@@ -1606,7 +1650,7 @@
+ 		if (_opt.landscape == LT_CANDY) s = ev->ac;
+ 		j = EXTR(320,5) * 3;
+ 		for(i=0; i!=5; i++) {
+-			COPY_TRIPLET;
++			COPY_TRIPLET_DARK;
+ 			j+=3;
+ 			if (j == 15) j = 0;
+ 		}
+@@ -1616,18 +1660,19 @@
+ 		if (_opt.landscape == LT_CANDY) s = ev->bc;
+ 		j = EXTR(128, 15) * 3;
+ 		for(i=0; i!=5; i++) {
+-			COPY_TRIPLET;
++			COPY_TRIPLET_DARK;
+ 			j += 9;
+ 			if (j >= 45) j -= 45;
+ 		}
+ 	}
+ 
+-	if (memcmp(old_val, _cur_palette + 217*3, c*3)) {
++	// only redraw if neccessary
++	if (_pal_first_dirty!=0  &&  memcmp(old_pal, _cur_palette + 217*3, c*3)!=0) {
+ 		if (_pal_first_dirty > 217) _pal_first_dirty = 217;
+-		if (_pal_last_dirty < 217+c) _pal_last_dirty = 217+c;
++		if (_pal_last_dirty < 217+c) _pal_last_dirty = 217+c;	// only redraws palette, if _pal_last_dirty != -1
++		memcpy( old_pal, d, c*3 );	// saves current value to see, if we really need to redraw
+ 	}
+ }
+-
+ 
+ void LoadStringWidthTable(void)
+ {
+diff -ur trunk/gfx.h trunk-new/gfx.h
+--- trunk/gfx.h	Fri Jun 17 20:00:06 2005
++++ trunk-new/gfx.h	Sat Jun 18 00:43:36 2005
+@@ -92,7 +92,8 @@
+ /* spritecache.c */
+ //enum { NUM_SPRITES = 0x1320 };
+ //enum { NUM_SPRITES = 0x1500 };
+-enum { NUM_SPRITES = 0x3500 }; // 1500 + space for custom GRF sets
++//enum { NUM_SPRITES = 0x3500 }; // 1500 + space for custom GRF sets
++enum { NUM_SPRITES = 0x5500 }; // 1500 + space for custom GRF sets
+ 
+ /* tables.h */
+ extern byte _palettes[4][256 * 3];
+diff -ur trunk/lang/english.txt trunk-new/lang/english.txt
+--- trunk/lang/english.txt	Fri Jun 17 20:00:04 2005
++++ trunk-new/lang/english.txt	Sun Jun 19 13:40:32 2005
+@@ -770,6 +770,10 @@
+ STR_02D4_TRANSPARENT_BUILDINGS                                  :{SETX 12}Transparent buildings
+ STR_TRANSPARENT_SIGNS_C                                         :{CHECKMARK}{SETX 12}Transparent station signs
+ STR_TRANSPARENT_SIGNS                                           :{SETX 12}Transparent station signs
++STR_DAY_NIGHT_C                                         :{CHECKMARK}{SETX 12}Day&night cycle
++STR_DAY_NIGHT                                         :{SETX 12}Day&night cycle
++STR_SEASONS_C                                         :{CHECKMARK}{SETX 12}Show seasons
++STR_SEASONS                                         :{SETX 12}Show seasons
+ ############ range ends	here
+ 
+ ############ range for menu	starts
+diff -ur trunk/lang/german.txt trunk-new/lang/german.txt
+--- trunk/lang/german.txt	Fri Jun 17 20:00:04 2005
++++ trunk-new/lang/german.txt	Sun Jun 19 13:40:30 2005
+@@ -770,6 +770,10 @@
+ STR_02D4_TRANSPARENT_BUILDINGS                                  :{SETX 12}Durchsichtige Gebäude
+ STR_TRANSPARENT_SIGNS_C                                         :{CHECKMARK}{SETX 12}Durchsichtige Stationsnamen
+ STR_TRANSPARENT_SIGNS                                           :{SETX 12}Durchsichtige Stationsnamen
++STR_DAY_NIGHT_C                                         :{CHECKMARK}{SETX 12}Tag&Nachtzyklus
++STR_DAY_NIGHT                                         :{SETX 12}Tag&Nachtzyklus
++STR_SEASONS_C                                         :{CHECKMARK}{SETX 12}Jahreszeiten
++STR_SEASONS                                         :{SETX 12}Jahreszeiten
+ ############ range ends	here
+ 
+ ############ range for menu	starts
+diff -ur trunk/main_gui.c trunk-new/main_gui.c
+--- trunk/main_gui.c	Fri Jun 17 20:00:08 2005
++++ trunk-new/main_gui.c	Sun Jun 19 13:43:12 2005
+@@ -168,6 +168,8 @@
+ 
+ typedef void MenuClickedProc(int index);
+ 
++void DoPaletteAnimations(void);
++void DoSeasons(byte);
+ 
+ static void MenuClickSettings(int index)
+ {
+@@ -181,10 +183,12 @@
+ 	case 6: _display_opt ^= DO_SHOW_STATION_NAMES; MarkWholeScreenDirty(); return;
+ 	case 7: _display_opt ^= DO_SHOW_SIGNS; MarkWholeScreenDirty(); return;
+ 	case 8: _display_opt ^= DO_WAYPOINTS; MarkWholeScreenDirty(); return;
+-	case 9: _display_opt ^= DO_FULL_ANIMATION; MarkWholeScreenDirty(); return;
++	case 9: _display_opt ^= DO_FULL_ANIMATION; DoPaletteAnimations(); MarkWholeScreenDirty(); return;
+ 	case 10: _display_opt ^= DO_FULL_DETAIL; MarkWholeScreenDirty(); return;
+ 	case 11: _display_opt ^= DO_TRANS_BUILDINGS; MarkWholeScreenDirty(); return;
+ 	case 12: _display_opt ^= DO_TRANS_SIGNS; MarkWholeScreenDirty(); return;
++	case 13: _display_opt ^= DO_DAY_NIGHT; DoPaletteAnimations(); MarkWholeScreenDirty(); return;
++	case 14: DoSeasons((_display_opt&DO_SEASONS)!=0); MarkWholeScreenDirty(); return;
+ 	}
+ }
+ 
+@@ -986,7 +990,7 @@
+ {
+ 	uint16 x;
+ 
+-	w = PopupMainToolbMenu(w,  43, 2, STR_02C3_GAME_OPTIONS, 13);
++	w = PopupMainToolbMenu(w,  43, 2, STR_02C3_GAME_OPTIONS, 15);
+ 
+ 	x = (uint16)-1;
+ 	if (_display_opt & DO_SHOW_TOWN_NAMES) x &= ~(1<<5);
+@@ -997,6 +1001,8 @@
+ 	if (_display_opt & DO_FULL_DETAIL) x &= ~(1<<10);
+ 	if (_display_opt & DO_TRANS_BUILDINGS) x &= ~(1<<11);
+ 	if (_display_opt & DO_TRANS_SIGNS) x &= ~(1<<12);
++	if (_display_opt & DO_DAY_NIGHT) x &= ~(1<<13);
++	if (_display_opt & DO_SEASONS) x &= ~(1<<14);
+ 	WP(w,menu_d).checked_items = x;
+ }
+ 
+diff -ur trunk/openttd.c trunk-new/openttd.c
+--- trunk/openttd.c	Fri Jun 17 20:00:06 2005
++++ trunk-new/openttd.c	Sun Jun 19 13:43:58 2005
+@@ -42,6 +42,7 @@
+ void IncreaseDate(void);
+ void RunOtherPlayersLoop(void);
+ void DoPaletteAnimations(void);
++void DoSeasons(byte);
+ void MusicLoop(void);
+ void ResetMusic(void);
+ void InitializeStations(void);
+@@ -1157,8 +1158,11 @@
+ 	StateGameLoop();
+ #endif /* ENABLE_NETWORK */
+ 
+-	if (!_pause && _display_opt&DO_FULL_ANIMATION)
++	if (!_pause && (_display_opt&DO_FULL_ANIMATION  ||  _display_opt&DO_DAY_NIGHT))
+ 		DoPaletteAnimations();
++
++	if (!_pause && _display_opt&DO_SEASONS)
++		DoSeasons(255);
+ 
+ 	if (!_pause || _cheats.build_in_pause.value)
+ 		MoveAllTextEffects();
+diff -ur trunk/openttd.h trunk-new/openttd.h
+--- trunk/openttd.h	Fri Jun 17 20:00:06 2005
++++ trunk-new/openttd.h	Sun Jun 19 11:46:26 2005
+@@ -133,6 +133,8 @@
+ 	DO_FULL_DETAIL =        1 << 5,
+ 	DO_WAYPOINTS =          1 << 6,
+ 	DO_TRANS_SIGNS =        1 << 7,
++	DO_DAY_NIGHT =     1 << 8,
++	DO_SEASONS =     1 << 9,
+ };
+ 
+ /* Landscape types */
+diff -ur trunk/settings.c trunk-new/settings.c
+--- trunk/settings.c	Fri Jun 17 20:00:08 2005
++++ trunk-new/settings.c	Sun Jun 19 13:20:54 2005
+@@ -741,7 +741,7 @@
+ };
+ 
+ static const SettingDesc misc_settings[] = {
+-	{"display_opt",				SDT_MANYOFMANY | SDT_UINT8, (void*)(DO_SHOW_TOWN_NAMES|DO_SHOW_STATION_NAMES|DO_SHOW_SIGNS|DO_FULL_ANIMATION|DO_FULL_DETAIL|DO_TRANS_BUILDINGS|DO_WAYPOINTS), &_display_opt, "SHOW_TOWN_NAMES|SHOW_STATION_NAMES|SHOW_SIGNS|FULL_ANIMATION|TRANS_BUILDINGS|FULL_DETAIL|WAYPOINTS"},
++	{"display_opt",				SDT_MANYOFMANY | SDT_UINT16, (void*)(DO_SHOW_TOWN_NAMES|DO_SHOW_STATION_NAMES|DO_SHOW_SIGNS|DO_FULL_ANIMATION|DO_FULL_DETAIL|DO_TRANS_BUILDINGS|DO_WAYPOINTS|DO_TRANS_SIGNS|DO_DAY_NIGHT|DO_SEASONS), &_display_opt, "SHOW_TOWN_NAMES|SHOW_STATION_NAMES|SHOW_SIGNS|FULL_ANIMATION|TRANS_BUILDINGS|FULL_DETAIL|WAYPOINTS|TRANS_SIGNS|DAY_NIGHT|SEASONS"},
+ 	{"news_display_opt",	SDT_UINT32,		"0xAAAAAAAA",		&_news_display_opt,		NULL}, // default to all full messages: 10101010101010101010 = 0xAAAAAAAA
+ 	{"news_ticker_sound", SDT_BOOL,     (void*)true, &_news_ticker_sound,   NULL},
+ 	{"fullscreen",				SDT_BOOL,			(void*)false, &_fullscreen,					NULL},
+diff -ur trunk/tree_cmd.c trunk-new/tree_cmd.c
+--- trunk/tree_cmd.c	Fri Jun 17 20:00:08 2005
++++ trunk-new/tree_cmd.c	Sun Jun 19 15:03:30 2005
+@@ -8,6 +8,7 @@
+ #include "command.h"
+ #include "town.h"
+ #include "sound.h"
++#include "variables.h"
+ 
+ static int GetRandomTreeType(TileIndex tile, uint seed)
+ {
+@@ -446,6 +447,25 @@
+ 
+ 	tmp = _map5[tile] & 0xF0;
+ 
++	/* much below snow line and normal landscape */
++	if (_opt.landscape==LT_NORMAL) {
++		if(k<-8) {
++			// winter to normal tree
++			if(_map3_lo[tile]>=12+8) {
++				_map3_lo[tile] -= 8;
++			}
++			// normal ground
++			_map2[tile] &= 0xF;
++			_map2[tile] |= 0x01;
++			MarkTileDirtyByTile(tile);
++			return;
++		}
++		// normal to winter tree
++		if(k>=0  &&  _map3_lo[tile]>=12-8  &&   _map3_lo[tile]<12) {
++			_map3_lo[tile] += 8;
++		}
++	}
++	// near snowline in alps 
+ 	if (k < -8) {
+ 		/* snow_m2_down */
+ 		if ((tmp&0x30) != 0x20)
+@@ -503,6 +523,8 @@
+ 	if (_opt.landscape == LT_DESERT) {
+ 		TileLoopTreesDesert(tile);
+ 	} else if (_opt.landscape == LT_HILLY) {
++		TileLoopTreesAlps(tile);
++	} else if( _opt.landscape == LT_NORMAL  &&  (_display_opt&DO_SEASONS)!=0) {
+ 		TileLoopTreesAlps(tile);
+ 	}
+ 
+diff -ur trunk/variables.h trunk-new/variables.h
+--- trunk/variables.h	Fri Jun 17 20:00:06 2005
++++ trunk-new/variables.h	Sun Jun 19 12:37:04 2005
+@@ -281,7 +281,7 @@
+ VARDEF int _autosave_ctr;
+ 
+ VARDEF PlayerID _local_player;
+-VARDEF byte _display_opt;
++VARDEF uint16 _display_opt;
+ VARDEF byte _pause;
+ VARDEF int _caret_timer;
+ VARDEF uint32 _news_display_opt;

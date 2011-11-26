@@ -1,0 +1,46 @@
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2489)
++++ vehicle.c	(working copy)
+@@ -359,12 +359,31 @@
+ 	return v;
+ }
+ 
++// This old function is REALLY slow because it searches through all vehicles to
++// find the previous vehicle, but if v->first has not been set, then this function
++// will need to be used to find the previous one
++Vehicle *GetPrevVehicleInChain_SLOW(const Vehicle *v)
++{
++	Vehicle *u;
++	
++	FOR_ALL_VEHICLES(u) if (u->type == VEH_Train && u->next == v) return u;
++	
++	return NULL;
++}
++
+ Vehicle *GetPrevVehicleInChain(const Vehicle *v)
+ {
+ 	Vehicle *u;
+ 
+-	FOR_ALL_VEHICLES(u) if (u->type == VEH_Train && u->next == v) return u;
++	// Check to see if this is the first
++	if (v == v->first) return NULL;
+ 
++	u = GetFirstVehicleInChain(v);
++	
++	do {
++		if (u->next == v) return u;
++	} while ( ( u = u->next) != NULL);
++
+ 	return NULL;
+ }
+ 
+@@ -384,7 +403,7 @@
+ 	* is not saved in a savegame, so this has to be fixed up after loading */
+ 
+ 	/* Find the 'locomotive' or the first wagon in a chain */
+-	while ((u = GetPrevVehicleInChain(v)) != NULL) v = u;
++	while ((u = GetPrevVehicleInChain_SLOW(v)) != NULL) v = u;
+ 
+ 	/* Set the first pointer of all vehicles in that chain to the first wagon */
+ 	if (v->subtype == TS_Front_Engine)

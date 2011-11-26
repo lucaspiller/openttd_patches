@@ -1,0 +1,366 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2385)
++++ lang/english.txt	(working copy)
+@@ -787,12 +787,17 @@
+ STR_SIGN_LIST                                                   :Sign list
+ STR_02DF_TOWN_DIRECTORY                                         :Town directory
+ STR_TOWN_POPULATION                                             :{BLACK}World population: {COMMA32}
++
+ STR_EXTRA_VIEW_PORT_TITLE                                       :{WHITE}Viewport {COMMA16}
+-STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN                                :{BLACK}Copy to viewport
+-STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT                             :{BLACK}Copy the location of the global view to this viewport
+-STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW                                :{BLACK}Paste from viewport
+-STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT                             :{BLACK}Paste the location of this viewport to the global view
++STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN                                :{BLACK}Go to location
++STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT                             :{BLACK}Paste the location of this viewport into the global view
++STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW                                :{BLACK}Set location
++STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT                             :{BLACK}Copy the location of the global view into this viewport
+ 
++STR_ZOOM_IN_SMALLMAP                             :{BLACK}Zoom in the small map
++STR_ZOOM_OUT_SMALLMAP                             :{BLACK}Zoom out the small map
++STR_RECENTRE_SMALLMAP                             :{BLACK}Recentre the location of the small map
++
+ STR_02E0_CURRENCY_UNITS                                         :{BLACK}Currency units
+ STR_02E1                                                        :{BLACK}{SKIP}{STRING}
+ STR_02E2_CURRENCY_UNITS_SELECTION                               :{BLACK}Currency units selection
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2385)
++++ variables.h	(working copy)
+@@ -465,4 +465,7 @@
+ /* Forking stuff */
+ VARDEF bool _dedicated_forks;
+ 
++/* Smallmap zoom level */
++VARDEF int smallmap_zoom;
++
+ #endif /* VARIABLES_H */
+Index: gui.h
+===================================================================
+--- gui.h	(revision 2385)
++++ gui.h	(working copy)
+@@ -95,6 +95,7 @@
+ void CheckRedrawStationCoverage(Window *w);
+ 
+ void ShowSmallMap(void);
++void SmallMapRecentre(void);
+ void ShowExtraViewPortWindow(void);
+ void SetVScrollCount(Window *w, int num);
+ void SetVScroll2Count(Window *w, int num);
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2385)
++++ table/sprites.h	(working copy)
+@@ -714,6 +714,9 @@
+ 	SPR_IMG_SIGN            = 4082,
+ 	SPR_IMG_BUY_LAND        = 4791,
+ 
++	/* smallmap_gui.c */
++	SPR_IMG_CENTRE_LOC            = 5428, // Centre location button
++
+ 	/* OPEN TRANSPORT TYCOON in gamescreen */
+ 	SPR_OTTD_O                = 4842,
+ 	SPR_OTTD_P                = 4841,
+Index: smallmap_gui.c
+===================================================================
+--- smallmap_gui.c	(revision 2385)
++++ smallmap_gui.c	(working copy)
+@@ -12,6 +12,7 @@
+ #include "vehicle.h"
+ #include "town.h"
+ #include "sound.h"
++#include "variables.h"
+ 
+ static const Widget _smallmap_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
+@@ -25,9 +26,11 @@
+ {     WWT_IMGBTN,   RESIZE_LRTB,    13,   380,   401,   280,   301, 0x2E4,				STR_0194_SHOW_TRANSPORT_ROUTES_ON},
+ {     WWT_IMGBTN,   RESIZE_LRTB,    13,   402,   423,   280,   301, 0x2E6,				STR_0195_SHOW_VEGETATION_ON_MAP},
+ {     WWT_IMGBTN,   RESIZE_LRTB,    13,   424,   445,   280,   301, 0x2E7,				STR_0196_SHOW_LAND_OWNERS_ON_MAP},
+-{     WWT_IMGBTN,   RESIZE_LRTB,    13,   358,   379,   258,   279, 0x0,					STR_NULL},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   358,   379,   258,   279, 0x1534,				STR_RECENTRE_SMALLMAP},
+ {     WWT_IMGBTN,   RESIZE_LRTB,    13,   358,   379,   280,   301, 0xFED,				STR_0197_TOGGLE_TOWN_NAMES_ON_OFF},
+-{     WWT_IMGBTN,    RESIZE_RTB,    13,     0,   357,   258,   301, 0x0,					STR_NULL},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   336,   357,   258,   279, 0x2DF,					STR_ZOOM_IN_SMALLMAP},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   336,   357,   280,   301, 0x2E0,					STR_ZOOM_OUT_SMALLMAP},
++{     WWT_IMGBTN,    RESIZE_RTB,    13,     0,   335,   258,   301, 0x0,					STR_NULL},
+ {      WWT_PANEL,    RESIZE_RTB,    13,     0,   433,   302,   313, 0x0,					STR_NULL},
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    13,   434,   445,   302,   313, 0x0,					STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+@@ -335,11 +338,12 @@
+ 
+ static void DrawSmallMapContours(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask)
+ {
++	reps--;
+ 	do {
+-		if (xc < MapMaxX() && yc < MapMaxY())
++		if (xc*smallmap_zoom < MapMaxX() && yc*smallmap_zoom < MapMaxY())
+ 			if (dst > _screen.dst_ptr && dst < (_screen.dst_ptr + _screen.width * _screen.height - _screen.width))
+-				WRITE_PIXELS_OR(dst, GetSmallMapContoursPixels(TILE_XY(xc,yc)) & mask);
+-	} while (xc++,yc++,dst+=pitch,--reps != 0);
++				WRITE_PIXELS_OR(dst, GetSmallMapContoursPixels(TILE_XY(xc*smallmap_zoom,yc*smallmap_zoom)) & mask);
++	} while (xc++,yc++,dst+=pitch,reps-- != 0);
+ }
+ 
+ 
+@@ -354,8 +358,8 @@
+ static void DrawSmallMapVehicles(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask)
+ {
+ 	do {
+-		if (xc < MapMaxX() && yc < MapMaxY())
+-			WRITE_PIXELS_OR( dst, GetSmallMapVehiclesPixels(TILE_XY(xc,yc)) & mask );
++		if (xc*smallmap_zoom < MapMaxX() && yc*smallmap_zoom < MapMaxY())
++			WRITE_PIXELS_OR(dst, GetSmallMapVehiclesPixels(TILE_XY(xc*smallmap_zoom,yc*smallmap_zoom)) & mask);
+ 	} while (xc++,yc++,dst+=pitch,--reps != 0);
+ }
+ 
+@@ -399,8 +403,8 @@
+ static void DrawSmallMapIndustries(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask)
+ {
+ 	do {
+-		if (xc < MapMaxX() && yc < MapMaxY())
+-			WRITE_PIXELS_OR(dst, GetSmallMapIndustriesPixels(TILE_XY(xc,yc)) & mask);
++		if (xc*smallmap_zoom < MapMaxX() && yc*smallmap_zoom < MapMaxY())
++			WRITE_PIXELS_OR(dst, GetSmallMapIndustriesPixels(TILE_XY(xc*smallmap_zoom,yc*smallmap_zoom)) & mask);
+ 	} while (xc++,yc++,dst+=pitch,--reps != 0);
+ }
+ 
+@@ -428,8 +432,8 @@
+ static void DrawSmallMapRoutes(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask)
+ {
+ 	do {
+-		if (xc < MapMaxX() && yc < MapMaxY())
+-			WRITE_PIXELS_OR(dst, GetSmallMapRoutesPixels(TILE_XY(xc,yc)) & mask);
++		if (xc*smallmap_zoom < MapMaxX() && yc*smallmap_zoom < MapMaxY())
++			WRITE_PIXELS_OR(dst, GetSmallMapRoutesPixels(TILE_XY(xc*smallmap_zoom,yc*smallmap_zoom)) & mask);
+ 	} while (xc++,yc++,dst+=pitch,--reps != 0);
+ }
+ 
+@@ -484,8 +488,8 @@
+ static void DrawSmallMapVegetation(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask)
+ {
+ 	do {
+-		if (xc < MapMaxX() && yc < MapMaxY())
+-			WRITE_PIXELS_OR(dst, GetSmallMapVegetationPixels(TILE_XY(xc,yc)) & mask);
++		if (xc*smallmap_zoom < MapMaxX() && yc*smallmap_zoom < MapMaxY())
++			WRITE_PIXELS_OR(dst, GetSmallMapVegetationPixels(TILE_XY(xc*smallmap_zoom,yc*smallmap_zoom)) & mask);
+ 	} while (xc++,yc++,dst+=pitch,--reps != 0);
+ }
+ 
+@@ -511,8 +515,8 @@
+ static void DrawSmallMapOwners(byte *dst, uint xc, uint yc, int pitch, int reps, uint32 mask)
+ {
+ 	do {
+-		if (xc < MapMaxX() && yc < MapMaxY())
+-			WRITE_PIXELS_OR(dst, GetSmallMapOwnerPixels(TILE_XY(xc,yc)) & mask);
++		if (xc*smallmap_zoom < MapMaxX() && yc*smallmap_zoom < MapMaxY())
++			WRITE_PIXELS_OR(dst, GetSmallMapOwnerPixels(TILE_XY(xc*smallmap_zoom,yc*smallmap_zoom)) & mask);
+ 	} while (xc++,yc++,dst+=pitch,--reps != 0);
+ }
+ 
+@@ -681,8 +685,8 @@
+ 					(v->vehstatus & (VS_HIDDEN | VS_UNCLICKABLE)) == 0) {
+ 				// Remap into flat coordinates.
+ 				Point pt = RemapCoords(
+-					(v->x_pos - WP(w,smallmap_d).scroll_x) / 16,
+-					(v->y_pos - WP(w,smallmap_d).scroll_y) / 16,
++					((v->x_pos / smallmap_zoom) - WP(w,smallmap_d).scroll_x) / 16,
++					((v->y_pos / smallmap_zoom)  - WP(w,smallmap_d).scroll_y) / 16,
+ 					0);
+ 				x = pt.x;
+ 				y = pt.y;
+@@ -729,8 +733,8 @@
+ 			if (t->xy != 0) {
+ 				// Remap the town coordinate
+ 				Point pt = RemapCoords(
+-					(int)(TileX(t->xy) * 16 - WP(w, smallmap_d).scroll_x) / 16,
+-					(int)(TileY(t->xy) * 16 - WP(w, smallmap_d).scroll_y) / 16,
++					(int)((TileX(t->xy)/smallmap_zoom) * 16 - WP(w, smallmap_d).scroll_x) / 16,
++					(int)((TileY(t->xy)/smallmap_zoom) * 16 - WP(w, smallmap_d).scroll_y) / 16,
+ 					0);
+ 				x = pt.x - WP(w,smallmap_d).subscroll + 3 - (t->sign.width_2 >> 1);
+ 				y = pt.y;
+@@ -757,10 +761,10 @@
+ 
+ 		pt = RemapCoords(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y, 0);
+ 
+-		x = vp->virtual_left - pt.x;
+-		y = vp->virtual_top - pt.y;
+-		x2 = (x + vp->virtual_width) / 16;
+-		y2 = (y + vp->virtual_height) / 16;
++		x = (vp->virtual_left / smallmap_zoom) - pt.x;
++		y = (vp->virtual_top / smallmap_zoom) - pt.y;
++		x2 = (x + (vp->virtual_width / smallmap_zoom)) / 16;
++		y2 = (y + (vp->virtual_height / smallmap_zoom)) / 16;
+ 		x /= 16;
+ 		y /= 16;
+ 
+@@ -779,12 +783,26 @@
+ static void SmallMapWindowProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
++	case WE_CREATE: /* Disable zoom in button */
++		w->disabled_state = (1 << 13);
++		smallmap_zoom = 1;
++		break;
+ 	case WE_PAINT: {
+ 		const uint16 *tbl;
+ 		int x,y,y_org;
+ 		DrawPixelInfo new_dpi;
+ 
+-		/* draw the window */
++		/* zoom button disabling */
++		CLRBIT(w->disabled_state, 13);
++		CLRBIT(w->disabled_state, 14);
++
++		if (smallmap_zoom <= 1) {
++			SETBIT(w->disabled_state, 13);
++		}if (smallmap_zoom >= 8) {
++			SETBIT(w->disabled_state, 14);
++		}		
++
++		/* draw the window */		
+ 		SetDParam(0, STR_00E5_CONTOURS + _smallmap_type);
+ 		DrawWindowWidgets(w);
+ 
+@@ -826,8 +844,8 @@
+ 			w2 = FindWindowById(WC_MAIN_WINDOW, 0);
+ 
+ 			pt = RemapCoords(WP(w,smallmap_d).scroll_x, WP(w,smallmap_d).scroll_y, 0);
+-			WP(w2,vp_d).scrollpos_x = pt.x + ((_cursor.pos.x - w->left + 2) << 4) - (w2->viewport->virtual_width >> 1);
+-			WP(w2,vp_d).scrollpos_y = pt.y + ((_cursor.pos.y - w->top - 16) << 4) - (w2->viewport->virtual_height >> 1);
++			WP(w2,vp_d).scrollpos_x = (pt.x * smallmap_zoom) + (((_cursor.pos.x - w->left + 2) << 4) * smallmap_zoom)  - ((w2->viewport->virtual_width >> 1) /  smallmap_zoom);
++			WP(w2,vp_d).scrollpos_y = (pt.y * smallmap_zoom) + (((_cursor.pos.y - w->top - 16) << 4) * smallmap_zoom) - ((w2->viewport->virtual_height >> 1)  / smallmap_zoom);
+ 		} break;
+ 
+ 		case 5: /* show land contours */
+@@ -843,13 +861,33 @@
+ 			SetWindowDirty(w);
+ 			SndPlayFx(SND_15_BEEP);
+ 			break;
+-
++		case 11: /* centre location */
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
+ 		case 12: /* toggle town names */
+ 			w->click_state ^= (1 << 12);
+ 			_smallmap_show_towns = (w->click_state >> 12) & 1;
+ 			SetWindowDirty(w);
+ 			SndPlayFx(SND_15_BEEP);
+ 			break;
++		case 13: /* zoom in */
++			if (smallmap_zoom > 1)
++				smallmap_zoom--;
++			
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
++		case 14: /* zoom out */
++			if (smallmap_zoom < 8)
++				smallmap_zoom++;
++			
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
+ 		}
+ 		break;
+ 
+@@ -871,6 +909,21 @@
+ 	}
+ }
+ 
++void SmallMapRecentre(void)
++{
++	int x,y;
++	Window *w;
++	ViewPort *vp;
++	
++	w = FindWindowById(WC_SMALLMAP, 0);
++	vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
++	x =  ((((vp->virtual_width / smallmap_zoom) - (220*32)) / 2) + vp->virtual_left) / (4  * smallmap_zoom);
++	y = (((((vp->virtual_height  / smallmap_zoom) - (120*32)) / 2) + vp->virtual_top) / (2 * smallmap_zoom)) - 32;
++	WP(w,smallmap_d).scroll_x = (y-x) & ~0xF;
++	WP(w,smallmap_d).scroll_y = (x+y) & ~0xF;
++	WP(w,smallmap_d).subscroll = 0;
++}
++	
+ static const WindowDesc _smallmap_desc = {
+ 	-1,-1, 446, 314,
+ 	WC_SMALLMAP,0,
+@@ -893,8 +946,8 @@
+ 
+ 		vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
+ 
+-		x =  (((vp->virtual_width - (220*32)) / 2) + vp->virtual_left) / 4;
+-		y = ((((vp->virtual_height- (120*32)) / 2) + vp->virtual_top ) / 2) - 32;
++		x =  ((((vp->virtual_width / smallmap_zoom) - (220*32)) / 2) + vp->virtual_left) / (4  * smallmap_zoom);
++		y = (((((vp->virtual_height  / smallmap_zoom) - (120*32)) / 2) + vp->virtual_top) / (2 * smallmap_zoom)) - 32;
+ 		WP(w,smallmap_d).scroll_x = (y-x) & ~0xF;
+ 		WP(w,smallmap_d).scroll_y = (x+y) & ~0xF;
+ 		WP(w,smallmap_d).subscroll = 0;
+@@ -910,8 +963,8 @@
+ {          WWT_6,     RESIZE_RB,    14,     2,   297,    16,   231, 0x0,				STR_NULL},
+ {      WWT_PANEL,     RESIZE_TB,    14,     0,    21,   234,   255, 0x2DF,			STR_017F_ZOOM_THE_VIEW_IN},
+ {      WWT_PANEL,     RESIZE_TB,    14,    22,    43,   234,   255, 0x2E0,			STR_0180_ZOOM_THE_VIEW_OUT},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,    44,   171,   234,   255, STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW,STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   172,   298,   234,   255, STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN,STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,    44,   171,   234,   255, STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN,STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   172,   298,   234,   255, STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW,STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT},
+ {      WWT_PANEL,    RESIZE_RTB,    14,   299,   299,   234,   255, 0x0,				STR_NULL},
+ {      WWT_PANEL,    RESIZE_RTB,    14,     0,   287,   256,   267, 0x0,				STR_NULL},
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   288,   299,   256,   267, 0x0,				STR_RESIZE_BUTTON},
+Index: window.c
+===================================================================
+--- window.c	(revision 2385)
++++ window.c	(working copy)
+@@ -6,6 +6,7 @@
+ #include "gfx.h"
+ #include "viewport.h"
+ #include "console.h"
++#include "gui.h"
+ 
+ // delta between mouse cursor and upper left corner of dragged window
+ static Point _drag_delta;
+@@ -1401,6 +1402,24 @@
+ 	if (w == NULL)
+ 		return;
+ 	w = MaybeBringWindowToFront(w);
++	
++	if ( mousewheel && (w->window_class == WC_SMALLMAP))
++	{
++		if (smallmap_zoom > 1 && mousewheel == -1)
++		{
++			smallmap_zoom += mousewheel;
++			SmallMapRecentre();
++		}	
++			
++		if (smallmap_zoom < 8 && mousewheel == 1)
++		{
++			smallmap_zoom += mousewheel;
++			SmallMapRecentre();
++		}
++			
++		SetWindowDirty(w);	
++	}
++	
+ 	vp = IsPtInWindowViewport(w, x, y);
+ 	if (vp != NULL) {
+ 		if (_game_mode == GM_MENU)
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2385)
++++ spritecache.c	(working copy)
+@@ -730,7 +730,7 @@
+ 	"cached_sprites.xx3",
+ };
+ 
+-#define OPENTTD_SPRITES_COUNT 98
++#define OPENTTD_SPRITES_COUNT 100
+ static const uint16 _openttd_grf_indexes[] = {
+ 	SPR_OPENTTD_BASE+0,	SPR_OPENTTD_BASE+7, // icons etc
+ 	134, 134,  // euro symbol medium size

@@ -1,0 +1,960 @@
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2349)
++++ functions.h	(working copy)
+@@ -211,20 +211,6 @@
+ void ShowEndGameChart(void);
+ TileIndex AdjustTileCoordRandomly(TileIndex a, byte rng);
+ 
+-enum SaveOrLoadResult {
+-	SL_OK = 0, // completed successfully
+-	SL_ERROR = 1, // error that was caught before internal structures were modified
+-	SL_REINIT = 2, // error that was caught in the middle of updating game state, need to clear it. (can only happen during load)
+-};
+-enum SaveOrLoadMode {
+-	SL_INVALID = -1,
+-	SL_LOAD = 0,
+-	SL_SAVE = 1,
+-	SL_OLD_LOAD = 2,
+-};
+-
+-int SaveOrLoad(const char *filename, int mode);
+-
+ void AfterLoadTown(void);
+ void GenRandomNewGame(uint32 rnd1, uint32 rnd2);
+ void StartScenarioEditor(uint32 rnd1, uint32 rnd2);
+Index: ttd.c
+===================================================================
+--- ttd.c	(revision 2349)
++++ ttd.c	(working copy)
+@@ -35,6 +35,7 @@
+ #include "signs.h"
+ #include "depot.h"
+ #include "waypoint.h"
++#include "demo.h"
+ 
+ #include <stdarg.h>
+ 
+@@ -433,6 +434,10 @@
+ 	_vehicle_sort  = NULL;
+ 	_town_sort     = NULL;
+ 	_industry_sort = NULL;
++
++	_demo_recording_active = false;
++	_demo_playback_active = false;
++	_demo_inject_command = false;
+ }
+ 
+ static void UnInitializeDynamicVariables(void)
+@@ -831,6 +836,10 @@
+ 	_local_player = 0;
+ 
+ 	MarkWholeScreenDirty();
++
++#ifdef AUTO_DEMO
++	StartRecording("autodemo");
++#endif /* AUTO_DEMO */
+ }
+ 
+ bool SafeSaveOrLoad(const char *filename, int mode, int newgm)
+@@ -886,6 +895,11 @@
+ 	}
+ #endif /* ENABLE_NETWORK */
+ 
++	/* Make sure demo-recording stops when we exit the game */
++	if (new_mode != SM_SAVE) {
++		StopRecording();
++	}
++
+ 	switch (new_mode) {
+ 	case SM_EDITOR: /* Switch to scenario editor */
+ 		MakeNewEditorWorld();
+@@ -897,6 +911,10 @@
+ 			snprintf(_network_game_info.map_name, 40, "Random");
+ #endif /* ENABLE_NETWORK */
+ 		MakeNewGame();
++
++#ifdef AUTO_DEMO
++		StartRecording("autodemo");
++#endif /* AUTO_DEMO */
+ 		break;
+ 
+ 	case SM_START_SCENARIO: /* New Game --> Choose one of the preset scenarios */
+@@ -917,6 +935,10 @@
+ 			if (_network_server)
+ 				snprintf(_network_game_info.map_name, 40, "Loaded game");
+ #endif /* ENABLE_NETWORK */
++
++#ifdef AUTO_DEMO
++			StartRecording("autodemo");
++#endif /* AUTO_DEMO */
+ 		}
+ 		break;
+ 	}
+@@ -937,11 +959,6 @@
+ 			_generating_world = false;
+ 			// delete all stations owned by a player
+ 			DeleteAllPlayerStations();
+-
+-#ifdef ENABLE_NETWORK
+-			if (_network_server)
+-				snprintf(_network_game_info.map_name, 40, "Loaded scenario");
+-#endif /* ENABLE_NETWORK */
+ 		} else
+ 			ShowErrorMessage(INVALID_STRING_ID, STR_4009_GAME_LOAD_FAILED, 0, 0);
+ 
+@@ -985,12 +1002,16 @@
+ 	if (_pause) return;
+ 
+ 	_in_state_game_loop = true;
+-	// _frame_counter is increased somewhere else when in network-mode
+-	//  Sidenote: _frame_counter is ONLY used for _savedump in non-MP-games
+-	//    Should that not be deleted? If so, the next 2 lines can also be deleted
+-	if (!_networking)
++
++	if (!_networking) {
++		/* Used for demo-recording/playback */
+ 		_frame_counter++;
+ 
++		/* When playback, inject commands */
++		if (_demo_playback_active)
++			DemoGameLoop();
++	}
++
+ 	if (_savedump_path[0] && (uint)_frame_counter >= _savedump_first && (uint)(_frame_counter -_savedump_first) % _savedump_freq == 0 ) {
+ 		char buf[100];
+ 		sprintf(buf, "%s%.5d.sav", _savedump_path, _frame_counter);
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2349)
++++ misc_gui.c	(working copy)
+@@ -18,6 +18,7 @@
+ #include "sound.h"
+ #include "network.h"
+ #include "string.h"
++#include "saveload.h"
+ 
+ #include "hal.h" // for file list
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2349)
++++ variables.h	(working copy)
+@@ -253,6 +253,7 @@
+ 	char *gm_dir;
+ 	char *lang_dir;
+ 	char *save_dir;
++	char *demo_dir;
+ 	char *autosave_dir;
+ 	char *scenario_dir;
+ 	char *second_data_dir;
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2349)
++++ saveload.c	(working copy)
+@@ -681,6 +681,7 @@
+ 	}
+ }
+ 
++
+ //*******************************************
+ //********** START OF LZO CODE **************
+ //*******************************************
+@@ -901,6 +902,14 @@
+ 	NULL,
+ };
+ 
++/* Thisone is not saved to the normal savegames, but only for demo-files */
++extern const ChunkHandler _demo_command_chunk_handlers[];
++
++static const ChunkHandler * const _demo_chunk_handlers[] = {
++	_demo_command_chunk_handlers,
++	NULL,
++};
++
+ // used to include a vehicle desc in another desc.
+ extern const byte _common_veh_desc[];
+ static const byte * const _desc_includes[] = {
+@@ -1051,17 +1060,17 @@
+ 		return SL_OK;
+ 	}
+ 
+-	_sl.fh = fopen(filename, mode?"wb":"rb");
+-	if (_sl.fh == NULL)
+-		return SL_ERROR;
++	_sl.save = (mode == SL_SAVE || mode == SL_DEMO_SAVE) ? true : false;
+ 
++	_sl.fh = fopen(filename, (_sl.save) ? "wb": "rb");
++	if (_sl.fh == NULL) return SL_ERROR;
++
+ 	_sl.bufe = _sl.bufp = NULL;
+ 	_sl.offs_base = 0;
+ 	_sl.int_to_ref_proc = IntToReference;
+ 	_sl.ref_to_int_proc = ReferenceToInt;
+-	_sl.save = mode;
+ 	_sl.includes = _desc_includes;
+-	_sl.chs = _chunk_handlers;
++	_sl.chs = (mode == SL_DEMO_LOAD || mode == SL_DEMO_SAVE) ? _demo_chunk_handlers : _chunk_handlers;
+ 
+ 	// setup setjmp error handler
+ 	if (setjmp(_sl.excpt)) {
+@@ -1073,12 +1082,23 @@
+ 
+ 		// a saver/loader exception!!
+ 		// reinitialize all variables to prevent crash!
+-		if (mode == SL_LOAD) {
+-			ShowInfoF("Load game failed: %s.", _sl.excpt_msg);
+-			return SL_REINIT;
+-		} else {
+-			ShowInfoF("Save game failed: %s.", _sl.excpt_msg);
+-			return SL_ERROR;
++		switch (mode) {
++			case SL_LOAD:
++			case SL_OLD_LOAD:
++				ShowInfoF("Load game failed: %s.", _sl.excpt_msg);
++				return SL_REINIT;
++
++			case SL_SAVE:
++				ShowInfoF("Save game failed: %s.", _sl.excpt_msg);
++				return SL_ERROR;
++
++			case SL_DEMO_LOAD:
++				ShowInfoF("Loading demo failed: %s.", _sl.excpt_msg);
++				return SL_ERROR;
++
++			case SL_DEMO_SAVE:
++				ShowInfoF("Saving demo failed: %s.", _sl.excpt_msg);
++				return SL_ERROR;
+ 		}
+ 	}
+ 
+@@ -1086,7 +1106,7 @@
+   // be clobbered by `longjmp' or `vfork'"
+ 	version = 0;
+ 
+-	if (mode != SL_LOAD) {
++	if (mode != SL_LOAD && mode != SL_DEMO_LOAD) {
+ 		fmt = GetSavegameFormat(_savegame_format);
+ 
+ 		_sl.write_bytes = fmt->writer;
+@@ -1095,12 +1115,15 @@
+ 
+ 		hdr[0] = fmt->tag;
+ 		hdr[1] = TO_BE32((SAVEGAME_MAJOR_VERSION << 16) + (SAVEGAME_MINOR_VERSION << 8));
++		_sl.version = SAVEGAME_MAJOR_VERSION;
+ 		if (fwrite(hdr, sizeof(hdr), 1, _sl.fh) != 1) SlError("file write failed");
+ 
+-		_sl.version = SAVEGAME_MAJOR_VERSION;
++		if (mode != SL_DEMO_SAVE) {
++			BeforeSaveGame();
++		}
+ 
+-		BeforeSaveGame();
+ 		SlSaveChunks();
++
+ 		SlWriteFill(); // flush the save buffer
+ 		fmt->uninit_write();
+ 
+@@ -1116,12 +1139,16 @@
+ 		// see if we have any loader for this type.
+ 		for(fmt = _saveload_formats; ; fmt++) {
+ 			if (fmt == endof(_saveload_formats)) {
+-				printf("Unknown savegame type, trying to load it as the buggy format.\n");
+-				rewind(_sl.fh);
+-				_sl.version = 0;
+-				_sl.full_version = 0;
+-				version = 0;
+-				fmt = _saveload_formats + 0; // lzo
++				if (mode != SL_DEMO_LOAD) {
++					printf("Unknown savegame type, trying to load it as the buggy format.\n");
++					rewind(_sl.fh);
++					_sl.version = 0;
++					_sl.full_version = 0;
++					version = 0;
++					fmt = _saveload_formats + 0; // lzo
++				} else{
++					goto read_err;
++				}
+ 				break;
+ 			}
+ 			if (fmt->tag == hdr[0]) {
+@@ -1149,12 +1176,16 @@
+ 		}
+ 
+ 		if (!fmt->init_read()) goto init_err;
+-		// Clear everything
+-		/* Set the current map to 256x256, in case of an old map.
+-		 * Else MAPS will read the right information */
+-		InitializeGame(8, 8);
+ 
++		if (mode == SL_LOAD) {
++			// Clear everything
++			/* Set the current map to 256x256, in case of an old map.
++			* Else MAPS will read the right information */
++			InitializeGame(8, 8);
++		}
++
+ 		SlLoadChunks();
++
+ 		fmt->uninit_read();
+ 	}
+ 
+Index: saveload.h
+===================================================================
+--- saveload.h	(revision 2349)
++++ saveload.h	(working copy)
+@@ -158,7 +158,23 @@
+ 
+ #define SLE_END() 0xF0
+ 
++enum SaveOrLoadResult {
++	SL_OK = 0, // completed successfully
++	SL_ERROR = 1, // error that was caught before internal structures were modified
++	SL_REINIT = 2, // error that was caught in the middle of updating game state, need to clear it. (can only happen during load)
++};
++enum SaveOrLoadMode {
++	SL_INVALID = -1,
++	SL_LOAD = 0,
++	SL_SAVE = 1,
++	SL_OLD_LOAD = 2,
+ 
++	SL_DEMO_LOAD = 3,
++	SL_DEMO_SAVE = 4,
++};
++
++int SaveOrLoad(const char *filename, int mode);
++
+ void SlSetArrayIndex(uint index);
+ int SlIterateArray(void);
+ void SlArray(void *array, uint length, uint conv);
+Index: win32.c
+===================================================================
+--- win32.c	(revision 2349)
++++ win32.c	(working copy)
+@@ -2158,6 +2158,7 @@
+ 	if (s[-1] != '\\') strcpy(s, "\\");
+ 
+ 	_path.save_dir = str_fmt("%ssave", cfg);
++	_path.demo_dir = str_fmt("%sdemo", cfg);
+ 	_path.autosave_dir = str_fmt("%s\\autosave", _path.save_dir);
+ 	_path.scenario_dir = str_fmt("%sscenario", cfg);
+ 	_path.gm_dir = str_fmt("%sgm\\", cfg);
+@@ -2172,6 +2173,7 @@
+ 
+ 	// make (auto)save and scenario folder
+ 	CreateDirectory(_path.save_dir, NULL);
++	CreateDirectory(_path.demo_dir, NULL);
+ 	CreateDirectory(_path.autosave_dir, NULL);
+ 	CreateDirectory(_path.scenario_dir, NULL);
+ }
+Index: os2.c
+===================================================================
+--- os2.c	(revision 2349)
++++ os2.c	(working copy)
+@@ -587,6 +587,7 @@
+ 	if (s[-1] != '\\') strcpy(s, "\\");
+ 
+ 	_path.save_dir = str_fmt("%ssave", _path.personal_dir);
++	_path.demo_dir = str_fmt("%sdemo", _path.personal_dir);
+ 	_path.autosave_dir = str_fmt("%s\\autosave", _path.save_dir);
+ 	_path.scenario_dir = str_fmt("%sscenario", _path.personal_dir);
+ 	_path.gm_dir = str_fmt("%sgm\\", _path.game_data_dir);
+@@ -609,6 +610,7 @@
+ 	// create necessary folders
+ 	mkdir(_path.personal_dir);
+ 	mkdir(_path.save_dir);
++	mkdir(_path.demo_dir);
+ 	mkdir(_path.autosave_dir);
+ 	mkdir(_path.scenario_dir);
+ }
+Index: unix.c
+===================================================================
+--- unix.c	(revision 2349)
++++ unix.c	(working copy)
+@@ -524,6 +524,7 @@
+ 	if (s[-1] != '/') strcpy(s, "/");
+ 
+ 	_path.save_dir = str_fmt("%ssave", _path.personal_dir);
++	_path.demo_dir = str_fmt("%sdemo", _path.personal_dir);
+ 	_path.autosave_dir = str_fmt("%s/autosave", _path.save_dir);
+ 	_path.scenario_dir = str_fmt("%sscenario", _path.personal_dir);
+ 	_path.gm_dir = str_fmt("%sgm/", _path.game_data_dir);
+@@ -546,6 +547,7 @@
+ 	// create necessary folders
+ 	mkdir(_path.personal_dir, 0755);
+ 	mkdir(_path.save_dir, 0755);
++	mkdir(_path.demo_dir, 0755);
+ 	mkdir(_path.autosave_dir, 0755);
+ 	mkdir(_path.scenario_dir, 0755);
+ }
+Index: demo.c
+===================================================================
+--- demo.c	(revision 0)
++++ demo.c	(revision 0)
+@@ -0,0 +1,317 @@
++#include "stdafx.h"
++#include "ttd.h"
++#include "demo.h"
++#include "saveload.h"
++#include "debug.h"
++#include "string.h"
++#include "console.h"
++
++extern const char _openttd_revision[];
++DemoRecord _demo_recording;
++
++enum {DEMO_RECORDING_BLOCK_SIZE = 512};
++
++static void AddNewDemoBlock(void)
++{
++	_demo_recording.current_index++;
++	if (_demo_recording.current_index == DEMO_RECORDING_BLOCK_SIZE) {
++		/* Block is full, create a new one */
++		_demo_recording.command_blocks++;
++
++		_demo_recording.commands = realloc(_demo_recording.commands, sizeof(_demo_recording.commands[0]) * _demo_recording.command_blocks);
++		_demo_recording.commands[_demo_recording.command_blocks - 1] = malloc(sizeof(_demo_recording.commands[0][0]) * DEMO_RECORDING_BLOCK_SIZE);
++
++		_demo_recording.current_index = 0;
++	}
++}
++
++/**
++ * Add a command to the command-buffer.
++ */
++static void AddDemoCommand(PlayerID player, uint32 cmd, uint32 p1, uint32 p2, TileIndex tile, const char *text, uint32 frame)
++{
++	DemoDoCommand *command = &_demo_recording.commands[_demo_recording.command_blocks - 1][_demo_recording.current_index];
++
++	/* Assign the data */
++	command->player = player;
++	command->cmd = cmd;
++	command->p1 = p1;
++	command->p2 = p2;
++	command->tile = tile;
++	if (text != NULL) ttd_strlcpy(command->text, text, sizeof(command->text));
++	command->frame = frame;
++
++	AddNewDemoBlock();
++}
++
++/**
++ * Record the command to the buffer.
++ */
++void RecordCommand(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd)
++{
++	AddDemoCommand(_current_player, cmd, p1, p2, tile, _cmd_text, _frame_counter);
++}
++
++/**
++ * Starts the recording of a demo, by first saving the current map, then records all DoCommands.
++ */
++bool StartRecording(const char *filename)
++{
++	char savegame[200];
++
++	if (_demo_recording_active || _demo_playback_active) return false;
++
++	/* First, save the current map */
++	snprintf(savegame, sizeof(savegame), "%s%s%s.sav", _path.demo_dir, PATHSEP, filename);
++
++	if (SaveOrLoad(savegame, SL_SAVE) != SL_OK) return false;
++
++	/* Now start recording */
++	_demo_recording.filename = strdup(filename);
++	_demo_recording_active = true;
++
++	/* Allocate 1 block of memory */
++	_demo_recording.commands = malloc(sizeof(_demo_recording.commands[0]) * 1);
++	/* And DEMO_RECORDING_BLOCK_SIZE items per block */
++	_demo_recording.commands[0] = malloc(sizeof(_demo_recording.commands[0][0]) * DEMO_RECORDING_BLOCK_SIZE);
++
++	_demo_recording.command_blocks = 1;
++	_demo_recording.current_index = 0;
++
++	snprintf(_demo_recording.revision, sizeof(_demo_recording.revision), "%s", _openttd_revision);
++	_demo_recording.start_frame = _frame_counter;
++
++	IConsolePrintF(_icolour_def, "Recording started to '%s'.", filename);
++
++	return true;
++}
++
++/**
++ * Stops the recording of a demo, and saves it to the harddisk.
++ */
++bool StopRecording(void)
++{
++	/* Stop the playback? */
++	if (_demo_playback_active) {
++		_demo_playback_active = false;
++		IConsolePrint(_icolour_def, "Playback stopped.");
++		return true;
++	}
++
++	if (!_demo_recording_active) return false;
++
++	/* Now save the recording */
++	{
++		char savegame[200];
++
++		snprintf(savegame, sizeof(savegame), "%s%s%s.dem", _path.demo_dir, PATHSEP, _demo_recording.filename);
++
++		if (SaveOrLoad(savegame, SL_DEMO_SAVE) != SL_OK)
++			return false;
++	}
++
++	/* Free some stuff */
++	_demo_recording_active = false;
++	free(_demo_recording.filename);
++
++	{
++		uint i;
++
++		for (i = 0; i < _demo_recording.command_blocks; i++)
++			free(_demo_recording.commands[i]);
++
++		free(_demo_recording.commands);
++	}
++
++	IConsolePrint(_icolour_def, "Recording stopped.");
++
++	return true;
++}
++
++/**
++ * Loads a demo and plays it
++ */
++bool LoadDemo(const char *filename)
++{
++	char savegame[200];
++
++	if (_demo_recording_active || _demo_playback_active)
++		return false;
++
++	/* Make sure we leave intro / SE */
++	_game_mode = GM_NORMAL;
++
++	/* Load the map */
++	snprintf(savegame, sizeof(savegame), "%s%s%s.sav", _path.demo_dir, PATHSEP, filename);
++
++	if (SaveOrLoad(savegame, SL_LOAD) != SL_OK)
++		return false;
++
++	/* Allocate 1 block of memory */
++	_demo_recording.commands = malloc(sizeof(_demo_recording.commands[0]) * 1);
++	/* And DEMO_RECORDING_BLOCK_SIZE items per block */
++	_demo_recording.commands[0] = malloc(sizeof(_demo_recording.commands[0][0]) * DEMO_RECORDING_BLOCK_SIZE);
++
++	_demo_recording.command_blocks = 1;
++	_demo_recording.current_index = 0;
++
++	/* Load the demo-file */
++	snprintf(savegame, sizeof(savegame), "%s%s%s.dem", _path.demo_dir, PATHSEP, filename);
++
++	if (SaveOrLoad(savegame, SL_DEMO_LOAD) != SL_OK)
++		return false;
++
++	/* Check revision */
++	if (strncmp(_demo_recording.revision, _openttd_revision, sizeof(_demo_recording.revision)) != 0) {
++		DEBUG(misc, 0)("[Demo Playback] Revision mismatch, aborting..");
++		return false;
++	}
++
++	/* Set some information */
++	_frame_counter = _demo_recording.start_frame;
++	_demo_recording.playback_block = 0;
++	_demo_recording.playback_index = 0;
++
++	/* Start the playback */
++	_demo_playback_active = true;
++
++	IConsolePrint(_icolour_def, "Playback started.");
++
++	return true;
++}
++
++extern void StateGameLoop(void);
++
++/**
++ * Fastforward to this given frame.
++ */
++void ForwardRecording(uint32 frame)
++{
++	/* Sanity checks */
++	if (frame < _frame_counter)
++		return;
++
++	while (frame > _frame_counter) {
++		StateGameLoop();
++	}
++}
++
++/**
++ * Called every tick, so we can inject commands.
++ */
++void DemoGameLoop(void)
++{
++	/* Test if we need to inject a command */
++	DemoDoCommand *command = &_demo_recording.commands[_demo_recording.playback_block][_demo_recording.playback_index];
++	byte old_cp;
++
++	/* Handle commands */
++	while (command->frame == _frame_counter) {
++		/* Set the inject flag, so we can run DoCommandP */
++		_demo_inject_command = true;
++		old_cp = _current_player;
++
++#ifdef DEMO_DEBUG
++		DEBUG(misc, 0)("[Demo -- %d] Cmd: %d (%d, %d on 0x%x, as player %d)\n", _frame_counter, command->cmd & 0xFF,
++						command->p1, command->p2, command->tile, command->player);
++#endif
++		_current_player = command->player;
++		_cmd_text = command->text;
++		DoCommandP(command->tile, command->p1, command->p2, NULL, command->cmd);
++
++		_current_player = old_cp;
++		_demo_inject_command = false;
++
++		/* Go to next item */
++		_demo_recording.playback_index++;
++		if (_demo_recording.playback_index == DEMO_RECORDING_BLOCK_SIZE) {
++			_demo_recording.playback_block++;
++			_demo_recording.playback_index = 0;
++		}
++
++		/* Did we reach the end of our playback? */
++		if (_demo_recording.playback_block == _demo_recording.command_blocks - 1 &&
++				_demo_recording.playback_index == _demo_recording.current_index) {
++			IConsolePrint(_icolour_def, "Playback finished");
++			_demo_playback_active = false;
++
++			{
++				uint i;
++
++				for (i = 0; i < _demo_recording.command_blocks; i++)
++					free(_demo_recording.commands[i]);
++
++				free(_demo_recording.commands);
++			}
++
++			return;
++		}
++
++		command = &_demo_recording.commands[_demo_recording.playback_block][_demo_recording.playback_index];
++	}
++}
++
++/* Remember that demos follow their own version-number */
++static const byte _demo_recording_desc[] = {
++	SLE_VAR(DemoDoCommand, player,			SLE_UINT8),
++	SLE_VAR(DemoDoCommand, cmd,					SLE_UINT32),
++	SLE_VAR(DemoDoCommand, p1,					SLE_UINT32),
++	SLE_VAR(DemoDoCommand, p2,					SLE_UINT32),
++	SLE_VAR(DemoDoCommand, tile,				SLE_UINT32),
++	SLE_ARR(DemoDoCommand, text,				SLE_UINT8, 80),
++	SLE_VAR(DemoDoCommand, frame,				SLE_UINT32),
++	SLE_END()
++};
++
++static void Save_DEMO(void)
++{
++	uint i, j;
++	uint items;
++
++	/* Save all commands */
++	for (i = 0; i < _demo_recording.command_blocks; i++) {
++		/* Find the last item of this block */
++		if (i == _demo_recording.command_blocks - 1)
++			items = _demo_recording.current_index;
++		else
++			items = DEMO_RECORDING_BLOCK_SIZE;
++
++		/* Go through all commands */
++		for (j = 0; j < items; j++) {
++			/* Save it */
++			SlSetArrayIndex(i * DEMO_RECORDING_BLOCK_SIZE + j);
++
++			SlObject(&_demo_recording.commands[i][j], _demo_recording_desc);
++		}
++	}
++}
++
++static void Load_DEMO(void)
++{
++	DemoDoCommand command;
++	int index;
++
++	/* Load all commands */
++	while ((index = SlIterateArray()) != -1) {
++		memset(&command, 0, sizeof(command));
++
++		SlObject(&command, _demo_recording_desc);
++		AddDemoCommand(command.player, command.cmd, command.p1, command.p2, command.tile, command.text, command.frame);
++	}
++}
++
++static const byte _demo_info_desc[] = {
++	SLE_VAR(DemoRecord,start_frame,					SLE_UINT32),
++	SLE_ARR(DemoRecord,revision,						SLE_UINT8, 20),
++	SLE_END()
++};
++
++static void SaveLoad_INFO(void)
++{
++	SlObject(&_demo_recording, _demo_info_desc);
++}
++
++const ChunkHandler _demo_command_chunk_handlers[] = {
++	{ 'INFO', SaveLoad_INFO, SaveLoad_INFO, CH_RIFF},
++	{ 'DEMO', Save_DEMO, Load_DEMO, CH_ARRAY | CH_LAST},
++};
+Index: demo.h
+===================================================================
+--- demo.h	(revision 0)
++++ demo.h	(revision 0)
+@@ -0,0 +1,52 @@
++#ifndef DEMO_H
++#define DEMO_H
++
++#include "command.h"
++/* Enable this line to see all commands that are executed in a playback in your console */
++//#define DEMO_DEBUG
++
++/* With this enabled, demo-recording starts when you load a game / start a new game, under the
++ *  name 'autodemo' */
++//#define AUTO_DEMO
++
++typedef struct DemoDoCommand {
++	byte player;    //! Player that executed the command
++	uint32 cmd;     //! Command of DoCommand
++	uint32 p1;      //! p1 variable of DoCommand
++	uint32 p2;      //! p2 variable of DoCommand
++	TileIndex tile; //! tile variable of DoCommand
++	char text[80];  //! The decode_params
++	uint32 frame;   //! What frame was it executed
++} DemoDoCommand;
++
++assert_compile(sizeof(TileIndex) == 4);
++
++typedef struct DemoRecord {
++	DemoDoCommand **commands; // commands is saved as an [][] array
++	uint command_blocks;      // Amount of blocks currently allocated
++	uint current_index;       // Current index in current block
++
++	uint playback_block;
++	uint playback_index;
++
++	char *filename;
++
++	uint start_frame;
++	char revision[20];
++} DemoRecord;
++
++bool StartRecording(const char *filename);
++bool StopRecording(void);
++bool LoadDemo(const char *filename);
++void RecordCommand(TileIndex tile, uint32 p1, uint32 p2, uint32 cmd);
++void DemoGameLoop(void);
++void ForwardRecording(uint32 frame);
++
++VARDEF bool _demo_recording_active;
++VARDEF bool _demo_playback_active;
++VARDEF bool _demo_inject_command;
++
++static inline bool IsDemoRunning(uint32 cmd) {return _demo_playback_active && !_demo_inject_command && (cmd&0xFF) != CMD_PAUSE;}
++static inline bool IsDemoRecording(void) {return _demo_recording_active;}
++
++#endif /* DEMO_H */
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2349)
++++ Makefile	(working copy)
+@@ -604,6 +604,7 @@
+ C_SOURCES += console_cmds.c
+ C_SOURCES += debug.c
+ C_SOURCES += dedicated.c
++C_SOURCES += demo.c
+ C_SOURCES += depot.c
+ C_SOURCES += disaster_cmd.c
+ C_SOURCES += dock_gui.c
+Index: network_client.c
+===================================================================
+--- network_client.c	(revision 2349)
++++ network_client.c	(working copy)
+@@ -3,6 +3,7 @@
+ #include "string.h"
+ #include "strings.h"
+ #include "network_data.h"
++#include "saveload.h"
+ 
+ #ifdef ENABLE_NETWORK
+ 
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 2349)
++++ console_cmds.c	(working copy)
+@@ -13,6 +13,8 @@
+ #include "command.h"
+ #include "settings.h"
+ #include "hal.h" /* for file list */
++#include "demo.h"
++#include "saveload.h"
+ 
+ // ** scriptfile handling ** //
+ static FILE *_script_file;
+@@ -298,7 +300,98 @@
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConStartRecording)
++{
++	if (argc == 0) {
++		IConsoleHelp("Start recording a running game. Usage: 'record <filename>'");
++		return true;
++	}
+ 
++	if (argc != 2) return false;
++
++	if (_demo_recording_active || _demo_playback_active) {
++		IConsoleError("Please stop any recording/playback prior to starting a new record.");
++		return true;
++	}
++
++	if (!StartRecording(argv[1])) {
++		IConsoleError("Couldn't start recording; invalid filename?");
++		return true;
++	}
++
++	IConsolePrint(_icolour_def, "Recording has started, type 'stop' to stop recording");
++	return true;
++}
++
++DEF_CONSOLE_CMD(ConStopRecording)
++{
++	if (argc == 0) {
++		IConsoleHelp("Stop the recording/playback of an active game. Usage: 'stop'");
++		return true;
++	}
++
++	if (!StopRecording())
++		IConsoleError("Couldn't stop recording/playback.. was it started?");
++
++	return true;
++}
++
++DEF_CONSOLE_CMD(ConPlayRecording)
++{
++	if (argc == 0) {
++		IConsoleHelp("Start the playback of a demo file. Usage: 'play <filename>'");
++		return true;
++	}
++
++	if (argc != 2) return false;
++
++	if (_demo_recording_active || _demo_playback_active) {
++		IConsoleError("Please stop any recording/playback prior to playing back a new one.");
++		return true;
++	}
++
++	if (!LoadDemo(argv[1])) {
++		IConsoleError("Couldn't load recording; invalid filename?");
++		return true;
++	}
++
++	IConsolePrint(_icolour_def, "Playback has started, type 'stop' to stop playback.");
++
++	return true;
++}
++
++DEF_CONSOLE_CMD(ConForwardRecording)
++{
++	uint32 frame;
++
++	if (argc == 0) {
++		IConsoleHelp("Fast-forward to a given frame inside the recording. Usage: 'forward <frame>'");
++		IConsoleHelp("Note! Using this function can delay the game for several seconds!");
++		return true;
++	}
++
++	if (argc != 2) return false;
++
++	if (!_demo_playback_active) {
++		IConsoleError("You need to be in playback to make use of this function.");
++		return true;
++	}
++
++	frame = atoi(argv[1]);
++
++	if (frame < _frame_counter) {
++		IConsolePrintF(_icolour_err, "ERROR: Can't forward because we have already passed this frame. Current frame is: %d", _frame_counter);
++		return true;
++	}
++
++	IConsolePrintF(_icolour_def, "Forwarding to frame %d.", frame);
++	ForwardRecording(frame);
++	IConsolePrintF(_icolour_def, "Forwarding done, we are now at frame %d.", _frame_counter);
++
++	return true;
++}
++
++
+ // ********************************* //
+ // * Network Core Console Commands * //
+ // ********************************* //
+@@ -1230,6 +1323,11 @@
+ 	IConsoleCmdRegister("pwd",          ConPrintWorkingDirectory);
+ 	IConsoleCmdRegister("clear",        ConClearBuffer);
+ 
++	IConsoleCmdRegister("record",   ConStartRecording);
++	IConsoleCmdRegister("stop",     ConStopRecording);
++	IConsoleCmdRegister("play",     ConPlayRecording);
++	IConsoleCmdRegister("forward",  ConForwardRecording);
++
+ 	IConsoleAliasRegister("dir",      "ls");
+ 	IConsoleAliasRegister("newmap",   "newgame");
+ 	IConsoleAliasRegister("new_map",  "newgame");
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2349)
++++ network_server.c	(working copy)
+@@ -3,6 +3,7 @@
+ #include "string.h"
+ #include "strings.h"
+ #include "network_data.h"
++#include "saveload.h"
+ 
+ #ifdef ENABLE_NETWORK
+ 
+Index: command.c
+===================================================================
+--- command.c	(revision 2349)
++++ command.c	(working copy)
+@@ -6,6 +6,7 @@
+ #include "command.h"
+ #include "player.h"
+ #include "network.h"
++#include "demo.h"
+ 
+ const char* _cmd_text = NULL;
+ 
+@@ -409,6 +410,9 @@
+ 
+ 	assert(_docommand_recursive == 0);
+ 
++	/* You can't do anything in playback */
++	if (IsDemoRunning(cmd)) return true;
++
+ 	_error_message = INVALID_STRING_ID;
+ 	_error_message_2 = cmd >> 16;
+ 	_additional_cash_required = 0;
+@@ -492,6 +496,9 @@
+ 	}
+ #endif /* ENABLE_NETWORK */
+ 
++	/* Record commands when recording */
++	if (IsDemoRecording()) RecordCommand(tile, p1, p2, cmd);
++
+ 	// update last build coordinate of player.
+ 	if ( tile != 0 && _current_player < MAX_PLAYERS) DEREF_PLAYER(_current_player)->last_build_coordinate = tile;
+ 

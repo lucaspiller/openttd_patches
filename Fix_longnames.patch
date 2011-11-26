@@ -1,0 +1,342 @@
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 2238)
++++ aircraft_gui.c	(working copy)
+@@ -14,6 +14,7 @@
+ #include "viewport.h"
+ #include "player.h"
+ #include "depot.h"
++#include "strings.h"
+ 
+ 
+ void Set_DPARAM_Aircraft_Build_Window(uint16 engine_number)
+@@ -579,6 +580,8 @@
+ 		Vehicle *v = GetVehicle(w->window_number);
+ 		uint32 disabled = 1<<8;
+ 		StringID str;
++		char buffer[512];
++		int32 dest = -1;
+ 
+ 		{
+ 			uint tile = v->tile;
+@@ -608,15 +611,13 @@
+ 		} else {
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+-				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 8);
+-				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
++				dest = v->current_order.station;
++				str = STR_HEADING_FOR_STATION;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+-				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 8);
+-				str = STR_HEADING_FOR_HANGAR + _patches.vehicle_speed;
++				dest = v->current_order.station;
++				str = STR_HEADING_FOR_HANGAR;
+ 			} break;
+ 
+ 			case OT_LOADING:
+@@ -625,12 +626,38 @@
+ 
+ 			default:
+ 				if (v->num_orders == 0) {
+-					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->cur_speed * 8);
++					str = STR_NO_ORDERS;
+ 				} else
+ 					str = STR_EMPTY;
+ 				break;
+ 			}
++
++			if (v->current_order.type != OT_LOADING) 
++			{
++				str += _patches.vehicle_speed;
++				if (dest != -1) {
++					SetDParam(0, dest);
++					SetDParam(1, v->cur_speed * 8);
++				} else {
++					SetDParam(0, v->cur_speed * 8);
++				}
++				GetString(buffer, str);
++				
++				if (GetStringWidth(buffer) > (w->widget[5].right - w->widget[5].left)-20)
++				{
++					str -= _patches.vehicle_speed;
++					if (dest != -1)
++						SetDParam(0, dest);
++				}else{
++					if (dest != -1) {
++						SetDParam(0, dest);
++						SetDParam(1, v->cur_speed * 8);
++					} else {
++						SetDParam(0, v->cur_speed * 8);
++					}
++				}
++			}
++
+ 		}
+ 
+ 		DrawStringCentered((w->widget[5].right - w->widget[5].left) / 2,
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 2238)
++++ roadveh_gui.c	(working copy)
+@@ -13,6 +13,7 @@
+ #include "player.h"
+ #include "engine.h"
+ #include "depot.h"
++#include "strings.h"
+ 
+ void Set_DPARAM_Road_Veh_Build_Window(uint16 engine_number)
+ {
+@@ -208,6 +209,8 @@
+ 	case WE_PAINT: {
+ 		Vehicle *v = GetVehicle(w->window_number);
+ 		StringID str;
++		char buffer[512];
++		int32 dest = -1;
+ 
+ 		w->disabled_state = (v->owner != _local_player) ? (1<<8 | 1<<7) : 0;
+ 
+@@ -229,16 +232,14 @@
+ 		} else {
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+-				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 10 >> 5);
+-				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
++				dest = v->current_order.station;
++				str = STR_HEADING_FOR_STATION;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+ 				Depot *depot = GetDepot(v->current_order.station);
+-				SetDParam(0, depot->town_index);
+-				SetDParam(1, v->cur_speed * 10 >> 5);
+-				str = STR_HEADING_FOR_ROAD_DEPOT + _patches.vehicle_speed;
++				dest = depot->town_index;
++				str = STR_HEADING_FOR_ROAD_DEPOT;
+ 			} break;
+ 
+ 			case OT_LOADING:
+@@ -248,12 +249,39 @@
+ 
+ 			default:
+ 				if (v->num_orders == 0) {
+-					str = STR_NO_ORDERS + _patches.vehicle_speed;
++					str = STR_NO_ORDERS;
+ 					SetDParam(0, v->cur_speed * 10 >> 5);
+ 				} else
+ 					str = STR_EMPTY;
+ 				break;
+ 			}
++
++			if (v->current_order.type != OT_LOADING && v->current_order.type != OT_LEAVESTATION) 
++			{
++				str += _patches.vehicle_speed;
++				if (dest != -1) {
++					SetDParam(0, dest);
++					SetDParam(1, v->cur_speed * 10 >> 5);
++				} else {
++					SetDParam(0, v->cur_speed * 10 >> 5);
++				}
++				GetString(buffer, str);
++				
++				if (GetStringWidth(buffer) > (w->widget[5].right - w->widget[5].left)-20)
++				{
++					str -= _patches.vehicle_speed;
++					if (dest != -1)
++						SetDParam(0, dest);
++				}else{
++					if (dest != -1) {
++						SetDParam(0, dest);
++						SetDParam(1, v->cur_speed * 10 >> 5);
++					} else {
++						SetDParam(0, v->cur_speed * 10 >> 5);
++					}
++				}
++			}
++
+ 		}
+ 
+ 		DrawStringCentered((w->widget[5].right - w->widget[5].left) / 2,
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 2238)
++++ ship_gui.c	(working copy)
+@@ -13,6 +13,7 @@
+ #include "player.h"
+ #include "engine.h"
+ #include "depot.h"
++#include "strings.h"
+ 
+ void Set_DPARAM_Ship_Build_Window(uint16 engine_number)
+ {
+@@ -486,6 +487,8 @@
+ 		Vehicle *v = GetVehicle(w->window_number);
+ 		uint32 disabled = 1<<8;
+ 		StringID str;
++		char buffer[512];
++		int32 dest = -1;
+ 
+ 		// Possible to refit?
+ 		if (ShipVehInfo(v->engine_type)->refittable &&
+@@ -514,16 +517,14 @@
+ 		} else {
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+-				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 10 >> 5);
+-				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
++				dest = v->current_order.station;
++				str = STR_HEADING_FOR_STATION;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+ 				Depot *depot = GetDepot(v->current_order.station);
+-				SetDParam(0, depot->town_index);
+-				SetDParam(1, v->cur_speed * 10 >> 5);
+-				str = STR_HEADING_FOR_SHIP_DEPOT + _patches.vehicle_speed;
++				dest = depot->town_index;
++				str = STR_HEADING_FOR_SHIP_DEPOT;
+ 			} break;
+ 
+ 			case OT_LOADING:
+@@ -533,12 +534,37 @@
+ 
+ 			default:
+ 				if (v->num_orders == 0) {
+-					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->cur_speed * 10 >> 5);
++					str = STR_NO_ORDERS;
+ 				} else
+ 					str = STR_EMPTY;
+ 				break;
+ 			}
++
++			if (v->current_order.type != OT_LOADING && v->current_order.type != OT_LEAVESTATION) 
++			{
++				str += _patches.vehicle_speed;
++				if (dest != -1) {
++					SetDParam(0, dest);
++					SetDParam(1, v->cur_speed * 10 >> 5);
++				} else {
++					SetDParam(0, v->cur_speed * 10 >> 5);
++				}
++				GetString(buffer, str);
++				
++				if (GetStringWidth(buffer) > (w->widget[5].right - w->widget[5].left)-20)
++				{
++					str -= _patches.vehicle_speed;
++					if (dest != -1)
++						SetDParam(0, dest);
++				}else{
++					if (dest != -1) {
++						SetDParam(0, dest);
++						SetDParam(1, v->cur_speed * 10 >> 5);
++					} else {
++						SetDParam(0, v->cur_speed * 10 >> 5);
++					}
++				}
++			}
+ 		}
+ 
+ 		DrawStringCentered((w->widget[5].right - w->widget[5].left) / 2,
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2238)
++++ train_gui.c	(working copy)
+@@ -14,6 +14,7 @@
+ #include "engine.h"
+ #include "vehicle_gui.h"
+ #include "depot.h"
++#include "strings.h"
+ 
+ int _traininfo_vehicle_pitch = 0;
+ 
+@@ -813,6 +814,8 @@
+ 	case WE_PAINT: {
+ 		Vehicle *v, *u;
+ 		StringID str;
++		char buffer[512];
++		int32 dest = -1;
+ 
+ 		v = GetVehicle(w->window_number);
+ 
+@@ -859,16 +862,14 @@
+ 		} else {
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+-				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
+-				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->u.rail.last_speed * 10 >> 4);
++				str = STR_HEADING_FOR_STATION;
++				dest = v->current_order.station;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+ 				Depot *dep = GetDepot(v->current_order.station);
+-				SetDParam(0, dep->town_index);
+-				str = STR_HEADING_FOR_TRAIN_DEPOT + _patches.vehicle_speed;
+-				SetDParam(1, v->u.rail.last_speed * 10 >> 4);
++				dest = dep->town_index;
++				str = STR_HEADING_FOR_TRAIN_DEPOT;
+ 			} break;
+ 
+ 			case OT_LOADING:
+@@ -877,20 +878,46 @@
+ 				break;
+ 
+ 			case OT_GOTO_WAYPOINT: {
+-				SetDParam(0, v->current_order.station);
+-				str = STR_HEADING_FOR_WAYPOINT + _patches.vehicle_speed;
+-				SetDParam(1, v->u.rail.last_speed * 10 >> 4);
++				str = STR_HEADING_FOR_WAYPOINT;
++				dest = v->current_order.station;
+ 				break;
+ 			}
+ 
+ 			default:
+ 				if (v->num_orders == 0) {
+-					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->u.rail.last_speed * 10 >> 4);
+-				} else
++					str = STR_NO_ORDERS;
++				} else {
+ 					str = STR_EMPTY;
++				}
+ 				break;
+ 			}
++
++			if (v->current_order.type != OT_LOADING && v->current_order.type != OT_LEAVESTATION) 
++			{
++				str += _patches.vehicle_speed;
++				if (dest != -1) {
++					SetDParam(0, dest);
++					SetDParam(1, v->u.rail.last_speed * 10 >> 4);
++				} else {
++					SetDParam(0, v->u.rail.last_speed * 10 >> 4);
++				}
++				GetString(buffer, str);
++				
++				if (GetStringWidth(buffer) > (w->widget[5].right - w->widget[5].left)-20)
++				{
++					str -= _patches.vehicle_speed;
++					if (dest != -1)
++						SetDParam(0, dest);
++				}else{
++					if (dest != -1) {
++						SetDParam(0, dest);
++						SetDParam(1, v->u.rail.last_speed * 10 >> 4);
++					} else {
++						SetDParam(0, v->u.rail.last_speed * 10 >> 4);
++					}
++				}
++			}
++				
+ 		}
+ 
+ 		DrawStringCentered((w->widget[5].right - w->widget[5].left) / 2,

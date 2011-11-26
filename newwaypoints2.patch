@@ -1,0 +1,131 @@
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2238)
++++ table/sprites.h	(working copy)
+@@ -45,7 +45,8 @@
+ 	SPR_CANALS_BASE		= 5126,
+ 	SPR_SLOPES_BASE		= SPR_CANALS_BASE + 70,
+ 	SPR_AUTORAIL_BASE		= SPR_SLOPES_BASE + 78,
+-	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
++	SPR_OPENTTD_BASE		= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
++	SPR_CHECKPOINT_BASE	= SPR_OPENTTD_BASE + 103, // OPENTTD_SPRITES_COUNT (defined in spritecache.c + 1)
+ 
+ 	SPR_BLOT = SPR_OPENTTD_BASE + 32, // colored circle (mainly used as vehicle profit marker and for sever compatibility)
+ 
+@@ -144,6 +145,10 @@
+ 	SPR_CHECKPOINT_X_2					= SPR_OPENTTD_BASE + 19,
+ 	SPR_CHECKPOINT_Y_1					= SPR_OPENTTD_BASE + 20,
+ 	SPR_CHECKPOINT_Y_2					= SPR_OPENTTD_BASE + 21,
++	SPR_NEW_CHECKPOINT_X_1				= SPR_CHECKPOINT_BASE + 0,
++	SPR_NEW_CHECKPOINT_X_2				= SPR_CHECKPOINT_BASE + 1,
++	SPR_NEW_CHECKPOINT_Y_1				= SPR_CHECKPOINT_BASE + 2,
++	SPR_NEW_CHECKPOINT_Y_2				= SPR_CHECKPOINT_BASE + 3,
+ 	OFFSET_TILEH_IMPOSSIBLE			= 0,
+ 	OFFSET_TILEH_1							= 14,
+ 	OFFSET_TILEH_2							= 15,
+Index: table/track_land.h
+===================================================================
+--- table/track_land.h	(revision 2238)
++++ table/track_land.h	(working copy)
+@@ -36,21 +36,34 @@
+ 	TILE_SEQ_END()
+ };
+ 
+-static const DrawTrackSeqStruct _track_waypoint_table_0[] = {
++static const DrawTrackSeqStruct _track_waypoint_table_0[] = { // Old waypoints NS
+ 	TILE_SEQ_BEGIN(0x83F4)
+ 	TILE_SEQ_LINE(0x8000 + SPR_OPENTTD_BASE+18,  0,  0,  16,  5)
+ 	TILE_SEQ_LINE(0x8000 + SPR_OPENTTD_BASE+19,  0, 11,  16,  5)
+ 	TILE_SEQ_END()
+ };
+ 
+-static const DrawTrackSeqStruct _track_waypoint_table_1[] = {
++static const DrawTrackSeqStruct _track_waypoint_table_1[] = { // Old waypoints EW
+ 	TILE_SEQ_BEGIN(0x83F3)
+ 	TILE_SEQ_LINE(0x8000 + SPR_OPENTTD_BASE+20,   0,  0, 5, 16)
+ 	TILE_SEQ_LINE(0x8000 + SPR_OPENTTD_BASE+21,  11,  0, 5, 16)
+ 	TILE_SEQ_END()
+ };
+ 
++static const DrawTrackSeqStruct _track_waypoint_table_2[] = { // New waypoints NS
++	TILE_SEQ_BEGIN(0x83F4)
++	TILE_SEQ_LINE(0x8000 + SPR_CHECKPOINT_BASE + 0,  0,  2,  16,  5)
++	TILE_SEQ_LINE(0x8000 + SPR_CHECKPOINT_BASE + 1, 0, 16,  16,  5)
++	TILE_SEQ_END()
++};
+ 
++static const DrawTrackSeqStruct _track_waypoint_table_3[] = { // New waypoints EW
++	TILE_SEQ_BEGIN(0x83F3)
++	TILE_SEQ_LINE(0x8000 + SPR_CHECKPOINT_BASE + 2,   2,  0, 5, 16)
++	TILE_SEQ_LINE(0x8000 + SPR_CHECKPOINT_BASE + 3,  13,  0, 5, 16)
++	TILE_SEQ_END()
++};
++
+ static const DrawTrackSeqStruct* const _track_depot_layout_table[] = {
+ 	_track_depot_layout_table_0,
+ 	_track_depot_layout_table_1,
+@@ -59,6 +72,8 @@
+ 
+ 	_track_waypoint_table_0,
+ 	_track_waypoint_table_1,
++	_track_waypoint_table_2,
++	_track_waypoint_table_3,
+ };
+ 
+ static const byte _track_sloped_sprites[14] = {
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2238)
++++ rail_cmd.c	(working copy)
+@@ -15,6 +15,7 @@
+ #include "sprite.h"
+ #include "depot.h"
+ #include "waypoint.h"
++#include "debug.h"
+ 
+ extern uint16 _custom_sprites_base;
+ 
+@@ -1400,7 +1401,9 @@
+ 	} else {
+ 		/* draw depots / waypoints */
+ 		const DrawTrackSeqStruct *drss;
+-		byte type = m5 & 0x3F; // 0-3: depots, 4-5: waypoints
++		byte type = m5 & 0x3F; // 0-3: depots, 4-6 waypoints
++		int railtype=(_map3_lo[ti->tile] & 0xF);
++		int typemod = 0;
+ 
+ 		if (!(m5 & (RAIL_TYPE_MASK&~RAIL_TYPE_SPECIAL)))
+ 			return;
+@@ -1416,7 +1419,6 @@
+ 				// emulate station tile - open with building
+ 				DrawTileSprites *cust = &stat->renderdata[2 + (m5 & 0x1)];
+ 				uint32 relocation = GetCustomStationRelocation(stat, ComposeWaypointStation(ti->tile), 0);
+-				int railtype=(_map3_lo[ti->tile] & 0xF);
+ 
+ 				/* We don't touch the 0x8000 bit. In all this
+ 				 * waypoint code, it is used to indicate that
+@@ -1442,8 +1444,11 @@
+ 			}
+ 		}
+ 
+-		drss = _track_depot_layout_table[type];
++		if (railtype > 0 && type > 3)
++			typemod = 2; 
+ 
++		drss = _track_depot_layout_table[type+typemod];
++
+ 		image = drss++->image;
+ 		if (image & 0x8000) image = (image & 0x7FFF) + tracktype_offs;
+ 
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2238)
++++ spritecache.c	(working copy)
+@@ -903,6 +903,7 @@
+ 
+ 		load_index = SPR_OPENTTD_BASE + OPENTTD_SPRITES_COUNT + 1;
+ 
++		load_index += LoadGrfFile("checkpoints.grf", load_index, i++);
+ 
+ 		/* Load newgrf sprites
+ 		 * in each loading stage, (try to) open each file specified in the config

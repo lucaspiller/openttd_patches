@@ -1,0 +1,89 @@
+Index: engine.c
+===================================================================
+--- engine.c	(revision 2367)
++++ engine.c	(working copy)
+@@ -1005,3 +1005,21 @@
+ 
+ 	return true;
+ }
++
++/**
++ * Calculates the maximum speed of a train vehicle.
++ * @param veh The vehicle to calculate the max speed of
++ * @return The maximum speed of the vehicle, or 0xFFFF if it has no max speed
++ */
++uint16 TrainVehSpeed(const Vehicle *veh)
++{
++	const RailVehicleInfo *rvi = RailVehInfo(veh->engine_type);
++
++	if (rvi->max_speed == 0)
++		return 0xFFFF;
++
++	if ((rvi->flags & RVI_WAGON) && (!true || GetWagonOverrideSpriteSet(veh->engine_type, veh->u.rail.first_engine) != NULL))
++		return 0xFFFF;
++
++	return rvi->max_speed;
++}
+Index: engine.h
+===================================================================
+--- engine.h	(revision 2367)
++++ engine.h	(working copy)
+@@ -136,6 +136,8 @@
+ #define GetCustomVehicleSprite(v, direction) GetCustomEngineSprite(v->engine_type, v, direction)
+ #define GetCustomVehicleIcon(et, direction) GetCustomEngineSprite(et, NULL, direction)
+ 
++uint16 TrainVehSpeed(const Vehicle *veh);
++
+ typedef enum VehicleTrigger {
+ 	VEHICLE_TRIGGER_NEW_CARGO = 1,
+ 	// Externally triggered only for the first vehicle in chain
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2367)
++++ train_cmd.c	(working copy)
+@@ -172,8 +172,7 @@
+ 		power += rvi->power * 746;	//[W]
+ 		drag_coeff += 3;
+ 
+-		if (rvi->max_speed != 0)
+-			max_speed = min(rvi->max_speed, max_speed);
++		max_speed = min(TrainVehSpeed(u), max_speed);
+ 
+ 		if (u->u.rail.track == 0x80)
+ 			max_speed = 61;
+@@ -252,8 +251,7 @@
+ 		power += rvi->power;
+ 
+ 		// limit the max speed to the speed of the slowest vehicle.
+-		if (rvi->max_speed != 0 && rvi->max_speed <= max_speed)
+-			max_speed = rvi->max_speed;
++		max_speed = min(TrainVehSpeed(u), max_speed);
+ 
+ 		// weight is the sum of the weight of the wagon and the weight of the cargo.
+ 		weight += rvi->weight;
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2367)
++++ train_gui.c	(working copy)
+@@ -998,8 +998,7 @@
+ 			tot_cargo[u->cargo_type][0] += u->cargo_count;
+ 			tot_cargo[u->cargo_type][1] += u->cargo_cap;
+ 		}
+-		if (RailVehInfo(u->engine_type)->max_speed != 0)
+-			max_speed = min(max_speed, RailVehInfo(u->engine_type)->max_speed);
++		max_speed = min(TrainVehSpeed(u), max_speed);
+ 	} while ( (u = u->next) != NULL);
+ 
+ 	/*	set scroll-amount seperately from counting, as to not
+Index: newgrf.c
+===================================================================
+--- newgrf.c	(revision 2367)
++++ newgrf.c	(working copy)
+@@ -218,7 +218,6 @@
+ 				uint16 speed = grf_load_word(&buf);
+ 
+ 				rvi[i].max_speed = speed;
+-				dewagonize(speed, engine + i);
+ 			}
+ 		}	break;
+ 		case 0x0B: {	/* Power */

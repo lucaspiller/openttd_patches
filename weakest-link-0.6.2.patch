@@ -1,0 +1,100 @@
+Index: src/settings.cpp
+===================================================================
+--- src/settings.cpp	(revision 14220)
++++ src/settings.cpp	(working copy)
+@@ -1331,6 +1331,7 @@
+ 	  SDTG_STR("connect_to_ip",         SLE_STRB, S, 0, _network_default_ip,           NULL,               STR_NULL, NULL),
+ 	  SDTG_STR("network_id",            SLE_STRB, S, 0, _network_unique_id,            NULL,               STR_NULL, NULL),
+ 	 SDTG_BOOL("autoclean_companies",             S, 0, _network_autoclean_companies,  false,              STR_NULL, NULL),
++	  SDTG_BOOL("autoclean_weakest_companies",    S, 0, _network_autoclean_weakest_companies,  false,              STR_NULL, NULL),
+ 	  SDTG_VAR("autoclean_unprotected",SLE_UINT8, S, 0, _network_autoclean_unprotected,12, 0,     60,   0, STR_NULL, NULL),
+ 	  SDTG_VAR("autoclean_protected",  SLE_UINT8, S, 0, _network_autoclean_protected,  36, 0,    180,   0, STR_NULL, NULL),
+ 	  SDTG_VAR("max_companies",        SLE_UINT8, S, 0, _network_game_info.companies_max,   8, 1, MAX_PLAYERS, 0, STR_NULL, NULL),
+Index: src/console_cmds.cpp
+===================================================================
+--- src/console_cmds.cpp	(revision 14220)
++++ src/console_cmds.cpp	(working copy)
+@@ -1651,6 +1651,8 @@
+ 	IConsoleVarHookAdd("autoclean_protected",    ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
+ 	IConsoleVarRegister("autoclean_unprotected", &_network_autoclean_unprotected, ICONSOLE_VAR_BYTE, "Automatically shut down inactive companies after the given amount of months");
+ 	IConsoleVarHookAdd("autoclean_unprotected",  ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
++	IConsoleVarRegister("autoclean_weakest_companies",   &_network_autoclean_weakest_companies, ICONSOLE_VAR_BOOLEAN, "Automatically shut down the weakest company at the end of the year.");
++	IConsoleVarHookAdd("autoclean_weakest_companies",    ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
+ 	IConsoleVarRegister("restart_game_year",     &_network_restart_game_year, ICONSOLE_VAR_UINT16, "Auto-restart the server when Jan 1st of the set year is reached. Use '0' to disable this");
+ 	IConsoleVarHookAdd("restart_game_year",      ICONSOLE_HOOK_ACCESS, ConHookServerOnly);
+ 
+Index: src/network/network_server.cpp
+===================================================================
+--- src/network/network_server.cpp	(revision 14220)
++++ src/network/network_server.cpp	(working copy)
+@@ -1472,6 +1472,49 @@
+ 	}
+ }
+ 
++/* Check if the server has autoclean_weakest_company activated and clean the weakest company */
++static void NetworkCheckWeakestCompanies()
++{
++	NetworkTCPSocketHandler *cs;
++	const NetworkClientInfo *ci;
++	const Player *p;
++	PlayerID weakest = PLAYER_SPECTATOR;
++	PlayerID server_company = PLAYER_SPECTATOR;
++
++	if (!_network_autoclean_weakest_companies) return;
++
++	if (!_network_dedicated) {
++		ci = NetworkFindClientInfoFromIndex(NETWORK_SERVER_INDEX);
++		if (IsValidPlayer(ci->client_playas)) server_company = ci->client_playas;
++	}
++
++	/* Go through all the comapnies */
++	FOR_ALL_PLAYERS(p) {
++		/* Skip inactive companies, and server company */
++		if (!p->is_active || p->is_ai || (IsValidPlayer(server_company) && p->index == server_company)) continue;
++		
++		/* Skip protected (new) companies */
++		if (_cur_year - p->inaugurated_year < 6) return;
++		
++		if (!IsValidPlayer(weakest) || _network_player_info[p->index].company_value < _network_player_info[weakest].company_value)
++			weakest = p->index;
++	}
++	
++	if (IsValidPlayer(weakest)) {
++		/* Kick clients */
++		FOR_ALL_CLIENTS(cs) {
++			ci = DEREF_CLIENT_INFO(cs);
++			
++			if (ci->client_playas == weakest)
++				SEND_COMMAND(PACKET_SERVER_ERROR)(NetworkFindClientStateFromIndex(ci->client_index), NETWORK_ERROR_KICKED);
++		}
++		
++		/* Remove company */
++		DoCommandP(0, 2, weakest, NULL, CMD_PLAYER_CTRL);
++		IConsolePrintF(_icolour_def, "Auto-cleaned weakest company #%d", weakest + 1);
++	}
++}
++
+ // This function changes new_name to a name that is unique (by adding #1 ...)
+ //  and it returns true if that succeeded.
+ bool NetworkFindName(char new_name[NETWORK_CLIENT_NAME_LENGTH])
+@@ -1619,6 +1662,7 @@
+ void NetworkServerYearlyLoop()
+ {
+ 	NetworkCheckRestartMap();
++	NetworkCheckWeakestCompanies();
+ }
+ 
+ void NetworkServerMonthlyLoop()
+Index: src/network/network_internal.h
+===================================================================
+--- src/network/network_internal.h	(revision 14220)
++++ src/network/network_internal.h	(working copy)
+@@ -174,6 +174,8 @@
+ VARDEF uint8 _network_autoclean_unprotected; // Remove a company after X months
+ VARDEF uint8 _network_autoclean_protected;   // Unprotect a company after X months
+ 
++VARDEF bool _network_autoclean_weakest_companies; // Remove weakest companies at end of year
++
+ VARDEF Year _network_restart_game_year;      // If this year is reached, the server automaticly restarts
+ VARDEF uint8 _network_min_players;           // Minimum number of players for game to unpause
+ 

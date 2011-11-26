@@ -1,0 +1,477 @@
+Index: landscape.c
+===================================================================
+--- landscape.c	(revision 2411)
++++ landscape.c	(working copy)
+@@ -43,6 +43,7 @@
+ 	0,0,0,0,0,0,0,16,0,0,0,17,0,15,18,0,
+ };
+ 
++int _sintable[1024],_costable[1024];
+ 
+ void FindLandscapeHeightByTile(TileInfo *ti, TileIndex tile)
+ {
+@@ -617,11 +618,453 @@
+ 	}
+ }
+ 
++/**
++ * New map generator based on Korenn's OpenTTD Challenge Spinoff
++*/
++
++byte inline tilez(uint x,uint y)
++{
++	return (_map_type_and_height[TILE_XY((x),(y))] & 0xF);
++}
++
++void GenerateBaseTerrain()
++{
++	uint16 x, y;
++
++	for (y = 2; y < MapSizeY()-2; y++)
++	{
++		for (x = 2; x < MapSizeX()-2; x++)
++		{
++			_map_type_and_height[TILE_XY(x,y)] = 1;
++		}
++	}
++}
++
++void GenerateShoreline(int dir)
++{
++	int y, x, as, ae, bs, be;
++
++	be = (Random() % 10) + 25;
++
++	assert(dir > -1 && dir < 4);
++	switch(dir)
++	{
++	case 0:
++		for (y = 0; y < MapSizeY(); y++)
++		{
++			for (x = 0; x < be; x++)
++			{
++				_map_type_and_height[TILE_XY(x,y)] = 0;
++			}
++
++			be += (Random() % 3) - 1;
++			if (be > 35)
++				be--;
++			if (be < 5)
++				be++;
++		}
++		break;
++	case 1:
++		for (x = 0; x < MapSizeX(); x++)
++		{
++			for (y = 0; y < be; y++)
++			{
++				_map_type_and_height[TILE_XY(x,y)] = 0;
++			}
++
++			be += (Random() % 3) - 1;
++			if (be > 35)
++				be--;
++			if (be < 5)
++				be++;
++		}
++		break;
++	case 2:
++		for (y = 0; y < MapSizeY(); y++)
++		{
++			for (x = MapSizeX(); x > MapSizeX()-be; x--)
++			{
++				_map_type_and_height[TILE_XY(x,y)] = 0;
++			}
++
++			be += (Random() % 3) - 1;
++			if (be > 35)
++				be--;
++			if (be < 5)
++				be++;
++		}
++		break;
++	case 3:
++		for (x = 0; x < MapSizeX(); x++)
++		{
++			for (y = MapSizeY(); y > MapSizeY()-be; y--)
++			{
++				_map_type_and_height[TILE_XY(x,y)] = 0;
++			}
++
++			be += (Random() % 3) - 1;
++			if (be > 35)
++				be--;
++			if (be < 5)
++				be++;
++		}
++		break;
++	}
++
++}
++
++void RiverLine(int x1, int x2, int y)
++{
++	int t;
++	if (x1 > x2)
++	{
++		t = x1;
++		x1 = x2;
++		x2 = t;
++	}
++	for (t = x1; t <= x2; t++)
++	{
++		if (t >= 0 && t < MapSizeX() && y >= 0 && y < MapSizeY())
++			_map_type_and_height[TILE_XY(t,y)]=0;
++	}
++
++}
++
++void RiverPoly(int x1, int y1, int x2, int y2, int x3, int y3)
++{
++	int tx,ty,tx2;
++	int dx,dx2;
++	// render river poly
++
++	// swap coords;
++	if (y1 > y2)
++	{
++		tx = x1; ty = y1;
++		x1 = x2; y1 = y2;
++		x2 = tx; y2 = ty;
++	}
++	
++	if (y1 > y3)
++	{
++		tx = x1; ty = y1;
++		x1 = x3; y1 = y3;
++		x3 = tx; y3 = ty;
++	}
++
++	if (y2 > y3)
++	{
++		tx = x2; ty = y2;
++		x2 = x3; y2 = y3;
++		x3 = tx; y3 = ty;
++	}
++	if (y3 - y1 == 0) return;
++	dx2 = ((x3 - x1)<<8)/(y3-y1);
++	tx = tx2 = x1 << 8;
++	// van y1 naar y2
++	if (y2 - y1 != 0)
++	{
++		int y;
++		dx = ((x2 - x1)<<8)/(y2-y1);
++		for (y = y1; y < y2; y++)
++		{
++			tx +=dx;
++			tx2 += dx2;
++
++			RiverLine(tx>>8,tx2>>8,y);
++		}
++	}
++	tx = x2 << 8;
++	// van y2 naar y3
++	if (y3 - y2 != 0)
++	{
++		int y;
++		dx = ((x3 - x2)<<8)/(y3-y2);
++		for (y = y2; y <= y3; y++)
++		{
++			tx +=dx;
++			tx2 += dx2;
++
++			RiverLine(tx>>8,tx2>>8,y);
++		}
++	}
++}
++
++void GenerateRiver(int dir)
++{
++	int x, y, lx, ly, rx, ry, quit, i, orgdir, len = 0;
++	const int length = 8, width = 10>>1;
++
++	for (i = 0; i < 1024;i++)
++	{
++		double t = 2*3.14159265*i/1024;
++		_sintable[i] = 255 * sin(t);
++		_costable[i] = 255 * cos(t);
++	}
++
++	// calculate start position
++	assert(dir > -1 && dir < 4);
++	orgdir = dir;
++	switch(dir)
++	{
++	case 0:
++		x = 0;
++		y = (Random() % (MapSizeY() / 2)) + (MapSizeY() / 8);
++		break;
++	case 1:
++		x = (Random() % (MapSizeX() / 2)) + (MapSizeX() / 8);
++		y = 0;
++		break;
++	case 2:
++		x = MapSizeX();
++		y = (Random() % (MapSizeY() / 2)) + (MapSizeY() / 8);
++		break;
++	case 3:
++		x = (Random() % (MapSizeX() / 2)) + (MapSizeX() / 8);
++		y = MapSizeY();
++	}
++	quit = 0;
++	dir <<=8;	// 256 gradations between straight angles. angle [0..1023]
++
++	rx = x + (width*_costable[(dir+256)%1024]>>8);
++	ry = y - (width*_sintable[(dir+256)%1024]>>8);
++
++	lx = x + (width*_costable[(dir+768)%1024]>>8);
++	ly = y - (width*_sintable[(dir+768)%1024]>>8);
++	
++	while (!quit)
++	{
++		int newrx,newry,newlx,newly;
++		int tx,ty,olddir, w;
++		uint32 chance;
++		
++		// calculate riverpiece
++		newrx = rx + (length*_costable[dir%1024]>>8);
++		newry = ry + (length*_sintable[dir%1024]>>8);
++
++		newlx = lx + (length*_costable[dir%1024]>>8);
++		newly = ly + (length*_sintable[dir%1024]>>8);
++		
++		// render riverpiece
++		tx = newrx - rx;
++		ty = newry - ry;
++
++		RiverPoly(lx,ly,rx,ry,newlx,newly);
++		RiverPoly(rx,ry,newrx,newry,newlx,newly);
++ 
++		if (rx >= 0 && rx < MapSizeX() && ry >= 0 && ry < MapSizeY()) _map_type_and_height[TILE_XY(rx,ry)]=0;
++		if (lx >= 0 && lx < MapSizeX() && ly >= 0 && ly < MapSizeY()) _map_type_and_height[TILE_XY(lx,ly)]=0;
++		if (newrx >= 0 && newrx < MapSizeX() && newry >= 0 && newry < MapSizeY()) _map_type_and_height[TILE_XY(newrx,newry)]=0;
++		if (newlx >= 0 && newlx < MapSizeX() && newly >= 0 && newly < MapSizeY()) _map_type_and_height[TILE_XY(newlx,newly)]=0;
++
++		rx = newrx;
++		ry = newry;
++		lx = newlx;
++		ly = newly;
++
++		// calculate new direction & quit if done
++		dir += (Random() % 6) - 3;
++		olddir = dir;
++
++		if (len > 2048)
++			quit = 1;
++
++		switch(orgdir)
++		{
++		case 0:
++			if (ry < 0)
++				quit = 1;
++			break;
++		case 1:
++			if (rx >= MapSizeX())
++				quit = 1;
++			break;
++		case 2:
++			if (ry >= MapSizeY())
++				quit = 1;
++			break;
++		case 3:
++			if (rx < 0)
++				quit = 1;
++		}
++
++		// render river bend.
++		{
++			int deltadir;
++
++			deltadir = olddir - dir;
++			if (deltadir <= 0)	// counter clockwise
++			{
++				int d;
++				for (d=olddir;d <= dir;d++)
++				{
++					int t;
++					for (t=0;t <= width*2;t++)
++					{
++						int x = lx+(t*_costable[(d+768)%1024]>>8);
++						int y = ly+(t*_sintable[(d+768)%1024]>>8);
++						if (x >= 0 && x < MapSizeX() && y >= 0 && y < MapSizeY())
++							_map_type_and_height[TILE_XY(x,y)]=0;
++					}
++				}
++				rx = lx + (width*2*_costable[(dir+768)%1024]>>8);
++				ry = ly + (width*2*_sintable[(dir+768)%1024]>>8);
++				
++			}
++			else		// counter-clockwise
++			{
++				int d;
++				for (d=olddir;d >= dir;d--)
++				{
++					int t;
++					for (t=0;t <= width*2;t++)
++					{
++						int x = rx+(t*_costable[(d+256)%1024]>>8);
++						int y = ry+(t*_sintable[(d+256)%1024]>>8);
++						if (x >= 0 && x < MapSizeX() && y >= 0 && y < MapSizeY())
++							_map_type_and_height[TILE_XY(x,y)]=0;
++					}
++				}
++				lx = rx + (width*2*_costable[(dir+256)%1024]>>8);
++				ly = ry + (width*2*_sintable[(dir+256)%1024]>>8);
++			}
++		len++;
++		}
++		// next piece of river!
++	}
++}
++
++int Up(uint tile)
++{
++	uint x = TileX(tile);
++	uint y = TileY(tile);
++	if (x > 1 && x < MapMaxX() - 1 && y > 1 && y < MapMaxY() - 1)
++	{
++		int z = tilez(x,y);
++		if (z==15 || z==0) return 0;
++		z++;
++		if (z-tilez(x-1,y  )>1)
++			if (!Up(TILE_XY(x-1,y  ))) return 0;
++		if (z-tilez(x  ,y-1)>1)
++			if (!Up(TILE_XY(x  ,y-1))) return 0;
++		if (z-tilez(x+1,y  )>1)
++			if (!Up(TILE_XY(x+1,y  ))) return 0;
++		if (z-tilez(x  ,y+1)>1)
++			if (!Up(TILE_XY(x  ,y+1))) return 0;
++		_map_type_and_height[tile]++;
++	}
++	else
++		return 0;
++	return 1;
++}
++
++void GenerateMountainRanges()
++{
++	uint16 num = 0.0001 * (MapSizeX() * MapSizeY());	// number of mountainranges
++	int length = 1600;	// length of mountainranges
++	int curdir,prevdir,newdir;
++	do
++	{
++		uint32 r = Random();
++		uint tile;
++		int genz = (r>>2)&0x7+8; // mountaing range height
++		int z = genz;
++		int l = length;
++		prevdir = curdir = r&3;
++		do
++		{	
++			tile = TILE_MASK(Random());
++		} 
++		while (_map_type_and_height[tile]==0);
++
++		do
++		{
++			uint32 s;
++			uint newpos,i,j;
++			byte q;
++			int x = TileX(tile),y = TileY(tile);
++			int fout;
++			// terraform on tile
++			while(tilez(x,y)<z)
++			{
++				if (!Up(tile)) break;
++				// for hills around the mountains
++			}
++			s = Random();
++			//if (s&0xFF<64)
++			for (i=0;i<(s&0x7)+1;i++)
++			{
++				for (j=0;j<((s>>3)&0x7)+1;j++)
++				{
++					if (tilez(x,y)<((s>>6)&0x7)+1)
++						Up(tile+TILE_XY((s>>9)&31-15+j,(s>>14)&31-15)+i);
++				}
++			}
++
++			//	choose new direction and height
++
++			do
++			{
++				s = Random();
++				q = s&0xFF;
++				if (q>=192)
++				{
++					q-=192;
++					if (q>=48) newdir = 0;
++					else if (q>=32) newdir = 1;
++					else if (q>=16) newdir = 2;
++					else newdir = 3;
++				}
++				else newdir = curdir;
++				fout = 0;
++				switch(newdir)
++				{
++				case 0:
++					if (x < 2) fout = 1;
++					newpos = TILE_XY(-1,0);
++					break;
++				case 1:
++					if (y < 2) fout = 1;
++					newpos = TILE_XY(0,-1);
++					break;
++				case 2:
++					if (x > MapMaxX() - 1) fout = 1;
++					newpos = TILE_XY(1,0);
++					break;
++				case 3:
++					if (y > MapMaxY() - 1) fout = 1;
++					newpos = TILE_XY(0,1);
++				break;
++				}
++			} while(fout);
++			curdir = newdir;
++			tile +=newpos;
++
++			q = (s>>8)&0xFF;
++			if (q>=192)
++			{
++				q-=192;
++				if (q >= 32)
++					if (z<min(15,genz+4))z++;
++				else
++					if (z>max(4,genz-4))z--;
++			}
++
++		} while(--l);
++
++	}while (--num);
++
++}
++
++/**
++/* End new map generator
++*/
++
+ void GenerateLandscape(void)
+ {
+ 	uint i;
+ 	uint flag;
+ 	uint32 r;
++	int dir = (Random() % 2) + 1;
+ 
+ 	if (_opt.landscape == LT_HILLY) {
+ 		for (i = ScaleByMapSize((Random() & 0x7F) + 950); i != 0; --i)
+@@ -650,6 +1093,10 @@
+ 			GenerateTerrain(_opt.diff.terrain_type, 0);
+ 	}
+ 
++	GenerateBaseTerrain();
++	GenerateShoreline(dir);
++	GenerateRiver(dir);
++	GenerateMountainRanges();
+ 	ConvertGroundTilesIntoWaterTiles();
+ 
+ 	if (_opt.landscape == LT_DESERT)

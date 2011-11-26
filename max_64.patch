@@ -1,0 +1,193 @@
+Index: graph_gui.c
+===================================================================
+--- graph_gui.c	(revision 2637)
++++ graph_gui.c	(working copy)
+@@ -17,7 +17,7 @@
+ /* GENERIC GRAPH DRAWER */
+ /************************/
+ 
+-enum {GRAPH_NUM = 16};
++enum {GRAPH_NUM = 64};
+ 
+ typedef struct GraphDrawer {
+ 	uint sel; // bitmask of the players *excluded* (e.g. 11111111 means that no players are shown)
+@@ -57,6 +57,7 @@
+ 
+ 	/* the colors and cost array of GraphDrawer must accomodate
+ 	 * both values for cargo and players. So if any are higher, quit */
++	 
+ 	assert(GRAPH_NUM >= NUM_CARGO && GRAPH_NUM >= MAX_PLAYERS);
+ 
+ 	color = _color_list[gw->bg_line_color].window_color_1b;
+@@ -836,7 +837,9 @@
+ 
+ 		qsort(plist, pl_num, sizeof(Player*), _perf_hist_comp);
+ 
+-		i = 0;
++		SetVScrollCount(w, pl_num);
++
++		i = w->vscroll.pos;
+ 		do {
+ 			SetDParam(0, i + STR_01AC_1ST);
+ 			p = plist[i];
+@@ -845,8 +848,10 @@
+ 			SetDParam(3, GetPlayerNameString(p->index, 4));
+ 			SetDParam(5, GetPerformanceTitleFromValue(p->old_economy[1].performance_history));
+ 
+-			DrawString(2, 15 + i * 10, i == 0 ? STR_7054 : STR_7055, 0);
+-			DrawPlayerIcon(p->index, 27, 16 + i * 10);
++			DrawString(2, 15 + (i - w->vscroll.pos) * 10, i == 0 ? STR_7054 : STR_7055, 0);
++			DrawPlayerIcon(p->index, 27, 16 + (i - w->vscroll.pos) * 10);
++			if (i + 1>= w->vscroll.cap + w->vscroll.pos)
++				break;
+ 		} while (++i != pl_num);
+ 
+ 		break;
+@@ -859,6 +864,7 @@
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,											STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   399,     0,    13, STR_7053_COMPANY_LEAGUE_TABLE,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   399,    14,    96, 0x0,														STR_NULL},
++{  WWT_SCROLLBAR,   RESIZE_NONE,   14,   388,   399,    14,   96, 0x1,												STR_0190_SCROLL_BAR_SCROLLS_LIST},
+ {   WIDGETS_END},
+ };
+ 
+@@ -872,7 +878,10 @@
+ 
+ void ShowCompanyLeagueTable(void)
+ {
+-	AllocateWindowDescFront(&_company_league_desc,0);
++	Window *w;
++	w = AllocateWindowDescFront(&_company_league_desc,0);
++	w->vscroll.pos = 0;
++	w->vscroll.cap = 8;
+ }
+ 
+ /*****************************/
+Index: engine.h
+===================================================================
+--- engine.h	(revision 2637)
++++ engine.h	(working copy)
+@@ -77,7 +77,7 @@
+ 	PlayerID preview_player;
+ 	byte preview_wait;
+ 	byte railtype;
+-	PlayerID player_avail;
++	uint64 player_avail;
+ 	byte type;				// type, ie VEH_Road, VEH_Train, etc. Same as in vehicle.h
+ } Engine;
+ 
+Index: network.c
+===================================================================
+--- network.c	(revision 2637)
++++ network.c	(working copy)
+@@ -1310,7 +1310,7 @@
+ 
+ 	/* XXX - Hard number here, because the strings can currently handle no more
+ 	    than 10 clients -- TrueLight */
+-	_network_game_info.clients_max = 10;
++	_network_game_info.clients_max = 64;
+ 
+ 	// Let's load the network in windows
+ 	#if defined(WIN32)
+Index: player.h
+===================================================================
+--- player.h	(revision 2637)
++++ player.h	(working copy)
+@@ -194,7 +194,7 @@
+ void UpdatePlayerMoney32(Player *p);
+ #define FOR_ALL_PLAYERS(p) for(p=_players; p != endof(_players); p++)
+ 
+-#define MAX_PLAYERS 8
++#define MAX_PLAYERS 64
+ VARDEF Player _players[MAX_PLAYERS];
+ 
+ static inline Player* GetPlayer(uint i)
+Index: player_gui.c
+===================================================================
+--- player_gui.c	(revision 2637)
++++ player_gui.c	(working copy)
+@@ -243,8 +243,8 @@
+ 	switch(e->event) {
+ 	case WE_PAINT: {
+ 		Player *p;
+-		uint used_colors = 0;
+-		int num_free = 16;
++		uint64 used_colors = 0;
++		int num_free = 64;
+ 		int x,y,pos;
+ 		int i;
+ 
+@@ -262,7 +262,7 @@
+ 		y = 17;
+ 		pos = w->vscroll.pos;
+ 
+-		for(i=0; i!=16; i++) {
++		for(i=0; i!=64; i++) {
+ 			if (!(used_colors & 1) && --pos < 0 && pos >= -8) {
+ 				DrawString(x + 30, y, STR_00D1_DARK_BLUE + i, 2);
+ 				DrawSprite((i << 16) + 0x3078C1A, x + 14, y + 4);
+@@ -283,7 +283,7 @@
+ 			item += w->vscroll.pos;
+ 			used_colors = WP(w,def_d).data_1;
+ 
+-			for(i=0; i!=16; i++) {
++			for(i=0; i!=64; i++) {
+ 				if (!(used_colors & 1) && --item < 0) {
+ 					DoCommandP(0, 0, i, NULL, CMD_SET_PLAYER_COLOR);
+ 					DeleteWindow(w);
+Index: network_gui.c
+===================================================================
+--- network_gui.c	(revision 2637)
++++ network_gui.c	(working copy)
+@@ -649,6 +649,7 @@
+ {
+ 	switch(e->event) {
+ 	case WE_PAINT: {
++	
+ 		int y = NET_PRC__OFFSET_TOP_WIDGET_COMPANY, pos;
+ 
+ 		w->disabled_state = (_selected_company_item == -1) ? 1 << 7 : 0;
+@@ -660,6 +661,8 @@
+ 		if (_network_lobby_company_count == 0)
+ 			SETBIT(w->disabled_state, 9);
+ 
++		SetVScrollCount(w, _network_lobby_company_count);
++
+ 		DrawWindowWidgets(w);
+ 
+ 		SetDParamStr(0, _selected_item->info.server_name);
+@@ -685,7 +688,7 @@
+ 
+ 			pos++;
+ 			y += NET_PRC__SIZE_OF_ROW_COMPANY;
+-			if (pos >= w->vscroll.cap)
++			if (pos >= w->vscroll.cap + w->vscroll.pos)
+ 				break;
+ 		}
+ 
+@@ -836,7 +839,7 @@
+ 	w = AllocateWindowDesc(&_network_lobby_window_desc);
+ 	strcpy(_edit_str_buf, "");
+ 	w->vscroll.pos = 0;
+-	w->vscroll.cap = 8;
++	w->vscroll.cap = 10;
+ }
+ 
+ 
+Index: misc_cmd.c
+===================================================================
+--- misc_cmd.c	(revision 2637)
++++ misc_cmd.c	(working copy)
+@@ -34,7 +34,7 @@
+ 	Player *p, *pp;
+ 	byte colour = (byte)p2;
+ 
+-	if (p2 >= 16) return CMD_ERROR; // max 16 colours
++	if (p2 >= 64) return CMD_ERROR; // max 64 colours
+ 
+ 	p = GetPlayer(_current_player);
+ 
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream

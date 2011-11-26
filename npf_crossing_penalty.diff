@@ -1,0 +1,42 @@
+Index: npf.c
+===================================================================
+--- npf.c	(revision 2364)
++++ npf.c	(working copy)
+@@ -309,9 +309,12 @@
+ 				break;
+ 			}
+ 			/* Fall through if above if is false, it is a bridge
+-			 * then. We treat that as ordinary rail */
++			 * then. We treat that as ordinary road */
+ 		case MP_STREET:
+ 			cost = NPF_TILE_LENGTH;
++			/* Increase the cost for level crossings */
++			if ((_map5[tile] & 0xF0) == 0x10)
++				cost += _patches.npf_crossing_penalty;
+ 			break;
+ 		default:
+ 			break;
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2364)
++++ variables.h	(working copy)
+@@ -215,6 +215,7 @@
+ 	uint32 npf_rail_depot_reverse_penalty; /* The penalty for reversing in depots */
+ 	uint32 npf_buoy_penalty; /* The penalty for going over (through) a buoy */
+ 	uint32 npf_water_curve_penalty; /* The penalty for curves */
++	uint32 npf_crossing_penalty; /* The penalty for level crossings */
+ 
+ 	bool population_in_label; // Show the population of a town in his label?
+ } Patches;
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2364)
++++ settings.c	(working copy)
+@@ -975,6 +975,7 @@
+ 	 * rail curve penalty, since ships (realisticly) have more trouble with
+ 	 * making turns */
+ 	{"npf_water_curve_penalty",     SDT_UINT32, (void*)(NPF_TILE_LENGTH / 4),   &_patches.npf_water_curve_penalty,      NULL},
++	{"npf_crossing_penalty",        SDT_UINT32, (void*)500,                     &_patches.npf_crossing_penalty,         NULL},
+ 
+ 	{NULL,                          0,          NULL,                           NULL,                                   NULL}
+ };

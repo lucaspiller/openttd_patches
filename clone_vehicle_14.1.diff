@@ -1,0 +1,1284 @@
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 2758)
++++ aircraft_cmd.c	(working copy)
+@@ -332,7 +332,7 @@
+ 				(_m[tile].m5 == 32 || _m[tile].m5 == 65 || _m[tile].m5 == 86);
+ }
+ 
+-static bool CheckStoppedInHangar(Vehicle *v)
++bool CheckStoppedInHangar(Vehicle *v)
+ {
+ 	if (!(v->vehstatus & VS_STOPPED) || !IsAircraftHangarTile(v->tile)) {
+ 		_error_message = STR_A01B_AIRCRAFT_MUST_BE_STOPPED;
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2758)
++++ lang/english.txt	(working copy)
+@@ -2404,6 +2404,12 @@
+ STR_881D_NEW_MONORAIL_VEHICLES                                  :{WHITE}New Monorail Vehicles
+ STR_881E_NEW_MAGLEV_VEHICLES                                    :{WHITE}New Maglev Vehicles
+ STR_881F_BUILD_VEHICLE                                          :{BLACK}Build Vehicle
++STR_CLONE_ROAD_VEHICLE                                          :{BLACK}Clone Vehicle
++STR_CLONE_ROAD_VEHICLE_INFO 	                                :{BLACK}This will build a copy of the road vehicle
++STR_CLONE_ROAD_VEHICLE_DEPOT_INFO	                        :{BLACK}This will build a copy of a road vehicle. Click this button and then on a road vehicle inside or outside the depot
++STR_CLONE_TRAIN                                     		:{BLACK}Clone Train
++STR_CLONE_TRAIN_INFO 	                  			:{BLACK}This will build a copy of the train including all cars
++STR_CLONE_TRAIN_DEPOT_INFO	                        	:{BLACK}This will build a copy of a train including all cars. Click this button and then on a train inside or outside the depot
+ STR_8820_RENAME                                                 :{BLACK}Rename
+ STR_8823_SKIP                                                   :{BLACK}Skip
+ STR_8824_DELETE                                                 :{BLACK}Delete
+@@ -2560,6 +2566,9 @@
+ STR_9807_MUST_BUILD_SHIP_DEPOT_FIRST                            :{WHITE}Must build ship depot first
+ STR_9808_NEW_SHIPS                                              :{WHITE}New Ships
+ STR_9809_BUILD_SHIP                                             :{BLACK}Build Ship
++STR_CLONE_SHIP                                              	:{BLACK}Clone Ship
++STR_CLONE_SHIP_INFO 	                                        :{BLACK}This will build a copy of the ship
++STR_CLONE_SHIP_DEPOT_INFO	                          	:{BLACK}This will build a copy of a ship. Click this button and then on a ship inside or outside the depot
+ STR_980B_SHIP_MUST_BE_STOPPED_IN                                :{WHITE}Ship must be stopped in depot
+ STR_980C_CAN_T_SELL_SHIP                                        :{WHITE}Can't sell ship...
+ STR_980D_CAN_T_BUILD_SHIP                                       :{WHITE}Can't build ship...
+@@ -2624,6 +2633,9 @@
+ STR_A001_CAN_T_BUILD_AIRPORT_HERE                               :{WHITE}Can't build airport here...
+ STR_A002_AIRCRAFT_HANGAR                                        :{WHITE}{STATION} Aircraft Hangar
+ STR_A003_NEW_AIRCRAFT                                           :{BLACK}New Aircraft
++STR_CLONE_AIRCRAFT                                           	:{BLACK}Clone Aircraft
++STR_CLONE_AIRCRAFT_INFO                                        	:{BLACK}This will build a copy of the aircraft
++STR_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW                          	:{BLACK}This will build a copy of an aircraft. Click this button and then on an aircraft inside or outside the hangar
+ STR_A004_INFORMATION                                            :{BLACK}Information
+ STR_A005_NEW_AIRCRAFT                                           :{WHITE}New Aircraft
+ STR_A006_BUILD_AIRCRAFT                                         :{BLACK}Build Aircraft
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 2758)
++++ aircraft_gui.c	(working copy)
+@@ -89,7 +89,16 @@
+ 	}
+ }
+ 
++void CcCloneAircraft(bool success, uint tile, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
+ 
++	if (success) {
++		v = GetVehicle(_new_aircraft_id);
++		ShowAircraftViewWindow(v);
++	}
++}
++
+ static void NewAircraftWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -496,11 +505,14 @@
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  50,  67, 0x2B4,    STR_A03B_REFIT_AIRCRAFT_TO_CARRY },
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  68,  85, 0x2B2,    STR_A028_SHOW_AIRCRAFT_S_ORDERS },
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  86, 103, 0x2B3,    STR_A02B_SHOW_AIRCRAFT_DETAILS },
++{ WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  32,  49, SPR_CLONE_AIRCRAFT,      STR_CLONE_AIRCRAFT_INFO },
+ { WWT_PANEL,      RESIZE_LRB,   14, 232, 249, 104, 103, 0x0,      STR_NULL },
+ { WWT_RESIZEBOX,  RESIZE_LRTB,  14, 238, 249, 104, 115, 0x0,      STR_NULL },
+ { WIDGETS_END }
+ };
+ 
++bool CheckStoppedInHangar(Vehicle *v);
++
+ static void AircraftViewWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -587,6 +599,12 @@
+ 		case 10: /* show details */
+ 			ShowAircraftDetailsWindow(v);
+ 			break;
++		case 11: {
++			/* clone vehicle */
++			Vehicle *v;
++			v = GetVehicle(w->window_number);
++			DoCommandP(v->tile, v->index, _ctrl_pressed ? 1 : 0, CcCloneAircraft, CMD_CLONE_VEHICLE | CMD_MSG(STR_A008_CAN_T_BUILD_AIRCRAFT));
++		} break;
+ 		}
+ 	} break;
+ 
+@@ -602,6 +620,19 @@
+ 		DeleteWindowById(WC_VEHICLE_REFIT, w->window_number);
+ 		DeleteWindowById(WC_VEHICLE_DETAILS, w->window_number);
+ 		break;
++		
++		       case WE_MOUSELOOP:
++               {
++                       Vehicle *v;
++                       uint32 h;
++                       v = GetVehicle(w->window_number);
++                       h = CheckStoppedInHangar(v) ? (1<< 7) : (1 << 11);
++                       if (h != w->hidden_state) {
++                               w->hidden_state = h;
++                               SetWindowDirty(w);
++                       }
++               } break;
++
+ 	}
+ }
+ 
+@@ -636,7 +667,7 @@
+ 
+ 	/* setup disabled buttons */
+ 	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 7));
++		IsTileOwner(tile, _local_player) ? 0 : ((1<<4) | (1<<7) | (1<<8));
+ 
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+@@ -741,6 +772,42 @@
+ 	}
+ }
+ 
++/**
++ * Clones an aircraft
++ * @param *v is the original vehicle to clone
++ * @param *w is the window of the hangar where the clone is build
++ */
++static bool HandleCloneVehClick(Vehicle *v, Window *w)
++{
++
++	if (!v){
++		return false;
++	}
++
++	if (v->type != VEH_Aircraft) {
++		// it's not an aircraft, do nothing
++		return false;
++	}
++
++
++    DoCommandP(w->window_number, v->index, _ctrl_pressed ? 1 : 0,CcCloneAircraft,CMD_CLONE_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE));
++
++	ResetObjectToPlace();
++
++	return true;
++}
++
++static void ClonePlaceObj(uint tile, Window *w)
++{
++	Vehicle *v;
++
++
++	v = CheckMouseOverVehicle();
++	if (v && HandleCloneVehClick(v, w))
++		return;
++}
++
++
+ static void AircraftDepotWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -754,14 +821,48 @@
+ 			AircraftDepotClickAircraft(w, e->click.pt.x, e->click.pt.y);
+ 			break;
+ 		case 7: /* show build aircraft window */
++			ResetObjectToPlace();
+ 			ShowBuildAircraftWindow(w->window_number);
+ 			break;
+-		case 8: /* scroll to tile */
++			
++				case 8: /* clone button */
++			InvalidateWidget(w, 8);
++				TOGGLEBIT(w->click_state, 8);
++				
++				if (HASBIT(w->click_state, 8)) {
++					_place_clicked_vehicle = NULL;
++					SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
++				} else {
++					ResetObjectToPlace();
++				}
++					break;
++		case 9: /* scroll to tile */
++			ResetObjectToPlace();
+ 			ScrollMainWindowToTile(w->window_number);
+ 			break;
+ 		}
+ 		break;
+ 
++
++case WE_PLACE_OBJ: {
++		ClonePlaceObj(e->place.tile, w);
++	} break;
++
++	case WE_ABORT_PLACE_OBJ: {
++		CLRBIT(w->click_state, 8);
++		InvalidateWidget(w, 8);
++	} break;
++	
++	// check if a vehicle in a depot was clicked..
++	case WE_MOUSELOOP: {
++		Vehicle *v = _place_clicked_vehicle;
++		// since OTTD checks all open depot windows, we will make sure that it triggers the one with a clicked clone button
++		if (v != NULL && HASBIT(w->click_state, 8)) {
++			_place_clicked_vehicle = NULL;
++			HandleCloneVehClick( v, w);
++		}
++	} break;
++	
+ 	case WE_DESTROY:
+ 		DeleteWindowById(WC_BUILD_VEHICLE, w->window_number);
+ 		break;
+@@ -824,8 +925,9 @@
+ 
+ {     WWT_MATRIX,     RESIZE_RB,    14,     0,   295,    14,    61, 0x204,										STR_A021_AIRCRAFT_CLICK_ON_AIRCRAFT},
+ {  WWT_SCROLLBAR,    RESIZE_LRB,    14,   319,   330,    14,    61, 0x0,											STR_0190_SCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   159,    62,    73, STR_A003_NEW_AIRCRAFT,		STR_A022_BUILD_NEW_AIRCRAFT},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   160,   318,    62,    73, STR_00E4_LOCATION,				STR_A024_CENTER_MAIN_VIEW_ON_HANGAR},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   105,    62,    73, STR_A003_NEW_AIRCRAFT,		STR_A022_BUILD_NEW_AIRCRAFT},
++{WWT_NODISTXTBTN,     RESIZE_TB,    14,   106,   212,    62,    73, STR_CLONE_AIRCRAFT,		STR_CLONE_AIRCRAFT_INFO_HANGAR_WINDOW},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   213,   318,    62,    73, STR_00E4_LOCATION,				STR_A024_CENTER_MAIN_VIEW_ON_HANGAR},
+ {      WWT_PANEL,    RESIZE_RTB,    14,   319,   318,    62,    73, 0x0,													STR_NULL},
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   319,   330,    62,    73, 0x0,											STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2758)
++++ train_cmd.c	(working copy)
+@@ -568,7 +568,7 @@
+ /** Build a railroad vehicle.
+  * @param x,y tile coordinates (depot) where rail-vehicle is built
+  * @param p1 engine type id
+- * @param p2 unused
++ * @param p2 build only one engine, even if it is a dualheaded engine. It also prevents any free cars from being added to the train
+  */
+ int32 CmdBuildRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+@@ -594,10 +594,19 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+ 	rvi = RailVehInfo(p1);
++	e = GetEngine(p1);
+ 
++	/* Check if depot and new engine uses the same kind of tracks */
++	if (!IsCompatibleRail(e->railtype, GetRailType(tile))) return CMD_ERROR;
++
+ 	if (rvi->flags & RVI_WAGON) return CmdBuildRailWagon(p1, tile, flags);
+ 
+ 	value = EstimateTrainCost(rvi);
++		
++	//make sure we only pay for half a dualheaded engine if we only requested half of it
++	if (rvi->flags&RVI_MULTIHEAD && HASBIT(p2,0))
++		value /= 2;
++	
+ 
+ 	if (!(flags & DC_QUERY_COST)) {
+ 		v = AllocateVehicle();
+@@ -633,7 +642,6 @@
+ 			v->dest_tile = 0;
+ 
+ 			v->engine_type = (byte)p1;
+-			e = GetEngine(p1);
+ 
+ 			v->reliability = e->reliability;
+ 			v->reliability_spd_dec = e->reliability_spd_dec;
+@@ -651,13 +659,17 @@
+ 
+ 			VehiclePositionChanged(v);
+ 
+-			if (rvi->flags&RVI_MULTIHEAD && (u = AllocateVehicle()) != NULL)
+-				AddRearEngineToMultiheadedTrain(v, u, true);
++			if (rvi->flags&RVI_MULTIHEAD && (u = AllocateVehicle()) != NULL && !HASBIT(p2,0)) {
++					AddRearEngineToMultiheadedTrain(v, u, true);
++			}
+ 
+ 			TrainConsistChanged(v);
+ 			UpdateTrainAcceleration(v);
+-			NormalizeTrainVehInDepot(v);
+ 
++			if (!HASBIT(p2,0)) {	// do not move the cars if HASBIT(p2,0) is set
++				NormalizeTrainVehInDepot(v);
++			}
++
+ 			InvalidateWindow(WC_VEHICLE_DEPOT, tile);
+ 			RebuildVehicleLists();
+ 			InvalidateWindow(WC_COMPANY, v->owner);
+@@ -1472,10 +1484,7 @@
+ /** Refits a train to the specified cargo type.
+  * @param x,y unused
+  * @param p1 vehicle ID of the train to refit
+- * @param p2 various bitstuffed elements
+- * - p2 = (bit 0-7) - the new cargo type to refit to (p2 & 0xFF)
+- * - p2 = (bit 8)   - skip check for stopped in depot, used by autoreplace (p2 & 0x100)
+- * @todo p2 bit8 check <b>NEEDS TO GO</b>
++ * @param p2 the new cargo type to refit to (p2 & 0xFF)
+  */
+ int32 CmdRefitRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+@@ -1483,14 +1492,13 @@
+ 	int32 cost;
+ 	uint num;
+ 	CargoID new_cid = p2 & 0xFF; //gets the cargo number
+-	bool SkipStoppedInDepotCheck = !!HASBIT(p2, 8); // XXX - needs to go, yes?
+ 
+ 	if (!IsVehicleIndex(p1)) return CMD_ERROR;
+ 
+ 	v = GetVehicle(p1);
+ 
+ 	if (v->type != VEH_Train || !CheckOwnership(v->owner)) return CMD_ERROR;
+-	if (!SkipStoppedInDepotCheck && CheckTrainStoppedInDepot(v) < 0) return_cmd_error(STR_TRAIN_MUST_BE_STOPPED);
++	if (CheckTrainStoppedInDepot(v) < 0) return_cmd_error(STR_TRAIN_MUST_BE_STOPPED);
+ 
+ 	/* Check cargo */
+ 	if (new_cid > NUM_CARGO) return CMD_ERROR;
+@@ -1537,10 +1545,7 @@
+ 					cost += (_price.build_railvehicle >> 8);
+ 				num += amount;
+ 				if (flags & DC_EXEC) {
+-					//autorefitted train cars wants to keep the cargo
+-					//it will be checked if the cargo is valid in CmdReplaceVehicle
+-					if (!(SkipStoppedInDepotCheck))
+-						v->cargo_count = 0;
++					v->cargo_count = 0;
+ 					v->cargo_type = new_cid;
+ 					v->cargo_cap = amount;
+ 					InvalidateWindow(WC_VEHICLE_DETAILS, v->index);
+@@ -1548,8 +1553,7 @@
+ 				}
+ 			}
+ 		}
+-	// SkipStoppedInDepotCheck is called by CmdReplace and it should only apply to the single car it is called for
+-	} while ( (v=v->next) != NULL || SkipStoppedInDepotCheck );
++	} while ( (v=v->next) != NULL );
+ 
+ 	_returned_refit_amount = num;
+ 
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2758)
++++ table/sprites.h	(working copy)
+@@ -64,6 +64,11 @@
+ 	SPR_ARROW_LEFT    = SPR_OPENTTD_BASE + 97,
+ 	SPR_ARROW_RIGHT   = SPR_OPENTTD_BASE + 98,
+ 
++	/* Clone vehicles stuff */
++	SPR_CLONE_AIRCRAFT = SPR_OPENTTD_BASE + 99,
++	SPR_CLONE_ROADVEH = SPR_OPENTTD_BASE + 99,
++	SPR_CLONE_TRAIN = SPR_OPENTTD_BASE + 99,
++	SPR_CLONE_SHIP = SPR_OPENTTD_BASE + 99,
+ 
+ 	/* Network GUI sprites */
+ 	SPR_SQUARE = SPR_OPENTTD_BASE + 23,     // colored square (used for newgrf compatibility)
+@@ -942,6 +947,8 @@
+ 	SPR_CURSOR_BUS_STATION    = 2725,
+ 	SPR_CURSOR_TRUCK_STATION  = 2726,
+ 	SPR_CURSOR_ROAD_TUNNEL    = 2433,
++
++	SPR_CURSOR_CLONE = SPR_OPENTTD_BASE + 100,
+ } CursorSprite;
+ 
+ /// Animation macro in table/animcursors.h (_animcursors[])
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2758)
++++ vehicle.c	(working copy)
+@@ -21,6 +21,7 @@
+ #include "vehicle_gui.h"
+ #include "depot.h"
+ #include "station.h"
++#include "gui.h"
+ #include "rail.h"
+ 
+ #define INVALID_COORD (-0x8000)
+@@ -1669,6 +1670,123 @@
+ 	_current_player = OWNER_NONE;
+ }
+ 
++int32 CmdCloneOrder(int x, int y, uint32 flags, uint32 veh1_veh2, uint32 mode);
++int32 CmdMoveRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++int32 CmdBuildRailVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++int32 CmdBuildRoadVeh(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++int32 CmdBuildShip(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++int32 CmdBuildAircraft(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++ 
++
++typedef int32 VehBuildProc(int x, int y, uint32 flags, uint32 p1, uint32 p2);
++
++static VehBuildProc * const _veh_build_proc_table[] = {
++	CmdBuildRailVehicle,
++	CmdBuildRoadVeh,
++	CmdBuildShip,
++	CmdBuildAircraft,
++};
++
++static VehicleID * _new_vehicle_id_proc_table[] = {
++	&_new_train_id,
++	&_new_roadveh_id,
++	&_new_ship_id,
++	&_new_aircraft_id,	
++};
++
++/** Clone a vehicle. If it is a train, it will clone all the cars too
++ * @param x,y unused
++ * @param p1 the original vehicle's index
++ * @param p2 1 = shared orders, else copied orders
++ */
++int32 CmdCloneVehicle(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++{
++	Vehicle *vfront, *v;
++	Vehicle *wfront, *w1, *w2;
++	int cost, total_cost;
++	VehBuildProc *proc;
++	VehicleID *new_id;
++	uint refit_command = 0;
++	byte needs_refitting = 255;
++
++	if (!IsVehicleIndex(p1))
++		return CMD_ERROR;
++	v = GetVehicle(p1);
++	wfront = v; 
++	w1 = v;
++	vfront = v;
++	
++	if (!CheckOwnership(v->owner))
++		return CMD_ERROR;
++	
++	if (v->type == VEH_Train && v->subtype != TS_Front_Engine) return CMD_ERROR;
++	
++	//no need to check if it is a depot since the build command do that
++	switch (v->type) {
++		case VEH_Train:		refit_command = CMD_REFIT_RAIL_VEHICLE; break;
++		case VEH_Road:		break;
++		case VEH_Ship:		refit_command = CMD_REFIT_SHIP; break;
++		case VEH_Aircraft:	refit_command = CMD_REFIT_AIRCRAFT; break;
++		default: return CMD_ERROR;
++	}
++
++	proc = _veh_build_proc_table[v->type - VEH_Train];
++	new_id = _new_vehicle_id_proc_table[v->type - VEH_Train];
++	total_cost = proc(x, y, flags, v->engine_type, 1);
++	if (total_cost == CMD_ERROR)
++		return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		wfront = GetVehicle(*new_id);
++		w1 = wfront;
++		CmdCloneOrder(x, y, flags, (v->index << 16) | w1->index, p2 & 1 ? CO_SHARE : CO_COPY);
++		w1->cur_order_index = v->cur_order_index;
++		
++		if (wfront->cargo_type != v->cargo_type) {
++		//a refit is needed
++		needs_refitting = v->cargo_type;
++		}
++	}
++	if (v->type == VEH_Train) {
++		// now we handle the cars
++		v = v->next;
++		while (v != NULL) {
++			cost = proc(x, y, flags, v->engine_type, 1);
++			if (cost == CMD_ERROR)
++				return CMD_ERROR;
++			total_cost += cost;
++			
++			if (flags & DC_EXEC) {
++				// add this unit to the end of the train
++				w2 = GetVehicle(RailVehInfo(v->engine_type)->flags & RVI_WAGON ? _new_wagon_id : _new_train_id);
++				CmdMoveRailVehicle(x, y, flags, (w1->index << 16) | w2->index, 0);
++				w1 = w2;
++			}
++			v = v->next;
++		}
++
++		if (flags & DC_EXEC) {
++			_new_train_id = wfront->index;
++			v = vfront;
++			w1 = wfront;
++			while (w1 != NULL && v != NULL) {
++				w1->spritenum = v->spritenum; // makes sure that multiheaded engines are facing the correct way
++				if (w1->cargo_type != v->cargo_type)	// checks if a refit is needed
++					needs_refitting = v->cargo_type;
++				w1 = w1->next;
++				v = v->next;
++			}
++
++		}
++	}
++	if (flags && DC_EXEC && needs_refitting != 255 && v->type != VEH_Road) {	// right now we do not refit road vehicles
++		if (DoCommandByTile(wfront->tile, wfront->index, needs_refitting, 0, refit_command) != CMD_ERROR)
++			DoCommandByTile(wfront->tile, wfront->index, needs_refitting, DC_EXEC, refit_command);
++	}
++	return total_cost;
++}
++
++
+ /** Give a custom name to your vehicle
+  * @param x,y unused
+  * @param p1 vehicle ID to name
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 2758)
++++ roadveh_gui.c	(working copy)
+@@ -230,6 +230,16 @@
+ 	w->caption_color = v->owner;
+ }
+ 
++void CcCloneRoadVeh(bool success, uint tile, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++
++	if (!success) return;
++
++	v = GetVehicle(_new_roadveh_id);
++	ShowRoadVehViewWindow(v);
++}
++
+ static void RoadVehViewWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -308,6 +318,12 @@
+ 		case 10: /* show details */
+ 			ShowRoadVehDetailsWindow(v);
+ 			break;
++		case 11: {
++			/* clone vehicle */
++			Vehicle *v;
++			v = GetVehicle(w->window_number);
++			DoCommandP(v->tile, v->index, _ctrl_pressed ? 1 : 0, CcCloneRoadVeh, CMD_CLONE_VEHICLE | CMD_MSG(STR_9009_CAN_T_BUILD_ROAD_VEHICLE));
++			} break;
+ 		}
+ 	} break;
+ 
+@@ -322,6 +338,18 @@
+ 		DeleteWindowById(WC_VEHICLE_ORDERS, w->window_number);
+ 		DeleteWindowById(WC_VEHICLE_DETAILS, w->window_number);
+ 		break;
++
++	case WE_MOUSELOOP:
++		{
++			Vehicle *v;
++			uint32 h;
++			v = GetVehicle(w->window_number);
++			h = IsTileDepotType(v->tile, TRANSPORT_ROAD) && (v->vehstatus&VS_STOPPED) ? (1<< 7) : (1 << 11);
++			if (h != w->hidden_state) {
++				w->hidden_state = h;
++				SetWindowDirty(w);
++			}
++		}
+ 	}
+ }
+ 
+@@ -337,6 +365,7 @@
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  50,  67, 0x2CB,    STR_9020_FORCE_VEHICLE_TO_TURN_AROUND },
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  68,  85, 0x2B2,    STR_901D_SHOW_VEHICLE_S_ORDERS },
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  86, 103, 0x2B3,    STR_9021_SHOW_ROAD_VEHICLE_DETAILS },
++{ WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  32,  49, SPR_CLONE_ROADVEH,      STR_CLONE_ROAD_VEHICLE_INFO },
+ { WWT_PANEL,      RESIZE_LRB,   14, 232, 249, 104, 103, 0x0,      STR_NULL },
+ { WWT_RESIZEBOX,  RESIZE_LRTB,  14, 238, 249, 104, 115, 0x0,      STR_NULL },
+ { WIDGETS_END }
+@@ -536,7 +565,7 @@
+ 
+ 	/* setup disabled buttons */
+ 	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 7));
++		IsTileOwner(tile, _local_player) ? 0 : ((1<<4) | (1<<7) | (1<<8));
+ 
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+@@ -640,6 +669,41 @@
+ 	}
+ }
+ 
++/**
++ * Clones a road vehicle
++ * @param *v is the original vehicle to clone
++ * @param *w is the window of the depot where the clone is build
++ */
++static bool HandleCloneVehClick(Vehicle *v, Window *w)
++{
++
++	if (!v){
++		return false;
++	}
++
++	if (v->type != VEH_Road) {
++		// it's not a road vehicle, do nothing
++		return false;
++	}
++
++
++    DoCommandP(w->window_number, v->index, _ctrl_pressed ? 1 : 0,CcCloneRoadVeh,CMD_CLONE_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE));
++
++	ResetObjectToPlace();
++
++	return true;
++}
++
++static void ClonePlaceObj(uint tile, Window *w)
++{
++	Vehicle *v;
++
++
++	v = CheckMouseOverVehicle();
++	if (v && HandleCloneVehClick(v, w))
++		return;
++}
++
+ static void RoadDepotWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -654,12 +718,45 @@
+ 			break;
+ 
+ 		case 7:
++			ResetObjectToPlace();
+ 			ShowBuildRoadVehWindow(w->window_number);
+ 			break;
++			
++		case 8: /* clone button */
++			InvalidateWidget(w, 8);
++				TOGGLEBIT(w->click_state, 8);
++				
++				if (HASBIT(w->click_state, 8)) {
++					_place_clicked_vehicle = NULL;
++					SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
++				} else {
++					ResetObjectToPlace();
++				}
++					break;
++				
++			case 9: /* scroll to tile */
++				ResetObjectToPlace();
++				ScrollMainWindowToTile(w->window_number);
++					break;
++		}
++	} break;
++	
++		case WE_PLACE_OBJ: {
++		ClonePlaceObj(e->place.tile, w);
++	} break;
+ 
+-		case 8: /* scroll to tile */
+-			ScrollMainWindowToTile(w->window_number);
+-			break;
++	case WE_ABORT_PLACE_OBJ: {
++		CLRBIT(w->click_state, 8);
++		InvalidateWidget(w, 8);
++	} break;
++	
++	// check if a vehicle in a depot was clicked..
++	case WE_MOUSELOOP: {
++		Vehicle *v = _place_clicked_vehicle;
++	// since OTTD checks all open depot windows, we will make sure that it triggers the one with a clicked clone button
++		if (v != NULL && HASBIT(w->click_state, 8)) {
++			_place_clicked_vehicle = NULL;
++			HandleCloneVehClick( v, w);
+ 		}
+ 	} break;
+ 
+@@ -729,8 +826,9 @@
+ 
+ {     WWT_MATRIX,     RESIZE_RB,    14,     0,   279,    14,    55, 0x305,												STR_9022_VEHICLES_CLICK_ON_VEHICLE},
+ {  WWT_SCROLLBAR,    RESIZE_LRB,    14,   303,   314,    14,    55, 0x0,													STR_0190_SCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   150,    56,    67, STR_9004_NEW_VEHICLES,				STR_9023_BUILD_NEW_ROAD_VEHICLE},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   151,   302,    56,    67, STR_00E4_LOCATION,						STR_9025_CENTER_MAIN_VIEW_ON_ROAD},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   100,    56,    67, STR_9004_NEW_VEHICLES,				STR_9023_BUILD_NEW_ROAD_VEHICLE},
++{WWT_NODISTXTBTN,     RESIZE_TB,    14,   101,   200,    56,    67, STR_CLONE_ROAD_VEHICLE,		STR_CLONE_ROAD_VEHICLE_DEPOT_INFO},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   201,   302,    56,    67, STR_00E4_LOCATION,						STR_9025_CENTER_MAIN_VIEW_ON_ROAD},
+ {      WWT_PANEL,    RESIZE_RTB,    14,   303,   302,    56,    67, 0x0,													STR_NULL},
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   303,   314,    56,    67, 0x0,													STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+Index: callback_table.c
+===================================================================
+--- callback_table.c	(revision 2758)
++++ callback_table.c	(working copy)
+@@ -10,6 +10,7 @@
+ 
+ /* aircraft_gui.c */
+ CommandCallback CcBuildAircraft;
++CommandCallback CcCloneAircraft;
+ 
+ /* airport_gui.c */
+ CommandCallback CcBuildAirport;
+@@ -41,13 +42,16 @@
+ 
+ /* roadveh_gui.c */
+ CommandCallback CcBuildRoadVeh;
++CommandCallback CcCloneRoadVeh;
+ 
+ /* ship_gui.c */
+ CommandCallback CcBuildShip;
++CommandCallback CcCloneShip;
+ 
+ /* train_gui.c */
+ CommandCallback CcBuildWagon;
+ CommandCallback CcBuildLoco;
++CommandCallback CcCloneTrain;
+ 
+ CommandCallback *_callback_table[] = {
+ 	/* 0x00 */ NULL,
+@@ -70,7 +74,11 @@
+ 	/* 0x11 */ CcPlaySound1D,
+ 	/* 0x12 */ CcPlaySound1E,
+ 	/* 0x13 */ CcStation,
+-	/* 0x14 */ CcTerraform
++	/* 0x14 */ CcTerraform,
++	/* 0x15 */ CcCloneAircraft,
++	/* 0x16 */ CcCloneRoadVeh,
++	/* 0x17 */ CcCloneShip,
++	/* 0x18 */ CcCloneTrain,
+ };
+ 
+ const int _callback_table_count = lengthof(_callback_table);
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2758)
++++ train_gui.c	(working copy)
+@@ -154,6 +154,17 @@
+ 	ShowTrainViewWindow(v);
+ }
+ 
++void CcCloneTrain(bool success, uint tile, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++
++	if (!success)
++		return;
++
++	v = GetVehicle(_new_train_id);
++	ShowTrainViewWindow(v);
++}
++
+ static void engine_drawing_loop(int *x, int *y, int *pos, int *sel,
+ 	int *selected_id, byte railtype, byte show_max, bool is_engine)
+ {
+@@ -366,7 +377,7 @@
+ 
+ 	/* setup disabled buttons */
+ 	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 5) | (1 << 8));
++		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 5) | (1 << 8) | (1<<9));
+ 
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+@@ -580,6 +591,47 @@
+ 	}
+ }
+ 
++/**
++ * Clones a train
++ * @param *v is the original vehicle to clone
++ * @param *w is the window of the depot where the clone is build
++ */
++static bool HandleCloneVehClick(Vehicle *v, Window *w)
++{
++
++	if (!v){
++		return false;
++	}
++
++	// for train vehicles: subtype 0 for locs and not zero for others
++	if (v->type == VEH_Train && v->subtype != 0) {
++		v = GetFirstVehicleInChain(v);
++		if (v->subtype != 0) // This happens when clicking on a train in depot with no loc attached
++			return false;
++	}else{
++		if (v->type != VEH_Train) {
++			// it's not a train, Do Nothing
++			return false;
++		}
++	}
++
++    DoCommandP(w->window_number, v->index, _ctrl_pressed ? 1 : 0,CcCloneTrain,CMD_CLONE_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE));
++
++	ResetObjectToPlace();
++
++	return true;
++}
++
++static void ClonePlaceObj(uint tile, Window *w)
++{
++	Vehicle *v;
++
++
++	v = CheckMouseOverVehicle();
++	if (v && HandleCloneVehClick(v, w))
++		return;
++}
++
+ static void TrainDepotWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -590,17 +642,51 @@
+ 	case WE_CLICK: {
+ 		switch(e->click.widget) {
+ 		case 8:
++			ResetObjectToPlace();
+ 			ShowBuildTrainWindow(w->window_number);
+ 			break;
+-		case 9:
++		case 10:
++			ResetObjectToPlace();
+ 			ScrollMainWindowToTile(w->window_number);
+ 			break;
+ 		case 6:
+ 			TrainDepotClickTrain(w, e->click.pt.x, e->click.pt.y);
+ 			break;
++		case 9: /* clone button */
++			InvalidateWidget(w, 9);
++			TOGGLEBIT(w->click_state, 9);
++
++			if (HASBIT(w->click_state, 9)) {
++				_place_clicked_vehicle = NULL;
++				SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
++			} else {
++				ResetObjectToPlace();
++			}
++			break;
++
++ 		}
++ 	} break;
++ 
++	case WE_PLACE_OBJ: {
++		ClonePlaceObj(e->place.tile, w);
++	} break;
++
++	case WE_ABORT_PLACE_OBJ: {
++		CLRBIT(w->click_state, 9);
++		InvalidateWidget(w, 9);
++	} break;
++	
++	// check if a vehicle in a depot was clicked..
++	case WE_MOUSELOOP: {
++		Vehicle *v = _place_clicked_vehicle;
++	// since OTTD checks all open depot windows, we will make sure that it triggers the one with a clicked clone button
++		if (v != NULL && HASBIT(w->click_state, 9)) {
++			_place_clicked_vehicle = NULL;
++			HandleCloneVehClick( v, w);
+ 		}
+ 	} break;
+ 
++
+ 	case WE_DESTROY:
+ 		DeleteWindowById(WC_BUILD_VEHICLE, w->window_number);
+ 		break;
+@@ -680,10 +766,14 @@
+ 
+ {     WWT_MATRIX,     RESIZE_RB,    14,     0,   325,    14,    97, 0x601,									STR_883F_TRAINS_CLICK_ON_TRAIN_FOR},
+ {  WWT_SCROLLBAR,    RESIZE_LRB,    14,   349,   360,    14,   109, 0x0,										STR_0190_SCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   167,   110,   121, STR_8815_NEW_VEHICLES,	STR_8840_BUILD_NEW_TRAIN_VEHICLE},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   168,   348,   110,   121, STR_00E4_LOCATION,			STR_8842_CENTER_MAIN_VIEW_ON_TRAIN},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   116,   110,   121, STR_8815_NEW_VEHICLES,	STR_8840_BUILD_NEW_TRAIN_VEHICLE},
++{WWT_NODISTXTBTN,     RESIZE_TB,    14,   117,   232,   110,   121, STR_CLONE_TRAIN,		STR_CLONE_TRAIN_DEPOT_INFO},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   233,   348,   110,   121, STR_00E4_LOCATION,			STR_8842_CENTER_MAIN_VIEW_ON_TRAIN},
++
++
+ { WWT_HSCROLLBAR,    RESIZE_RTB,    14,     0,   325,    98,   109, 0x0,										STR_HSCROLL_BAR_SCROLLS_LIST},
+ {      WWT_PANEL,    RESIZE_RTB,    14,   349,   348,   110,   121, 0x0,										STR_NULL},
++
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   349,   360,   110,   121, 0x0,										STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+ };
+@@ -803,6 +893,7 @@
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  86, 103, 0x2B2,    STR_8847_SHOW_TRAIN_S_ORDERS },
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249, 104, 121, 0x2B3,    STR_884C_SHOW_TRAIN_DETAILS },
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  68,  85, 0x2B4,    STR_RAIL_REFIT_VEHICLE_TO_CARRY },
++{ WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  32,  49, SPR_CLONE_TRAIN,      STR_CLONE_TRAIN_INFO },
+ { WWT_PANEL,      RESIZE_LRB,   14, 232, 249, 122, 121, 0x0,      STR_NULL },
+ { WWT_RESIZEBOX,  RESIZE_LRTB,  14, 238, 249, 122, 133, 0x0,      STR_NULL },
+ { WIDGETS_END }
+@@ -920,6 +1011,9 @@
+ 		case 12:
+ 			ShowRailVehicleRefitWindow(v);
+ 			break;
++		case 13:
++			DoCommandP(v->tile, v->index, _ctrl_pressed ? 1 : 0, NULL, CMD_CLONE_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE));
++			break;
+ 		}
+ 	} break;
+ 
+@@ -942,7 +1036,7 @@
+ 
+ 		v = GetVehicle(w->window_number);
+ 		assert(v->type == VEH_Train);
+-		h = CheckTrainStoppedInDepot(v) >= 0 ? (1 << 9) : (1 << 12);
++		h = CheckTrainStoppedInDepot(v) >= 0 ? (1 << 9)| (1 << 7) : (1 << 12) | (1 << 13);
+ 		if (h != w->hidden_state) {
+ 			w->hidden_state = h;
+ 			SetWindowDirty(w);
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 2758)
++++ ship_gui.c	(working copy)
+@@ -320,6 +320,15 @@
+ 	ShowShipViewWindow(v);
+ }
+ 
++void CcCloneShip(bool success, uint tile, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++	if (!success) return;
++
++	v = GetVehicle(_new_ship_id);
++	ShowShipViewWindow(v);
++}
++
+ static void NewShipWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -465,60 +474,60 @@
+ 
+ static void ShipViewWndProc(Window *w, WindowEvent *e) {
+ 	switch(e->event) {
+-	case WE_PAINT: {
+-		Vehicle *v = GetVehicle(w->window_number);
+-		uint32 disabled = 1<<8;
+-		StringID str;
++		case WE_PAINT: {
++			Vehicle *v = GetVehicle(w->window_number);
++			uint32 disabled = 1<<8;
++			StringID str;
+ 
+-		// Possible to refit?
+-		if (ShipVehInfo(v->engine_type)->refittable &&
++			// Possible to refit?
++			if (ShipVehInfo(v->engine_type)->refittable &&
+ 				v->vehstatus&VS_STOPPED &&
+ 				v->u.ship.state == 0x80 &&
+ 				IsTileDepotType(v->tile, TRANSPORT_WATER))
+-			disabled = 0;
++				disabled = 0;
+ 
+-		if (v->owner != _local_player)
+-			disabled |= 1<<8 | 1<<7;
+-		w->disabled_state = disabled;
++			if (v->owner != _local_player)
++				disabled |= 1<<8 | 1<<7;
++			w->disabled_state = disabled;
+ 
+-		/* draw widgets & caption */
+-		SetDParam(0, v->string_id);
+-		SetDParam(1, v->unitnumber);
+-		DrawWindowWidgets(w);
++			/* draw widgets & caption */
++			SetDParam(0, v->string_id);
++			SetDParam(1, v->unitnumber);
++			DrawWindowWidgets(w);
+ 
+-		if (v->breakdown_ctr == 1) {
+-			str = STR_885C_BROKEN_DOWN;
+-		} else if (v->vehstatus & VS_STOPPED) {
+-			str = STR_8861_STOPPED;
+-		} else {
+-			switch (v->current_order.type) {
+-			case OT_GOTO_STATION: {
+-				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 10 >> 5);
+-				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
+-			} break;
++			if (v->breakdown_ctr == 1) {
++				str = STR_885C_BROKEN_DOWN;
++			} else if (v->vehstatus & VS_STOPPED) {
++				str = STR_8861_STOPPED;
++			} else {
++				switch (v->current_order.type) {
++					case OT_GOTO_STATION: {
++						SetDParam(0, v->current_order.station);
++						SetDParam(1, v->cur_speed * 10 >> 5);
++						str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
++					} break;
+ 
+-			case OT_GOTO_DEPOT: {
+-				Depot *depot = GetDepot(v->current_order.station);
+-				SetDParam(0, depot->town_index);
+-				SetDParam(1, v->cur_speed * 10 >> 5);
+-				str = STR_HEADING_FOR_SHIP_DEPOT + _patches.vehicle_speed;
+-			} break;
++					case OT_GOTO_DEPOT: {
++						Depot *depot = GetDepot(v->current_order.station);
++						SetDParam(0, depot->town_index);
++						SetDParam(1, v->cur_speed * 10 >> 5);
++						str = STR_HEADING_FOR_SHIP_DEPOT + _patches.vehicle_speed;
++					} break;
+ 
+-			case OT_LOADING:
+-			case OT_LEAVESTATION:
+-				str = STR_882F_LOADING_UNLOADING;
+-				break;
+-
+-			default:
+-				if (v->num_orders == 0) {
+-					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->cur_speed * 10 >> 5);
+-				} else
+-					str = STR_EMPTY;
+-				break;
++					case OT_LOADING:
++					case OT_LEAVESTATION:
++						str = STR_882F_LOADING_UNLOADING;
++						break;
++						
++					default:
++						if (v->num_orders == 0) {
++							str = STR_NO_ORDERS + _patches.vehicle_speed;
++							SetDParam(0, v->cur_speed * 10 >> 5);
++						} else
++							str = STR_EMPTY;
++						break;
++				}
+ 			}
+-		}
+ 
+ 		/* draw the flag plus orders */
+ 		DrawSprite(v->vehstatus & VS_STOPPED ? 0xC12 : 0xC13, 2, w->widget[5].top + 1);
+@@ -526,43 +535,61 @@
+ 		DrawWindowViewport(w);
+ 	} break;
+ 
+-	case WE_CLICK: {
+-		Vehicle *v = GetVehicle(w->window_number);
++		case WE_CLICK: {
++			Vehicle *v = GetVehicle(w->window_number);
+ 
+-		switch(e->click.widget) {
+-		case 5: /* start stop */
+-			DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_SHIP | CMD_MSG(STR_9818_CAN_T_STOP_START_SHIP));
++			switch(e->click.widget) {
++				case 5: /* start stop */
++					DoCommandP(v->tile, v->index, 0, NULL, CMD_START_STOP_SHIP | CMD_MSG(STR_9818_CAN_T_STOP_START_SHIP));
++					break;
++				case 6: /* center main view */
++					ScrollMainWindowTo(v->x_pos, v->y_pos);
++					break;
++				case 7: /* goto hangar */
++					DoCommandP(v->tile, v->index, 0, NULL, CMD_SEND_SHIP_TO_DEPOT | CMD_MSG(STR_9819_CAN_T_SEND_SHIP_TO_DEPOT));
++					break;
++				case 8: /* refit */
++					ShowShipRefitWindow(v);
++					break;
++				case 9: /* show orders */
++					ShowOrdersWindow(v);
++					break;
++				case 10: /* show details */
++					ShowShipDetailsWindow(v);
++					break;
++				case 11: {
++					/* clone vehicle */
++					Vehicle *v;
++					v = GetVehicle(w->window_number);
++					DoCommandP(v->tile, v->index, _ctrl_pressed ? 1 : 0, CcCloneShip, CMD_CLONE_VEHICLE | CMD_MSG(STR_980D_CAN_T_BUILD_SHIP));
++				} break;
++			}
++		} break;
++
++		case WE_RESIZE:
++			w->viewport->width  += e->sizing.diff.x;
++			w->viewport->height += e->sizing.diff.y;
++			w->viewport->virtual_width  += e->sizing.diff.x;
++			w->viewport->virtual_height += e->sizing.diff.y;
+ 			break;
+-		case 6: /* center main view */
+-			ScrollMainWindowTo(v->x_pos, v->y_pos);
++
++		case WE_DESTROY:
++			DeleteWindowById(WC_VEHICLE_ORDERS, w->window_number);
++			DeleteWindowById(WC_VEHICLE_REFIT, w->window_number);
++			DeleteWindowById(WC_VEHICLE_DETAILS, w->window_number);
+ 			break;
+-		case 7: /* goto hangar */
+-			DoCommandP(v->tile, v->index, 0, NULL, CMD_SEND_SHIP_TO_DEPOT | CMD_MSG(STR_9819_CAN_T_SEND_SHIP_TO_DEPOT));
+-			break;
+-		case 8: /* refit */
+-			ShowShipRefitWindow(v);
+-			break;
+-		case 9: /* show orders */
+-			ShowOrdersWindow(v);
+-			break;
+-		case 10: /* show details */
+-			ShowShipDetailsWindow(v);
+-			break;
++
++		case WE_MOUSELOOP:
++		{
++			Vehicle *v;
++			uint32 h;
++			v = GetVehicle(w->window_number);
++			h = IsTileDepotType(v->tile, TRANSPORT_WATER) && v->vehstatus & VS_HIDDEN ? (1<< 7) : (1 << 11);
++			if (h != w->hidden_state) {
++				w->hidden_state = h;
++				SetWindowDirty(w);
++			}
+ 		}
+-	} break;
+-
+-	case WE_RESIZE:
+-		w->viewport->width  += e->sizing.diff.x;
+-		w->viewport->height += e->sizing.diff.y;
+-		w->viewport->virtual_width  += e->sizing.diff.x;
+-		w->viewport->virtual_height += e->sizing.diff.y;
+-		break;
+-
+-	case WE_DESTROY:
+-		DeleteWindowById(WC_VEHICLE_ORDERS, w->window_number);
+-		DeleteWindowById(WC_VEHICLE_REFIT, w->window_number);
+-		DeleteWindowById(WC_VEHICLE_DETAILS, w->window_number);
+-		break;
+ 	}
+ }
+ 
+@@ -578,6 +605,7 @@
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  50,  67, 0x2B4,    STR_983A_REFIT_CARGO_SHIP_TO_CARRY},
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  68,  85, 0x2B2,    STR_9828_SHOW_SHIP_S_ORDERS},
+ { WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  86, 103, 0x2B3,    STR_982B_SHOW_SHIP_DETAILS},
++{ WWT_PUSHIMGBTN, RESIZE_LR,    14, 232, 249,  32,  49, SPR_CLONE_SHIP,      STR_CLONE_SHIP_INFO},
+ { WWT_PANEL,      RESIZE_LRB,   14, 232, 249, 104, 103, 0x0,      STR_NULL },
+ { WWT_RESIZEBOX,  RESIZE_LRTB,  14, 238, 249, 104, 115, 0x0,      STR_NULL },
+ { WIDGETS_END }
+@@ -720,6 +748,41 @@
+ 	}
+ }
+ 
++/**
++ * Clones a ship
++ * @param *v is the original vehicle to clone
++ * @param *w is the window of the depot where the clone is build
++ */
++static bool HandleCloneVehClick(Vehicle *v, Window *w)
++{
++
++	if (!v){
++		return false;
++	}
++
++	if (v->type != VEH_Ship) {
++		// it's not a ship, do nothing
++		return false;
++	}
++
++
++    DoCommandP(w->window_number, v->index, _ctrl_pressed ? 1 : 0,CcCloneShip,CMD_CLONE_VEHICLE | CMD_MSG(STR_882B_CAN_T_BUILD_RAILROAD_VEHICLE));
++
++	ResetObjectToPlace();
++
++	return true;
++}
++
++static void ClonePlaceObj(uint tile, Window *w)
++{
++	Vehicle *v;
++
++
++	v = CheckMouseOverVehicle();
++	if (v && HandleCloneVehClick(v, w))
++		return;
++}
++
+ static void ShipDepotWndProc(Window *w, WindowEvent *e) {
+ 	switch(e->event) {
+ 	case WE_PAINT:
+@@ -733,15 +796,50 @@
+ 			break;
+ 
+ 		case 7:
++			ResetObjectToPlace();
+ 			ShowBuildShipWindow(w->window_number);
+ 			break;
++			
++			case 8: /* clone button */
++			InvalidateWidget(w, 8);
++				TOGGLEBIT(w->click_state, 8);
++				
++				if (HASBIT(w->click_state, 8)) {
++					_place_clicked_vehicle = NULL;
++					SetObjectToPlaceWnd(SPR_CURSOR_CLONE, VHM_RECT, w);
++				} else {
++					ResetObjectToPlace();
++				}
++					break;
+ 
+-		case 8: /* scroll to tile */
++		case 9: /* scroll to tile */
++			ResetObjectToPlace();
+ 			ScrollMainWindowToTile(w->window_number);
+ 			break;
+ 		}
+ 		break;
++		
++	case WE_PLACE_OBJ: {
++		//ClonePlaceObj(e->place.tile, w);
++		ClonePlaceObj(w->window_number, w);
++	} break;
+ 
++	case WE_ABORT_PLACE_OBJ: {
++		CLRBIT(w->click_state, 8);
++		InvalidateWidget(w, 8);
++	} break;
++	
++	// check if a vehicle in a depot was clicked..
++	case WE_MOUSELOOP: {
++		Vehicle *v = _place_clicked_vehicle;
++
++	// since OTTD checks all open depot windows, we will make sure that it triggers the one with a clicked clone button
++		if (v != NULL && HASBIT(w->click_state, 8)) {
++			_place_clicked_vehicle = NULL;
++			HandleCloneVehClick(v, w);
++		}
++	} break;
++
+ 	case WE_DESTROY:
+ 		DeleteWindowById(WC_BUILD_VEHICLE, w->window_number);
+ 		break;
+@@ -804,8 +902,9 @@
+ 
+ {     WWT_MATRIX,     RESIZE_RB,    14,     0,   269,    14,    61, 0x203,									STR_981F_SHIPS_CLICK_ON_SHIP_FOR},
+ {  WWT_SCROLLBAR,    RESIZE_LRB,    14,   293,   304,    14,    61, 0x0,										STR_0190_SCROLL_BAR_SCROLLS_LIST},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,   146,    62,    73, STR_9804_NEW_SHIPS,			STR_9820_BUILD_NEW_SHIP},
+-{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   147,   292,    62,    73, STR_00E4_LOCATION,			STR_9822_CENTER_MAIN_VIEW_ON_SHIP},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,     0,    96,    62,    73, STR_9804_NEW_SHIPS,			STR_9820_BUILD_NEW_SHIP},
++{WWT_NODISTXTBTN,     RESIZE_TB,    14,    97,   194,    62,    73, STR_CLONE_SHIP,		STR_CLONE_SHIP_DEPOT_INFO},
++{ WWT_PUSHTXTBTN,     RESIZE_TB,    14,   195,   292,    62,    73, STR_00E4_LOCATION,			STR_9822_CENTER_MAIN_VIEW_ON_SHIP},
+ {      WWT_PANEL,    RESIZE_RTB,    14,   293,   292,    62,    73, 0x0,													STR_NULL},
+ {  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   293,   304,    62,    73, 0x0,										STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+Index: command.c
+===================================================================
+--- command.c	(revision 2758)
++++ command.c	(working copy)
+@@ -159,6 +159,9 @@
+ 
+ DEF_COMMAND(CmdReplaceVehicle);
+ 
++DEF_COMMAND(CmdCloneVehicle);
++
++
+ /* The master command table */
+ static const Command _command_proc_table[] = {
+ 	{CmdBuildRailroadTrack,                  0}, /*   0 */
+@@ -300,6 +303,7 @@
+ 	{CmdGiveMoney,                           0}, /* 113 */
+ 	{CmdChangePatchSetting,         CMD_SERVER}, /* 114 */
+ 	{CmdReplaceVehicle,                      0}, /* 115 */
++	{CmdCloneVehicle,						 0}, /* 116 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: command.h
+===================================================================
+--- command.h	(revision 2758)
++++ command.h	(working copy)
+@@ -136,6 +136,9 @@
+ 	CMD_CHANGE_PATCH_SETTING = 114,
+ 
+ 	CMD_REPLACE_VEHICLE = 115,
++
++	CMD_CLONE_VEHICLE = 116,
++
+ };
+ 
+ enum {
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2758)
++++ spritecache.c	(working copy)
+@@ -732,7 +732,7 @@
+ 	"cached_sprites.xx3",
+ };
+ 
+-#define OPENTTD_SPRITES_COUNT 98
++#define OPENTTD_SPRITES_COUNT 100
+ static const SpriteID _openttd_grf_indexes[] = {
+ 	SPR_OPENTTD_BASE + 0, SPR_OPENTTD_BASE + 7, // icons etc
+ 	134, 134,  // euro symbol medium size

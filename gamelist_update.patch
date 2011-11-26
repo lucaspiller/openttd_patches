@@ -1,0 +1,132 @@
+Index: network.c
+===================================================================
+--- network.c	(revision 3982)
++++ network.c	(working copy)
+@@ -1228,6 +1228,12 @@
+ 		if (_network_udp_broadcast > 0)
+ 			_network_udp_broadcast--;
+ 	}
++	
++	// check for updates to the network game list
++	if (!_network_udp_server && _network_gamelist_next_check < _tick_counter)
++	{
++		NetworkGameListUpdate();
++	}
+ }
+ 
+ // The main loop called from ttd.c
+Index: network.h
+===================================================================
+--- network.h	(revision 3982)
++++ network.h	(working copy)
+@@ -45,6 +45,10 @@
+ #define NETWORK_VEHICLE_TYPES 5
+ #define NETWORK_STATION_TYPES 5
+ 
++// game list related
++#define GAMELIST_SERVER_CHECK_LOOP_INTERVAL 150 // how often to call the gamelist update loop (in ticks)
++#define GAMELIST_SERVER_UPDATE_INTERVAL 3000 //how often to update servers in the list (in ticks)
++
+ enum {
+ 	NETWORK_NAME_LENGTH        = 80,
+ 	NETWORK_HOSTNAME_LENGTH    = 80,
+@@ -118,6 +122,7 @@
+ 	bool online;																		// False if the server did not respond (default status)
+ 	bool manually;																	// True if the server was added manually
+ 	struct NetworkGameList *next;
++	uint16 next_check;
+ } NetworkGameList;
+ 
+ typedef enum {
+@@ -208,6 +213,8 @@
+ 
+ VARDEF uint16 _network_restart_game_date;    // If this year is reached, the server automaticly restarts
+ 
++VARDEF uint16 _network_gamelist_next_check;
++
+ NetworkGameList *NetworkQueryServer(const char* host, unsigned short port, bool game_info);
+ 
+ byte NetworkSpectatorCount(void);
+Index: network_udp.c
+===================================================================
+--- network_udp.c	(revision 3982)
++++ network_udp.c	(working copy)
+@@ -563,10 +563,14 @@
+ 
+ 	// Clear item in gamelist
+ 	item = NetworkGameListAddItem(inet_addr(inet_ntoa(out_addr.sin_addr)), ntohs(out_addr.sin_port));
+-	memset(&item->info, 0, sizeof(item->info));
+-	snprintf(item->info.server_name, sizeof(item->info.server_name), "%s", hostname);
+-	snprintf(item->info.hostname, sizeof(item->info.hostname), "%s", hostname);
+-	item->online = false;
++	if (strlen(item->info.server_name) == 0)
++	{	
++		memset(&item->info, 0, sizeof(item->info));
++		snprintf(item->info.server_name, sizeof(item->info.server_name), "%s", hostname);
++		snprintf(item->info.hostname, sizeof(item->info.hostname), "%s", hostname);
++		item->online = false;
++	}
++	item->next_check = _tick_counter + GAMELIST_SERVER_UPDATE_INTERVAL;
+ 
+ 	// Init the packet
+ 	p = NetworkSend_Init(PACKET_UDP_CLIENT_FIND_SERVER);
+@@ -671,6 +675,7 @@
+ 
+ 	_network_udp_server = false;
+ 	_network_udp_broadcast = 0;
++	_network_gamelist_next_check = 0;
+ }
+ 
+ #endif /* ENABLE_NETWORK */
+Index: network_gamelist.c
+===================================================================
+--- network_gamelist.c	(revision 3982)
++++ network_gamelist.c	(working copy)
+@@ -3,6 +3,8 @@
+ #include "stdafx.h"
+ #include "debug.h"
+ #include "network_data.h"
++#include "network_udp.h"
++#include "variables.h"
+ 
+ #ifdef ENABLE_NETWORK
+ 
+@@ -63,4 +65,27 @@
+ 	}
+ }
+ 
++/** Periodically check any offline servers for updates */
++void NetworkGameListUpdate(void)
++{
++	NetworkGameList *item;
++		
++	for (item = _network_game_list; item != NULL; item = item->next) {
++		if (item->online == false)
++		{
++			NetworkUDPQueryServer(item->info.hostname, item->port);
++			DEBUG(net, 6)("[NET][GameList] Queried inactive server %s:%d", item->info.hostname, item->port);
++		}
++		if (item->next_check < _tick_counter)
++		{
++			NetworkUDPQueryServer(item->info.hostname, item->port);
++			DEBUG(net, 6)("[NET][GameList] Requeried server %s:%d", item->info.hostname, item->port);		
++		}
++	}
++	
++	DEBUG(net, 4)("[NET][GameList] Ran update gamelist loop");
++	
++	_network_gamelist_next_check = _tick_counter + GAMELIST_SERVER_CHECK_LOOP_INTERVAL;
++}
++
+ #endif /* ENABLE_NETWORK */
+Index: network_gamelist.h
+===================================================================
+--- network_gamelist.h	(revision 3982)
++++ network_gamelist.h	(working copy)
+@@ -7,5 +7,6 @@
+ NetworkGameList *NetworkGameListAddItem(uint32 ip, uint16 port);
+ void NetworkGameListRemoveItem(NetworkGameList *remove);
+ void NetworkGameListAddQueriedItem(const NetworkGameInfo *info, bool server_online);
++void NetworkGameListUpdate(void);
+ 
+ #endif /* NETWORK_GAMELIST_H */

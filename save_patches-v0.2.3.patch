@@ -1,0 +1,811 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2406)
++++ lang/english.txt	(working copy)
+@@ -1741,6 +1741,7 @@
+ STR_400E_SELECT_NEW_GAME_TYPE                                   :{WHITE}Select New Game Type
+ STR_400F_SELECT_SCENARIO_GREEN_PRE                              :{BLACK}Select scenario (green), pre-set game (blue), or random new game
+ STR_4010_GENERATE_RANDOM_NEW_GAME                               :Generate random new game
++STR_4011_GRFS_COULD_NOT_LOAD                                    :{WHITE}Some GRFs could not be found, please see the program output for more information
+ 
+ ##id 0x4800
+ STR_4800_IN_THE_WAY                                             :{WHITE}{STRING} in the way
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2406)
++++ variables.h	(working copy)
+@@ -219,9 +219,15 @@
+ 	bool population_in_label; // Show the population of a town in his label?
+ } Patches;
+ 
+-VARDEF Patches _patches;
++VARDEF Patches _patches; /** Main place where patches are set */
+ 
++/** When a game is loaded that has patches build in, the main ones will be
++* overwritten, so they are copied here, and then copied back when the user
++* ends the game.
++*/
++VARDEF Patches _set_patches;
+ 
++
+ typedef struct Cheat {
+ 	bool been_used;	// has this cheat been used before?
+ 	byte value;			// active?
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 2406)
++++ openttd.c	(working copy)
+@@ -34,6 +34,7 @@
+ #include "signs.h"
+ #include "depot.h"
+ #include "waypoint.h"
++#include "newgrf.h"
+ 
+ #include <stdarg.h>
+ 
+@@ -500,6 +501,7 @@
+ 	bool network = false;
+ 	char *network_conn = NULL;
+ 	char *language = NULL;
++	Patches *_set_patches_ptr = NULL;
+ 	const char *optformat;
+ 	char musicdriver[16], sounddriver[16], videodriver[16];
+ 	int resolution[2] = {0,0};
+@@ -610,6 +612,9 @@
+ 	if (resolution[0]) { _cur_resolution[0] = resolution[0]; _cur_resolution[1] = resolution[1]; }
+ 	if (startdate != (uint)-1) _patches.starting_date = startdate;
+ 
++	_set_patches_ptr = &_set_patches;
++	memcpy(_set_patches_ptr, &_patches, sizeof(Patches));
++	
+ 	if (_dedicated_forks && !dedicated)
+ 		_dedicated_forks = false;
+ 
+@@ -856,7 +861,15 @@
+ 
+ void SwitchMode(int new_mode)
+ {
++	Patches *_patches_ptr = NULL;
++	
+ 	_in_state_game_loop = true;
++	
++	if (_game_mode != GM_MENU)
++	{
++		_patches_ptr = &_patches;
++		memcpy(_patches_ptr, &_set_patches, sizeof(Patches));
++	}
+ 
+ #ifdef ENABLE_NETWORK
+ 	// If we are saving something, the network stays in his current state
+@@ -910,6 +923,8 @@
+ 			LoadIntroGame();
+ 			ShowErrorMessage(_error_message, STR_4009_GAME_LOAD_FAILED, 0, 0);
+ 		} else {
++			if (!CheckLoadedGRFs(false))
++				ShowErrorMessage(_error_message, STR_NULL, 0, 0);
+ 			_local_player = 0;
+ 			DoCommandP(0, 0, 0, NULL, CMD_PAUSE); // decrease pause counter (was increased from opening load dialog)
+ #ifdef ENABLE_NETWORK
+@@ -1307,6 +1322,8 @@
+ 	// convert road side to my format.
+ 	if (_opt.road_side) _opt.road_side = 1;
+ 
++	CheckLoadedGRFs(true);
++	
+ 	// Load the sprites
+ 	GfxLoadSprites();
+ 
+Index: network_data.h
+===================================================================
+--- network_data.h	(revision 2406)
++++ network_data.h	(working copy)
+@@ -56,7 +56,6 @@
+ typedef enum {
+ 	MAP_PACKET_START,
+ 	MAP_PACKET_NORMAL,
+-	MAP_PACKET_PATCH,
+ 	MAP_PACKET_END,
+ } MapPacket;
+ 
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2406)
++++ saveload.c	(working copy)
+@@ -23,7 +23,7 @@
+ #include "saveload.h"
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 13,
++	SAVEGAME_MAJOR_VERSION = 14,
+ 	SAVEGAME_MINOR_VERSION = 0x1,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+@@ -102,38 +102,38 @@
+ /** Wrapper for SlWriteByteInternal */
+ void SlWriteByte(byte b) {SlWriteByteInternal(b);}
+ 
+-static inline int SlReadUint16(void)
++int SlReadUint16(void)
+ {
+ 	int x = SlReadByte() << 8;
+ 	return x | SlReadByte();
+ }
+ 
+-static inline uint32 SlReadUint32(void)
++uint32 SlReadUint32(void)
+ {
+ 	uint32 x = SlReadUint16() << 16;
+ 	return x | SlReadUint16();
+ }
+ 
+-static inline uint64 SlReadUint64(void)
++uint64 SlReadUint64(void)
+ {
+ 	uint32 x = SlReadUint32();
+ 	uint32 y = SlReadUint32();
+ 	return (uint64)x << 32 | y;
+ }
+ 
+-static inline void SlWriteUint16(VarType v)
++void SlWriteUint16(VarType v)
+ {
+ 	SlWriteByte((byte)(v >> 8));
+ 	SlWriteByte((byte)v);
+ }
+ 
+-static inline void SlWriteUint32(uint32 v)
++void SlWriteUint32(uint32 v)
+ {
+ 	SlWriteUint16((uint16)(v >> 16));
+ 	SlWriteUint16((uint16)v);
+ }
+ 
+-static inline void SlWriteUint64(uint64 x)
++void SlWriteUint64(uint64 x)
+ {
+ 	SlWriteUint32((uint32)(x >> 32));
+ 	SlWriteUint32((uint32)x);
+@@ -311,6 +311,7 @@
+ 	if (_sl.save) { /* SAVE values */
+ 		/* Read a value from the struct. These ARE endian safe. */
+ 		switch ((conv >> 4) & 0xF) {
++                case SLE_VAR_B    >> 4: x = *(bool*)ptr; break;
+ 		case SLE_VAR_I8   >> 4: x = *(int8*)ptr; break;
+ 		case SLE_VAR_U8   >> 4: x = *(byte*)ptr; break;
+ 		case SLE_VAR_I16  >> 4: x = *(int16*)ptr; break;
+@@ -325,6 +326,7 @@
+ 
+ 		// Write the value to the file and check if its value is in the desired range
+ 		switch (conv & 0xF) {
++		case SLE_FILE_B:     assert( x == 1 || x == 0);         SlWriteByte(x);break;
+ 		case SLE_FILE_I8: assert(x >= -128 && x <= 127);     SlWriteByte(x);break;
+ 		case SLE_FILE_U8:	assert(x >= 0 && x <= 255);        SlWriteByte(x);break;
+ 		case SLE_FILE_I16:assert(x >= -32768 && x <= 32767); SlWriteUint16(x);break;
+@@ -338,6 +340,7 @@
+ 
+ 		// Read a value from the file
+ 		switch (conv & 0xF) {
++		case SLE_FILE_B:   x = (bool)SlReadByte(); break;
+ 		case SLE_FILE_I8:  x = (int8)SlReadByte(); break;
+ 		case SLE_FILE_U8:  x = (byte)SlReadByte(); break;
+ 		case SLE_FILE_I16: x = (int16)SlReadUint16(); break;
+@@ -352,6 +355,7 @@
+ 
+ 		/* Write The value to the struct. These ARE endian safe. */
+ 		switch ((conv >> 4) & 0xF) {
++		case SLE_VAR_B    >> 4: *(bool*)ptr = x; break;
+ 		case SLE_VAR_I8   >> 4:  *(int8*)ptr = x; break;
+ 		case SLE_VAR_U8   >> 4:  *(byte*)ptr = x; break;
+ 		case SLE_VAR_I16  >> 4: *(int16*)ptr = x; break;
+@@ -1252,7 +1256,7 @@
+ {
+ 	uint32 hdr[2];
+ 	const SaveLoadFormat *fmt;
+-  uint version;
++	uint version;
+ 
+ 	/* Load a TTDLX or TTDPatch game */
+ 	if (mode == SL_OLD_LOAD) {
+Index: saveload.h
+===================================================================
+--- saveload.h	(revision 2406)
++++ saveload.h	(working copy)
+@@ -110,6 +110,8 @@
+ 	SLE_FILE_U64 = 7,
+ 
+ 	SLE_FILE_STRINGID = 8,
++	
++	SLE_FILE_B = 9,
+ //	SLE_FILE_IVAR = 8,
+ //	SLE_FILE_UVAR = 9,
+ 
+@@ -124,6 +126,8 @@
+ 
+ 	SLE_VAR_NULL = 8 << 4, // useful to write zeros in savegame.
+ 
++	SLE_VAR_B = 9 << 4, // boolean value, currently just wrote as bytes
++	
+ 	SLE_VAR_INT  = SLE_VAR_I32,
+ 	SLE_VAR_UINT = SLE_VAR_U32,
+ 
+@@ -137,6 +141,8 @@
+ 	SLE_UINT64 = SLE_FILE_U64 | SLE_VAR_U64,
+ 
+ 	SLE_STRINGID = SLE_FILE_STRINGID | SLE_VAR_U16,
++	
++	SLE_BOOL = SLE_FILE_B | SLE_VAR_B,
+ } VarType;
+ 
+ enum SaveLoadTypes {
+@@ -191,10 +197,19 @@
+ void SlArray(void *array, uint length, VarType conv);
+ void SlObject(void *object, const SaveLoad *desc);
+ void SlAutolength(AutolengthProc *proc, void *arg);
++
+ uint SlGetFieldLength(void);
+ int SlReadByte(void);
++int SlReadUint16(void);
++uint32 SlReadUint32(void);
++uint64 SlReadUint64(void);
++
+ void SlSetLength(size_t length);
+ void SlWriteByte(byte b);
++void SlWriteUint16(VarType v);
++void SlWriteUint32(uint32 v);
++void SlWriteUint64(uint64 v);
++ 
+ void SlGlobList(const SaveLoadGlobVarList *desc);
+ 
+ #endif /* SAVELOAD_H */
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2406)
++++ misc.c	(working copy)
+@@ -13,7 +13,14 @@
+ #include "network_server.h"
+ #include "engine.h"
+ #include "vehicle_gui.h"
++#include "newgrf.h"
++#include "md5.h"
++#include "fileio.h"
++#include <ctype.h>
++#include "gui.h"
+ 
++#include "debug.h"
++
+ extern void StartupEconomy(void);
+ extern void InitNewsItemStructs(void);
+ 
+@@ -787,7 +794,298 @@
+ 	SlObject(&_opt, _game_opt_desc);
+ }
+ 
++static const SaveLoad _game_patch_desc[] = {
++	// Denotes running total of space usage
++	SLE_VAR(Patches,	build_on_slopes,	SLE_BOOL), // 1
++	SLE_VAR(Patches,	mammoth_trains,	SLE_BOOL), // 2 
++	SLE_VAR(Patches,	join_stations,	SLE_BOOL), // 3
++	SLE_VAR(Patches,	station_spread,	SLE_UINT8), // 4
++	SLE_VAR(Patches,	full_load_any,	SLE_BOOL), // 5
++	SLE_VAR(Patches,	modified_catchment,	SLE_BOOL), // 6
++	SLE_VAR(Patches,	inflation,	SLE_BOOL), // 7
++	SLE_VAR(Patches,	selectgoods,	SLE_BOOL), // 8
++	SLE_VAR(Patches,	longbridges,	SLE_BOOL), // 9
++	SLE_VAR(Patches,	gotodepot,	SLE_BOOL), // 10
++	SLE_VAR(Patches,	build_rawmaterial_ind,	SLE_BOOL), // 11
++	SLE_VAR(Patches,	multiple_industry_per_town,	SLE_BOOL), // 12
++	SLE_VAR(Patches,	same_industry_close,	SLE_BOOL), // 13
++	SLE_VAR(Patches,	signal_side,	SLE_BOOL), // 14
++	SLE_VAR(Patches,	new_nonstop,	SLE_BOOL), // 15
++	SLE_VAR(Patches,	roadveh_queue,	SLE_BOOL), // 16
++	SLE_VAR(Patches,	snow_line_height,	SLE_UINT8), // 17
++	SLE_VAR(Patches,	bribe,	SLE_BOOL), // 18
++	SLE_VAR(Patches,	new_depot_finding,	SLE_BOOL), // 19
++	SLE_VAR(Patches,	nonuniform_stations,	SLE_BOOL), // 20
++	SLE_VAR(Patches,	always_small_airport,	SLE_BOOL), // 21
++	SLE_VAR(Patches,	realistic_acceleration,	SLE_BOOL), // 22
++	SLE_VAR(Patches,	forbid_90_deg,	SLE_BOOL), // 23
++	SLE_VAR(Patches,	improved_load,	SLE_BOOL), // 24
++	SLE_VAR(Patches,	max_trains,	SLE_UINT16), // 26
++	SLE_VAR(Patches,	max_roadveh,	SLE_UINT16), // 28
++	SLE_VAR(Patches,	max_aircraft,	SLE_UINT16), // 30
++	SLE_VAR(Patches,	max_ships,	SLE_UINT16), // 32
++	SLE_VAR(Patches,	servint_ispercent,	SLE_BOOL), // 33
++	SLE_VAR(Patches,	servint_trains,	SLE_UINT16), // 35
++	SLE_VAR(Patches,	servint_roadveh,	SLE_UINT16), // 37
++	SLE_VAR(Patches,	servint_ships,	SLE_UINT16), // 39
++	SLE_VAR(Patches,	servint_aircraft,	SLE_UINT16), // 41
++	SLE_VAR(Patches,	no_servicing_if_no_breakdowns,	SLE_BOOL), // 42
++	SLE_VAR(Patches,	new_pathfinding,	SLE_BOOL), // 43
++	SLE_VAR(Patches,	pf_maxlength,	SLE_UINT16), // 45
++	SLE_VAR(Patches,	pf_maxdepth,	SLE_UINT32), // 49
++	SLE_VAR(Patches,	ai_disable_veh_train,	SLE_BOOL), // 50
++	SLE_VAR(Patches,	ai_disable_veh_roadveh,	SLE_BOOL), // 51
++	SLE_VAR(Patches,	ai_disable_veh_aircraft,	SLE_BOOL), // 52
++	SLE_VAR(Patches,	ai_disable_veh_ship,	SLE_BOOL), // 53
++	SLE_VAR(Patches,	starting_date,	SLE_UINT32), // 57
++	SLE_VAR(Patches,	ending_date,	SLE_UINT32), // 61
++	SLE_VAR(Patches,	colored_news_date,	SLE_UINT32), // 65
++	SLE_VAR(Patches,	extra_dynamite,	SLE_BOOL), // 66
++	SLE_VAR(Patches,	never_expire_vehicles,	SLE_BOOL), // 67
++	SLE_VAR(Patches,	extend_vehicle_life,	SLE_UINT8), // 68
++	SLE_VAR(Patches,	auto_euro,	SLE_BOOL), // 69
++	SLE_VAR(Patches,	serviceathelipad,	SLE_BOOL), // 70
++	SLE_VAR(Patches,	smooth_economy,	SLE_BOOL), // 71
++	SLE_VAR(Patches,	allow_shares,	SLE_BOOL), // 72
++	SLE_VAR(Patches,	dist_local_authority,	SLE_UINT8), // 73
++	SLE_VAR(Patches,	wait_oneway_signal,	SLE_UINT8), // 74
++	SLE_VAR(Patches,	wait_twoway_signal,	SLE_UINT8), // 75
++	SLE_VAR(Patches,	ainew_active,	SLE_BOOL), // 76
++	SLE_VAR(Patches,	map_x,	SLE_UINT32), // 80
++	SLE_VAR(Patches,	map_y,	SLE_UINT32),  // 84
++	SLE_VAR(Patches,	new_pathfinding_all,	SLE_BOOL), // 85
++	SLE_VAR(Patches,	npf_max_search_nodes,	SLE_UINT32), // 89
++	SLE_VAR(Patches,	npf_rail_firstred_penalty,	SLE_UINT32), // 93
++	SLE_VAR(Patches,	npf_rail_firstred_exit_penalty,	SLE_UINT32), // 97
++	SLE_VAR(Patches,	npf_rail_lastred_penalty,	SLE_UINT32), // 101
++	SLE_VAR(Patches,	npf_rail_station_penalty,	SLE_UINT32), // 105
++	SLE_VAR(Patches,	npf_rail_slope_penalty,	SLE_UINT32), // 109
++	SLE_VAR(Patches,	npf_rail_curve_penalty,	SLE_UINT32), // 113
++	SLE_VAR(Patches,	npf_rail_depot_reverse_penalty,	SLE_UINT32), // 117
++	SLE_VAR(Patches,	npf_buoy_penalty,	SLE_UINT32), // 121
++	SLE_VAR(Patches,	npf_water_curve_penalty,	SLE_UINT32), // 125
++	SLE_END()
++};
+ 
++/** 
++* Save/Load game patches.
++* @note The value of the SlSetLength function needs to be the size of the above
++*	array. Boolean values are currently saved as bytes, so they take up one
++*	 byte of space!
++*/
++static void SaveLoad_PATS(void)
++{
++	Patches *_set_patches_ptr;
++
++	if (_sl.save)
++	{
++		/* Create a copy of the original patch settings so that they
++		* are not overwritten */
++		_set_patches_ptr = &_set_patches;
++		memcpy(_set_patches_ptr, &_patches, sizeof(Patches));
++		SlSetLength(125);
++	}
++	
++	SlObject(&_patches, _game_patch_desc); 
++}
++
++/** 
++* Calculate the MD5 sum of file. Returns true if successful, false if not.
++*
++* @param file Name (and path) of a file in the data/ folder.
++* @param digest The resulting MD5 sum will be placed here.
++*
++* @note For some reason the MD5 sums that are calculated don't just contain the
++*	MD5 sum (seems to be a bug in md5_finish of md5.c), but a load of other 
++*	crap. As such whenever you manipulate whatever is calculated, make sure
++*	you only use the first 16 bytes!
++*/
++static bool MD5(char* file, md5_byte_t* digest)
++{	
++	FILE *f = 0;
++	char buf[MAX_PATH];
++
++	md5_state_t filemd5state;
++	int len = 0;
++	md5_byte_t buffer[1024];
++
++	// open file
++	sprintf(buf, "%s%s", _path.data_dir, file);
++	f = fopen(buf, "rb");
++
++#if !defined(WIN32)
++	if (f == NULL) {
++		char *s = 0;
++	// make lower case and check again
++		for (s = buf + strlen(_path.data_dir) - 1; *s != '\0'; s++)
++			*s = tolower(*s);
++		f = fopen(buf, "rb");
++	}
++#endif
++
++	if (f != NULL) {
++		md5_init(&filemd5state);
++		while ((len = fread(buffer, 1, 1024, f)) != 0)
++			//assert(strlen(digest) < 17);
++			md5_append(&filemd5state, buffer, len);
++		if (ferror(f))
++			DEBUG(misc,0)("Error Reading from %s \n", buf);
++		fclose(f);
++		
++		md5_finish(&filemd5state, digest);
++		
++		return true;
++	}
++	
++	return false;
++	
++}
++
++/**
++* Saves details of any New GRFs loaded. Details which are saved are: filename,
++* grfid, and md5 sum.
++*
++* @note	Run in debug level 6 to see output (-d 6).
++*/	
++static void Save_GRFS(void)
++{	
++	GRFFile *c = _first_grffile; /**< Loaded GRFs. */
++	int i = 0, y; /**< Integers used for iterations. */
++	uint32 grfid; /**< Temporary storage of grfid. */
++	char filename[32]; /**< Temporary storage of filename. */
++	char *fptr; /**< Pointer to filename. */
++	md5_byte_t md5[16]; /**< Temporary storage of md5 sum. */
++	
++	fptr = filename;
++	
++	c = _first_grffile;
++	
++	/*
++	* Count the number of grfs loaded, should be no more than 32, so
++	* assert if more.
++	*/
++	while(c != NULL)
++	{
++		i++;
++		c = c->next;
++	}
++	
++	assert(i < 32);
++	
++	SlSetLength((32 + 16 + 4)*i);
++	
++	DEBUG(misc,6)("Save_GRFS: %d records / %d bytes", i, (4+32+16)*i);
++	
++	i=0;
++	/*
++	* Loop through each grf saving details of it. Strings are just saved as
++	* seperate bytes, so maybe a function to save strings could be added?
++	*/
++	for (c = _first_grffile; c != NULL; c = c->next)
++	{	
++		strcpy(fptr,c->filename);
++		grfid = c->grfid;
++		
++		for (y=0; y<32; y++)
++			SlWriteByte(filename[y]);
++					
++		MD5(c->filename, md5);
++						
++		for (y=0; y<16; y++)
++			SlWriteByte(md5[y]);	
++				
++		SlWriteUint32(grfid);
++		
++		DEBUG(misc,6)("Save_GRFS: %d) %s %08lx %s", i++, filename, grfid, md5);
++	}
++}
++
++/**
++* Loads details of saved New GRFs, and checks if they are loaded. Also compares
++* details (grfid and md5 sum) of grfs to make sure the same ones are loaded and
++* warns the user if not.
++*
++* @todo Popup an error window to the user, rather than using the console if
++*	there are any problems.
++*
++* @note Rather than using the DEBUG function to show problems, the grfmsg
++*	function should probably be used. This is local to the newgrf.c file
++*	only, so the checking stuff should be split off or that will need to be
++*	changed.
++*
++* @note	Run in debug level 6 to see output (-d 6).
++*/
++static void Load_GRFS(void)
++{
++	GRFFile *c = _first_grffile; /**< Loaded GRFs. */
++	int x = 0, y = 0, t; /**< Integers for iterations. */
++	int size; /**< Size of field, returned from SlGetFieldLength. */
++	/** Used to count how many bytes of MD5 sums match. */
++	int matching_bytes = 0;
++	char filename[32][32]; /**< Array to hold file names in save. */
++	char *fptr; /**< Pointer to records in the above array. */
++	/** Holds MD5 sums loaded and MD5 sum calculated; why it is 33. */
++	md5_byte_t md5[33][16];
++	
++	/*
++	* Get the field size, and calculate size of each record.
++	*/
++	size = SlGetFieldLength();
++	_grfs_in_save_num = size / (4 + 16 + 32);
++	
++	DEBUG(misc,6)("Load_GRFS: %d records / %d bytes", _grfs_in_save_num, size);
++	
++	/*
++	* Load details from the save.
++	*/
++	while(x < _grfs_in_save_num)
++	{
++		fptr = filename[x];
++		for (y=0; y<32; y++)
++			filename[x][y] = (char) SlReadByte();
++		for (y=0; y<16; y++)
++			md5[x][y] = (char) SlReadByte();
++				
++		_grfs_in_save[x].filename = fptr;
++		_grfs_in_save[x].grfid = SlReadUint32();
++		
++		DEBUG(misc,6)("Load_GRFS: %d) %s %08x %s", x, _grfs_in_save[x].filename, _grfs_in_save[x].grfid, md5);
++		x++;
++	}
++	
++	/*
++	* Start checking to see if any loaded GRFs match, ones in the save.
++	* If so the 0x0001 bit is set. Next the grfids are compared, and then
++	* MD5 sums are compared.
++	*/
++	x = 0;
++	while (c != NULL)
++	{
++	MD5(c->filename, md5[32]);
++	
++		for(y=0; y < _grfs_in_save_num; y++)
++		{	
++			if (*_grfs_in_save[y].filename == *c->filename)
++			{	
++				_grfs_in_save[y].flags |= 0x0001;
++				if (_grfs_in_save[y].grfid != c->grfid)
++					DEBUG(misc,0)("GRF ID different!\n  %s\n  %08x", _grfs_in_save[y].filename, _grfs_in_save[y].grfid);
++					
++					matching_bytes = 0;
++					for (t = 0; t < 16; t++)
++						if (md5[32][t] == md5[x][t])
++							matching_bytes++;
++					
++				if (!(matching_bytes == 16))
++					DEBUG(misc,0)("MD5 sum different! %d bytes different!\n  %s\n  %08x\n M: %d", (16-matching_bytes), _grfs_in_save[y].filename, _grfs_in_save[y].grfid);
++			}
++				
++		}
++	x++;
++	c = c->next;
++	}
++}
++
+ static const SaveLoadGlobVarList _date_desc[] = {
+ 	{&_date, 										SLE_UINT16, 0, 255},
+ 	{&_date_fract, 							SLE_UINT16, 0, 255},
+@@ -943,5 +1241,7 @@
+ 	{ 'DATE', SaveLoad_DATE, SaveLoad_DATE, CH_RIFF},
+ 	{ 'VIEW', SaveLoad_VIEW, SaveLoad_VIEW, CH_RIFF},
+ 	{ 'OPTS', SaveLoad_OPTS, SaveLoad_OPTS, CH_RIFF},
+-	{ 'CHTS', Save_CHTS, Load_CHTS, CH_RIFF | CH_LAST}
++	{ 'PATS', SaveLoad_PATS, SaveLoad_PATS, CH_RIFF},
++	{ 'GRFS', Save_GRFS, Load_GRFS, CH_RIFF},
++	{ 'CHTS', Save_CHTS, Load_CHTS, CH_RIFF | CH_LAST},
+ };
+Index: network_client.c
+===================================================================
+--- network_client.c	(revision 2406)
++++ network_client.c	(working copy)
+@@ -14,8 +14,9 @@
+ #include "window.h"
+ #include "settings.h"
+ #include "console.h"
++#include "gui.h"
++#include "newgrf.h"
+ 
+-
+ // This file handles all the client-commands
+ 
+ 
+@@ -26,8 +27,6 @@
+ 
+ static uint32 last_ack_frame;
+ 
+-void NetworkRecvPatchSettings(NetworkClientState *cs, Packet *p);
+-
+ // **********
+ // Sending functions
+ //   DEF_CLIENT_SEND_COMMAND has no parameters
+@@ -481,10 +480,6 @@
+ 		InvalidateWindow(WC_NETWORK_STATUS_WINDOW, 0);
+ 	}
+ 
+-	if (maptype == MAP_PACKET_PATCH) {
+-		NetworkRecvPatchSettings(MY_CLIENT, p);
+-	}
+-
+ 	// Check if this was the last packet
+ 	if (maptype == MAP_PACKET_END) {
+ 		// We also get, very nice, the player_seeds in this packet
+@@ -509,6 +504,9 @@
+ 
+ 		_opt_ptr = &_opt; // during a network game you are always in-game
+ 
++		if (!CheckLoadedGRFs(false))
++			ShowErrorMessage(_error_message, STR_NULL, 0, 0);
++
+ 		// Say we received the map and loaded it correctly!
+ 		SEND_COMMAND(PACKET_CLIENT_MAP_OK)();
+ 
+@@ -796,37 +794,6 @@
+ // If this fails, check the array above with network_data.h
+ assert_compile(lengthof(_network_client_packet) == PACKET_END);
+ 
+-extern const SettingDesc patch_settings[];
+-
+-// This is a TEMPORARY solution to get the patch-settings
+-//  to the client. When the patch-settings are saved in the savegame
+-//  this should be removed!!
+-void NetworkRecvPatchSettings(NetworkClientState *cs, Packet *p)
+-{
+-	const SettingDesc *item;
+-
+-	item = patch_settings;
+-
+-	while (item->name != NULL) {
+-		switch (item->flags) {
+-			case SDT_BOOL:
+-			case SDT_INT8:
+-			case SDT_UINT8:
+-				*(uint8 *)(item->ptr) = NetworkRecv_uint8(cs, p);
+-				break;
+-			case SDT_INT16:
+-			case SDT_UINT16:
+-				*(uint16 *)(item->ptr) = NetworkRecv_uint16(cs, p);
+-				break;
+-			case SDT_INT32:
+-			case SDT_UINT32:
+-				*(uint32 *)(item->ptr) = NetworkRecv_uint32(cs, p);
+-				break;
+-		}
+-		item++;
+-	}
+-}
+-
+ // Is called after a client is connected to the server
+ void NetworkClient_Connected(void)
+ {
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2406)
++++ network_server.c	(working copy)
+@@ -20,7 +20,6 @@
+ 
+ void NetworkHandleCommandQueue(NetworkClientState *cs);
+ void NetworkPopulateCompanyInfo(void);
+-void NetworkSendPatchSettings(NetworkClientState *cs);
+ 
+ extern const char _openttd_revision[];
+ 
+@@ -326,9 +325,6 @@
+ 				int i;
+ 				Packet *p;
+ 
+-				// XXX - Delete this when patch-settings are saved in-game
+-				NetworkSendPatchSettings(cs);
+-
+ 				p = NetworkSend_Init(PACKET_SERVER_MAP);
+ 				NetworkSend_uint8(p, MAP_PACKET_END);
+ 				// Send the player_seeds in this packet
+@@ -1188,43 +1184,6 @@
+ // If this fails, check the array above with network_data.h
+ assert_compile(lengthof(_network_server_packet) == PACKET_END);
+ 
+-
+-extern const SettingDesc patch_settings[];
+-
+-// This is a TEMPORARY solution to get the patch-settings
+-//  to the client. When the patch-settings are saved in the savegame
+-//  this should be removed!!
+-void NetworkSendPatchSettings(NetworkClientState *cs)
+-{
+-	const SettingDesc *item;
+-	Packet *p = NetworkSend_Init(PACKET_SERVER_MAP);
+-	NetworkSend_uint8(p, MAP_PACKET_PATCH);
+-	// Now send all the patch-settings in a pretty order..
+-
+-	item = patch_settings;
+-
+-	while (item->name != NULL) {
+-		switch (item->flags) {
+-			case SDT_BOOL:
+-			case SDT_INT8:
+-			case SDT_UINT8:
+-				NetworkSend_uint8(p, *(uint8 *)item->ptr);
+-				break;
+-			case SDT_INT16:
+-			case SDT_UINT16:
+-				NetworkSend_uint16(p, *(uint16 *)item->ptr);
+-				break;
+-			case SDT_INT32:
+-			case SDT_UINT32:
+-				NetworkSend_uint32(p, *(uint32 *)item->ptr);
+-				break;
+-		}
+-		item++;
+-	}
+-
+-	NetworkSend_Packet(p, cs);
+-}
+-
+ // This update the company_info-stuff
+ void NetworkPopulateCompanyInfo(void)
+ {
+Index: newgrf.c
+===================================================================
+--- newgrf.c	(revision 2406)
++++ newgrf.c	(working copy)
+@@ -10,6 +10,7 @@
+ #include "station.h"
+ #include "sprite.h"
+ #include "newgrf.h"
++#include "table/strings.h"
+ 
+ /* TTDPatch extended GRF format codec
+  * (c) Petr Baudis 2004 (GPL'd)
+@@ -2220,3 +2221,46 @@
+ 	free(buf);
+ #undef NUM_ACTIONS
+ }
++
++/**
++* Gives a warning about any GRFs that are in the save, but have not been
++* matched to loaded GRFs.
++*
++* @todo Improve error notification. It would be best to popup a list of GRFs
++*	on the screen, but at the moment there isn't a dynamic error box, so it
++*	ends up messing up everything because the box is too small.
++*/
++bool CheckLoadedGRFs(bool show_console_errors)
++{
++	int y = 0, p = 0; /**< Iteration integers. */
++	/** Buffer for output (1024, just in case a noob tries to load a
++	* cazillion GRFs) */
++	char buf[1024]; 
++	
++	/** There is probably a better way of doing this */
++	sprintf(buf," "); 
++	
++	for(y=0; y<_grfs_in_save_num; y++)
++	{
++		if(!(_grfs_in_save[y].flags & 0x0001))
++		{	
++			if (show_console_errors)	
++				sprintf(buf,"%s\n\t\t%s - %08x", buf, _grfs_in_save[y].filename, _grfs_in_save[y].grfid);
++			p++;
++		}
++	}
++	
++	if (p > 0)
++	{
++		if(show_console_errors)
++		{
++			DEBUG(misc,0)("\n\tWARNING: The following GRFs could not be loaded:\n\t\tFilename - GRF ID%s\n", buf);
++		} else {
++			_error_message = STR_4011_GRFS_COULD_NOT_LOAD;
++		}
++		
++		return false;
++	} else {
++		return true;
++	}
++}
+Index: newgrf.h
+===================================================================
+--- newgrf.h	(revision 2406)
++++ newgrf.h	(working copy)
+@@ -37,8 +37,12 @@
+ extern int _grffile_count;
+ extern GRFFile *_first_grffile;
+ 
++GRFFile _grfs_in_save[32]; // GRFs in game save
++int _grfs_in_save_num; // Num of GRFs in game save
++
+ void InitNewGRFFile(const char *filename, int sprite_offset);
+ void DecodeSpecialSprite(const char *filename, int num, int spriteid, int stage);
++bool CheckLoadedGRFs(bool show_console_errors);
+ 
+ 
+ #endif /* NEWGRF_H */

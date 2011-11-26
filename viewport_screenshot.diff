@@ -1,0 +1,180 @@
+Index: screenshot.c
+===================================================================
+--- screenshot.c	(revision 3211)
++++ screenshot.c	(working copy)
+@@ -531,3 +531,9 @@
+ 	sf = _screenshot_formats + _cur_screenshot_format;
+ 	return sf->proc(MakeScreenshotName(sf->extension), LargeWorldCallback, &vp, vp.width, vp.height, 8, _cur_palette);
+ }
++
++bool MakeViewportScreenshot(ViewPort *vp)
++{
++	const ScreenshotFormat *sf = _screenshot_formats + _cur_screenshot_format;
++	return sf->proc(MakeScreenshotName(sf->extension), LargeWorldCallback, vp, vp->width, vp->height, 8, _cur_palette);
++}
+Index: screenshot.h
+===================================================================
+--- screenshot.h	(revision 3211)
++++ screenshot.h	(working copy)
+@@ -3,6 +3,8 @@
+ #ifndef SCREENSHOT_H
+ #define SCREENSHOT_H
+ 
++#include "viewport.h"
++
+ void InitializeScreenshotFormats(void);
+ 
+ const char *GetScreenshotFormatDesc(int i);
+@@ -10,6 +12,7 @@
+ 
+ bool MakeScreenshot(void);
+ bool MakeWorldScreenshot(int left, int top, int width, int height, int zoom);
++bool MakeViewportScreenshot(ViewPort *vp);
+ 
+ extern char _screenshot_format_name[8];
+ extern uint _num_screenshot_formats;
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3211)
++++ lang/english.txt	(working copy)
+@@ -750,10 +750,12 @@
+ STR_02DF_TOWN_DIRECTORY                                         :Town directory
+ STR_TOWN_POPULATION                                             :{BLACK}World population: {COMMA}
+ STR_EXTRA_VIEW_PORT_TITLE                                       :{WHITE}Viewport {COMMA}
++
+ STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN                                :{BLACK}Copy to viewport
+ STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT                             :{BLACK}Copy the location of the global view to this viewport
+ STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW                                :{BLACK}Paste from viewport
+ STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT                             :{BLACK}Paste the location of this viewport to the global view
++STR_EXTRA_VIEW_PORT_SCR_SHOT                                             :{BLACK}Take a screenshot
+ 
+ STR_02E0_CURRENCY_UNITS                                         :{BLACK}Currency units
+ STR_02E1                                                        :{BLACK}{SKIP}{STRING}
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3211)
++++ openttd.c	(working copy)
+@@ -571,7 +571,7 @@
+ 	OTTD_ReleaseMutex(); // release mutex so that other threads, messages can be handled
+ }
+ 
+-static void ShowScreenshotResult(bool b)
++void ShowScreenshotResult(bool b)
+ {
+ 	if (b) {
+ 		SetDParamStr(0, _screenshot_name);
+Index: smallmap_gui.c
+===================================================================
+--- smallmap_gui.c	(revision 3211)
++++ smallmap_gui.c	(working copy)
+@@ -17,7 +17,10 @@
+ #include "town.h"
+ #include "sound.h"
+ #include "variables.h"
++#include "screenshot.h"
+ 
++extern void ShowScreenshotResult(bool b);
++
+ static const Widget _smallmap_widgets[] = {
+ {   WWT_TEXTBTN,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},
+ {   WWT_CAPTION,  RESIZE_RIGHT,    13,    11,   433,     0,    13, STR_00B0_MAP,            STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -922,17 +925,18 @@
+ /* Extra ViewPort Window Stuff */
+ static const Widget _extra_view_port_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,	STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   287,     0,    13, STR_EXTRA_VIEW_PORT_TITLE,				STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{  WWT_STICKYBOX,     RESIZE_LR,    14,   288,   299,     0,    13, 0x0,       STR_STICKY_BUTTON},
+-{      WWT_PANEL,     RESIZE_RB,    14,     0,   299,    14,   233, 0x0,				STR_NULL},
+-{          WWT_6,     RESIZE_RB,    14,     2,   297,    16,   231, 0x0,				STR_NULL},
++{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   307,     0,    13, STR_EXTRA_VIEW_PORT_TITLE,				STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,     RESIZE_LR,    14,   308,   319,     0,    13, 0x0,       STR_STICKY_BUTTON},
++{      WWT_PANEL,     RESIZE_RB,    14,     0,   319,    14,   233, 0x0,				STR_NULL},
++{          WWT_6,     RESIZE_RB,    14,     2,   317,    16,   231, 0x0,				STR_NULL},
+ {      WWT_PANEL,     RESIZE_TB,    14,     0,    21,   234,   255, 0x2DF,			STR_017F_ZOOM_THE_VIEW_IN},
+ {      WWT_PANEL,     RESIZE_TB,    14,    22,    43,   234,   255, 0x2E0,			STR_0180_ZOOM_THE_VIEW_OUT},
+ { WWT_PUSHTXTBTN,     RESIZE_TB,    14,    44,   171,   234,   255, STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW,STR_EXTRA_VIEW_MOVE_MAIN_TO_VIEW_TT},
+ { WWT_PUSHTXTBTN,     RESIZE_TB,    14,   172,   298,   234,   255, STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN,STR_EXTRA_VIEW_MOVE_VIEW_TO_MAIN_TT},
+-{      WWT_PANEL,    RESIZE_RTB,    14,   299,   299,   234,   255, 0x0,				STR_NULL},
+-{      WWT_PANEL,    RESIZE_RTB,    14,     0,   287,   256,   267, 0x0,				STR_NULL},
+-{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   288,   299,   256,   267, 0x0,				STR_RESIZE_BUTTON},
++{      WWT_PANEL,     RESIZE_TB,    14,    299,    318,   234,   255, 683,			STR_EXTRA_VIEW_PORT_SCR_SHOT},
++{      WWT_PANEL,    RESIZE_RTB,    14,   319,   319,   234,   255, 0x0,				STR_NULL},
++{      WWT_PANEL,    RESIZE_RTB,    14,     0,   307,   256,   267, 0x0,				STR_NULL},
++{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   308,   319,   256,   267, 0x0,				STR_RESIZE_BUTTON},
+ {   WIDGETS_END},
+ };
+ 
+@@ -952,29 +956,32 @@
+ 
+ 	case WE_CLICK: {
+ 		switch (e->click.widget) {
+-		case 5: /* zoom in */
+-			DoZoomInOutWindow(ZOOM_IN, w);
+-			break;
+-		case 6: /* zoom out */
+-			DoZoomInOutWindow(ZOOM_OUT, w);
+-			break;
+-		case 7: { /* location button (move main view to same spot as this view) 'Paste Location' */
+-			Window *w2 = FindWindowById(WC_MAIN_WINDOW, 0);
+-			int x = WP(w, vp_d).scrollpos_x; // Where is the main looking at
+-			int y = WP(w, vp_d).scrollpos_y;
+-
+-			// set this view to same location. Based on the center, adjusting for zoom
+-			WP(w2, vp_d).scrollpos_x =  x - (w2->viewport->virtual_width -  w->viewport->virtual_width) / 2;
+-			WP(w2, vp_d).scrollpos_y =  y - (w2->viewport->virtual_height - w->viewport->virtual_height) / 2;
+-		} break;
+-		case 8: { /* inverse location button (move this view to same spot as main view) 'Copy Location' */
+-			const Window* w2 = FindWindowById(WC_MAIN_WINDOW, 0);
+-			int x = WP(w2, const vp_d).scrollpos_x;
+-			int y = WP(w2, const vp_d).scrollpos_y;
+-
+-			WP(w, vp_d).scrollpos_x =  x + (w2->viewport->virtual_width -  w->viewport->virtual_width) / 2;
+-			WP(w, vp_d).scrollpos_y =  y + (w2->viewport->virtual_height - w->viewport->virtual_height) / 2;
+-		} break;
++			case 5: /* zoom in */
++				DoZoomInOutWindow(ZOOM_IN, w);
++				break;
++			case 6: /* zoom out */
++				DoZoomInOutWindow(ZOOM_OUT, w);
++				break;
++			case 7: { /* location button (move main view to same spot as this view) 'Paste Location' */
++				Window *w2 = FindWindowById(WC_MAIN_WINDOW, 0);
++				int x = WP(w, vp_d).scrollpos_x; // Where is the main looking at
++				int y = WP(w, vp_d).scrollpos_y;
++	
++				// set this view to same location. Based on the center, adjusting for zoom
++				WP(w2, vp_d).scrollpos_x =  x - (w2->viewport->virtual_width -  w->viewport->virtual_width) / 2;
++				WP(w2, vp_d).scrollpos_y =  y - (w2->viewport->virtual_height - w->viewport->virtual_height) / 2;
++			} break;
++			case 8: { /* inverse location button (move this view to same spot as main view) 'Copy Location' */
++				const Window* w2 = FindWindowById(WC_MAIN_WINDOW, 0);
++				int x = WP(w2, const vp_d).scrollpos_x;
++				int y = WP(w2, const vp_d).scrollpos_y;
++	
++				WP(w, vp_d).scrollpos_x =  x + (w2->viewport->virtual_width -  w->viewport->virtual_width) / 2;
++				WP(w, vp_d).scrollpos_y =  y + (w2->viewport->virtual_height - w->viewport->virtual_height) / 2;
++			} break;
++			case 9: /* take a screenshot of the view in this viewport */
++				ShowScreenshotResult(MakeViewportScreenshot(w->viewport));
++				break;		
+ 		}
+ 	} break;
+ 
+@@ -989,7 +996,7 @@
+ }
+ 
+ static const WindowDesc _extra_view_port_desc = {
+-	-1,-1, 300, 268,
++	-1,-1, 320, 268,
+ 	WC_EXTRA_VIEW_PORT,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON | WDF_RESIZABLE,
+ 	_extra_view_port_widgets,
+@@ -1012,7 +1019,7 @@
+ 		// the main window with the main view
+ 		v = FindWindowById(WC_MAIN_WINDOW, 0);
+ 		// New viewport start ats (zero,zero)
+-		AssignWindowViewport(w, 3, 17, 294, 214, 0 , 0);
++		AssignWindowViewport(w, 3, 17, 314, 214, 0 , 0);
+ 
+ 		// center on same place as main window (zoom is maximum, no adjustment needed)
+ 		x = WP(v, vp_d).scrollpos_x;

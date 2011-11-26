@@ -1,0 +1,28 @@
+Index: ttd.c
+===================================================================
+--- ttd.c	(revision 2375)
++++ ttd.c	(working copy)
+@@ -1017,7 +1017,7 @@
+ 
+ 		// To bad the AI does not work in multiplayer, because states are not saved
+ 		//  perfectly
+-		if (!disable_computer && !_networking)
++		if (!disable_computer)
+ 			RunOtherPlayersLoop();
+ 
+ 		CallWindowTickEvent();
+Index: players.c
+===================================================================
+--- players.c	(revision 2375)
++++ players.c	(working copy)
+@@ -546,7 +546,9 @@
+ 	_cur_player_tick_index = (_cur_player_tick_index + 1) % MAX_PLAYERS;
+ 	if (p->name_1 != 0) GenerateCompanyName(p);
+ 
+-	if (!_networking && _game_mode != GM_MENU && !--_next_competitor_start) {
++	_next_competitor_start = 1;
++
++	if (_game_mode != GM_MENU && !--_next_competitor_start) {
+ 		MaybeStartNewPlayer();
+ 	}
+ }

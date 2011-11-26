@@ -1,0 +1,63 @@
+Index: network_udp.c
+===================================================================
+--- network_udp.c	(revision 2437)
++++ network_udp.c	(working copy)
+@@ -12,6 +12,8 @@
+ extern void UpdateNetworkGameWindow(bool unselect);
+ extern void NetworkPopulateCompanyInfo(void);
+ 
++static uint32 ping_time;
++
+ //
+ // This file handles all the LAN-stuff
+ // Stuff like:
+@@ -115,7 +117,10 @@
+ 		item->info.map_height    = NetworkRecv_uint16(&_udp_cs, p);
+ 		item->info.map_set       = NetworkRecv_uint8(&_udp_cs, p);
+ 		item->info.dedicated     = NetworkRecv_uint8(&_udp_cs, p);
++		item->info.ping = (_tick_counter - ping_time) * 27;
+ 
++		DEBUG(misc,0)("Ping time: %d milliseconds", item->info.ping);
++
+ 		if (item->info.hostname[0] == '\0')
+ 			snprintf(item->info.hostname, sizeof(item->info.hostname), "%s", inet_ntoa(client_addr->sin_addr));
+ 	}
+@@ -465,6 +470,8 @@
+ 
+ 		i++;
+ 	}
++	
++	ping_time = _tick_counter;
+ }
+ 
+ 
+@@ -510,6 +517,8 @@
+ 
+ 	NetworkUDPBroadCast(_udp_client_socket);
+ 	_network_udp_broadcast = 300; // Stay searching for 300 ticks
++	
++	ping_time = _tick_counter;	
+ }
+ 
+ NetworkGameList *NetworkUDPQueryServer(const char* host, unsigned short port)
+@@ -537,6 +546,8 @@
+ 	snprintf(item->info.hostname, sizeof(item->info.hostname), "%s", hostname);
+ 	item->online = false;
+ 
++	ping_time = _tick_counter;
++
+ 	// Init the packet
+ 	p = NetworkSend_Init(PACKET_UDP_CLIENT_FIND_SERVER);
+ 
+Index: network.h
+===================================================================
+--- network.h	(revision 2437)
++++ network.h	(working copy)
+@@ -74,6 +74,7 @@
+ 	byte map_set;																		// Graphical set
+ 	bool dedicated;																	// Is this a dedicated server?
+ 	char rcon_password[NETWORK_PASSWORD_LENGTH];		// RCon password for the server. "" if rcon is disabled
++	uint16 ping; // Ping time, in millisecs
+ } NetworkGameInfo;
+ 
+ typedef struct NetworkPlayerInfo {

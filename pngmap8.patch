@@ -1,0 +1,832 @@
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2915)
++++ functions.h	(working copy)
+@@ -256,7 +256,12 @@
+ 	SLD_LOAD_SCENARIO = 1,
+ 	SLD_SAVE_GAME = 2,
+ 	SLD_SAVE_SCENARIO = 3,
++#ifdef WITH_PNG
++	SLD_LOAD_PNG = 4,	
++	SLD_NEW_GAME = 5,
++#else //WITH_PNG
+ 	SLD_NEW_GAME = 4,
++#endif //WITH_PNG
+ };
+ void ShowSaveLoadDialog(int mode);
+ 
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2915)
++++ misc_gui.c	(working copy)
+@@ -1122,6 +1122,21 @@
+ {   WIDGETS_END},
+ };
+ 
++#ifdef WITH_PNG
++static const Widget _load_dialog_3_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,						STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   256,     0,    13, STR_4011_LOAD_PNG,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   127,    14,    25, STR_SORT_BY_NAME,		STR_SORT_ORDER_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   128,   256,    14,    25, STR_SORT_BY_DATE,		STR_SORT_ORDER_TIP},
++{     WWT_IMGBTN,  RESIZE_RIGHT,    14,     0,   256,    26,    47, 0x0,								STR_NULL},
++{     WWT_IMGBTN,     RESIZE_RB,    14,     0,   256,    48,   293, 0x0,								STR_NULL},
++{          WWT_6,     RESIZE_RB,    14,     2,   243,    50,   291, 0x0,								STR_400A_LIST_OF_DRIVES_DIRECTORIES},
++{  WWT_SCROLLBAR,    RESIZE_LRB,    14,   245,   256,    48,   281, 0x0,								STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   245,   256,   282,   293, 0x0,								STR_RESIZE_BUTTON},
++{   WIDGETS_END},
++};
++#endif //WITH_PNG
++
+ static const Widget _save_dialog_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,						STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   256,     0,    13, STR_4000_SAVE_GAME,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -1156,9 +1171,8 @@
+ {   WIDGETS_END},
+ };
+ 
+-
+ // Colors for fios types
+-const byte _fios_colors[] = {13, 9, 9, 6, 5, 6, 5};
++const byte _fios_colors[] = {13, 9, 9, 6, 5, 6, 5, 6};
+ 
+ void BuildFileList(void)
+ {
+@@ -1166,6 +1180,10 @@
+ 	FiosFreeSavegameList();
+ 	if (_saveload_mode == SLD_NEW_GAME || _saveload_mode == SLD_LOAD_SCENARIO || _saveload_mode == SLD_SAVE_SCENARIO) {
+ 		_fios_list = FiosGetScenarioList(&_fios_num, _saveload_mode);
++#ifdef WITH_PNG
++	} else if (_saveload_mode == SLD_LOAD_PNG) {
++		_fios_list = FiosGetPNGList(&_fios_num, _saveload_mode);
++#endif //WITH_PNG
+ 	} else
+ 		_fios_list = FiosGetSavegameList(&_fios_num, _saveload_mode);
+ }
+@@ -1229,6 +1247,10 @@
+ 
+ extern void StartupEngines(void);
+ 
++#ifdef WITH_PNG
++void LoadLandscapeFromPNG(void);
++#endif //WITH_PNG
++
+ static void SaveLoadDlgWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -1297,6 +1319,12 @@
+ 					ttd_strlcpy(_file_to_saveload.title, file->title, sizeof(_file_to_saveload.title));
+ 
+ 					DeleteWindow(w);
++#ifdef WITH_PNG
++				} else if (_saveload_mode == SLD_LOAD_PNG) {
++					ttd_strlcpy(_file_to_saveload.name, name, sizeof(_file_to_saveload.name));
++					DeleteWindow(w);
++					LoadLandscapeFromPNG();
++#endif //WITH_PNG
+ 				} else {
+ 					// SLD_SAVE_GAME, SLD_SAVE_SCENARIO copy clicked name to editbox
+ 					ttd_strlcpy(WP(w, querystr_d).text.buf, file->name, WP(w, querystr_d).text.maxlength);
+@@ -1406,11 +1434,24 @@
+ 	SaveLoadDlgWndProc,
+ };
+ 
++#ifdef WITH_PNG
++static const WindowDesc _load_png_dialog_desc = {
++	WDP_CENTER, WDP_CENTER, 257, 294,
++	WC_SAVELOAD,0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS | WDF_RESIZABLE,
++	_load_dialog_3_widgets,
++	SaveLoadDlgWndProc,
++};
++#endif //WITH_PNG
++
+ static const WindowDesc * const _saveload_dialogs[] = {
+ 	&_load_dialog_desc,
+ 	&_load_dialog_scen_desc,
+ 	&_save_dialog_desc,
+ 	&_save_dialog_scen_desc,
++#ifdef WITH_PNG
++	&_load_png_dialog_desc,
++#endif //WITH_PNG
+ };
+ 
+ void ShowSaveLoadDialog(int mode)
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2915)
++++ lang/english.txt	(working copy)
+@@ -557,11 +557,13 @@
+ STR_0225                                                        :{BLACK}{DOWNARROW}
+ STR_0226_RANDOM_LAND                                            :{BLACK}Random Land
+ STR_0227_RESET_LAND                                             :{BLACK}Reset Land
++STR_LOAD_LAND_FROM_PNG                                          :{BLACK}Load Land
+ STR_0228_INCREASE_SIZE_OF_LAND_AREA                             :{BLACK}Increase area of land to lower/raise
+ STR_0229_DECREASE_SIZE_OF_LAND_AREA                             :{BLACK}Decrease area of land to lower/raise
+ STR_022A_GENERATE_RANDOM_LAND                                   :{BLACK}Generate random land
+ STR_022B_RESET_LANDSCAPE                                        :{BLACK}Reset landscape
+-STR_022C_RESET_LANDSCAPE                                        :{WHITE}Reset Landscape
++STR_022C_RESET_LANDSCAPE                                        :{WHITE}Rebuild Landscape
++STR_LOAD_LANDSCAPE_FROM_PNG                                     :{BLACK}Load land from PNG
+ STR_022D_ARE_YOU_SURE_YOU_WANT_TO                               :{WHITE}Are you sure you want to reset the landscape?
+ STR_022E_LANDSCAPE_GENERATION                                   :{BLACK}Landscape generation
+ STR_022F_TOWN_GENERATION                                        :{BLACK}Town generation
+@@ -1365,6 +1367,15 @@
+ STR_CONFIG_PATCHES_MAP_X                                        :{LTBLUE}X-size of map: {ORANGE}{STRING1}
+ STR_CONFIG_PATCHES_MAP_Y                                        :{LTBLUE}Y-size of map: {ORANGE}{STRING1}
+ 
++
++##### PNG-MAP-Loader
++
++STR_PNGMAP_ARE_YOU_SURE                                         :{WHITE}Are you sure you want to load the landscape from map.png?
++STR_PNGMAP_ERROR                                                :{WHITE}Cannot load landscape from PNG...
++STR_PNGMAP_ERR_FILE_NOT_FOUND                                   :{WHITE}...file not found.
++STR_PNGMAP_ERR_IMAGE_TYPE                                       :{WHITE}...wrong file format. 4-bit indexed PNG needed.
++STR_PNGMAP_ERR_MISC                                             :{WHITE}...something just went wrong. Sorry.
++
+ ##id 0x0800
+ STR_0800_COST                                                   :{TINYFONT}{RED}Cost: {CURRENCY}
+ STR_0801_COST                                                   :{RED}Cost: {CURRENCY}
+@@ -1688,6 +1699,7 @@
+ STR_400E_SELECT_NEW_GAME_TYPE                                   :{WHITE}Select New Game Type
+ STR_400F_SELECT_SCENARIO_GREEN_PRE                              :{BLACK}Select scenario (green), pre-set game (blue), or random new game
+ STR_4010_GENERATE_RANDOM_NEW_GAME                               :Generate random new game
++STR_4011_LOAD_PNG                                              :{WHITE}Load PNG
+ 
+ ##id 0x4800
+ STR_4800_IN_THE_WAY                                             :{WHITE}{STRING} in the way
+Index: landscape.c
+===================================================================
+--- landscape.c	(revision 2915)
++++ landscape.c	(working copy)
+@@ -7,6 +7,7 @@
+ #include "player.h"
+ #include "spritecache.h"
+ #include "table/sprites.h"
++#include "table/strings.h"
+ #include "tile.h"
+ #include <stdarg.h>
+ #include "viewport.h"
+@@ -665,6 +666,173 @@
+ 		CreateDesertOrRainForest();
+ }
+ 
++#ifdef WITH_PNG
++#include "png.h"
++#include "debug.h"
++#include "gfx.h"
++#include "gui.h"
++
++void LoadLandscapeFromPNG(void) {
++	uint width, height, img_width, img_height;
++	uint row, col, img_row, img_col;
++	uint row_pad, col_pad, col_flip;
++	uint img_aspect, img_scale;
++	const uint num_div = 10000;
++	int i;
++	
++	byte current_tile;
++	
++	png_byte color_type;
++	png_byte bit_depth;
++
++	png_structp png_ptr;
++	png_infop info_ptr;
++	png_bytep * row_pointers=NULL;
++
++	FILE *fp=fopen(_file_to_saveload.name, "rb"); //TODO load it from a dialog!
++	if (!fp) {
++		ShowErrorMessage(STR_PNGMAP_ERR_FILE_NOT_FOUND, STR_PNGMAP_ERROR,0,0);
++		return;
++	}
++
++	png_ptr = png_create_read_struct (PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
++	if (!png_ptr) {
++		fclose(fp);
++		ShowErrorMessage(STR_PNGMAP_ERR_MISC, STR_PNGMAP_ERROR,0,0);
++		return;
++	}
++	info_ptr = png_create_info_struct(png_ptr);
++	if (!info_ptr || setjmp(png_jmpbuf(png_ptr))) {
++		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
++		fclose(fp);
++		ShowErrorMessage(STR_PNGMAP_ERR_MISC, STR_PNGMAP_ERROR,0,0);
++		return;
++	}
++	png_init_io(png_ptr, fp);
++
++	png_set_packing(png_ptr);
++	png_read_png(png_ptr, info_ptr, PNG_TRANSFORM_PACKING, NULL); //allocates memory for image
++	row_pointers = png_get_rows(png_ptr, info_ptr);
++	fclose(fp);
++
++	img_width = info_ptr->width;
++	img_height = info_ptr->height;
++	color_type = info_ptr->color_type;
++	bit_depth = info_ptr->bit_depth;
++
++
++	// maps of wrong color-depth are not used
++	if ((color_type != PNG_COLOR_TYPE_PALETTE) || (bit_depth != 8)) {
++		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
++		ShowErrorMessage(STR_PNGMAP_ERR_IMAGE_TYPE, STR_PNGMAP_ERROR,0,0);
++		return;
++	}
++
++
++	// get map size and calculate scale and padding values
++	width = MapSizeX();
++	height = MapSizeY();
++	row_pad = 0;
++	col_pad = 0;
++	
++	img_aspect = (img_width * num_div) / img_height;
++	if (img_aspect > ((width * num_div) / height)) {
++		// image is wider than map - center vertically
++		img_scale = (width * num_div) / img_width;
++		row_pad = (height - ((img_height * img_scale) / num_div)) / 2;
++	} else {
++		// image is taller than map - center horizontally
++		img_scale = (height * num_div) / img_height;
++		col_pad = (width - ((img_width * img_scale) / num_div)) / 2;
++	}
++	
++	
++	// form the landscape
++	for (row = 0; row < height; row++) {
++		for (col = 0; col < width; col++) {
++			// check if current tile is within the 1-pixel map edge or padding regions
++			if ((DistanceFromEdge(TileXY(col, row)) <= 1) ||
++					(row < row_pad) || (row >= (height - row_pad)) ||
++					(col < col_pad) || (col >= (width - col_pad))) {
++				current_tile = 0;
++			} else {
++				col_flip = width - col - 1; // flip image horizontally - TTD map is "backwards" horizontally
++
++				// use nearest neighbor resizing to scale map data
++				img_row = (((row - row_pad) * num_div) / img_scale);
++				img_col = (((col_flip - col_pad) * num_div) / img_scale);
++				
++				if ((img_row < img_height) && (img_col < img_width)) {
++					current_tile = row_pointers[img_row][img_col];
++				} else {
++					DEBUG(map, 0) ("Attempted image load outside of boundaries: %d,%d", img_col, img_row);
++					current_tile = 0;
++				}
++			}
++
++			SetTileHeight(TileXY(col, row), current_tile);
++            SetTileType(TileXY(col, row), MP_CLEAR);
++            _m[TileXY(col, row)].m5 = 0;
++			SetTileOwner(TileXY(col, row), OWNER_NONE);
++		}
++	}
++
++
++	// adjust height difference to 1 maximum horizontal/vertical
++	// top and left edges
++	for (row = 1; row < height - 2; row++) {
++		for (col = 1; col < width - 2; col++) {
++			// find lowest tile out of top and left
++			current_tile = TileHeight(TileXY(col-1, row)); // top edge
++			if (TileHeight(TileXY(col, row-1)) < current_tile) {
++				current_tile = TileHeight(TileXY(col, row-1)); // left edge
++			}
++			
++			// set current point to only 1 level higher than neighbors if it's higher
++			current_tile++;
++			if (current_tile > 15) {
++				current_tile = 15;
++			}
++			if (TileHeight(TileXY(col, row)) > current_tile) {
++				SetTileHeight(TileXY(col, row), current_tile);
++			}
++		}
++	}
++	
++	// bottom and right edges
++	for (row = height - 2; row > 0; row--) {
++		for (col = width - 2; col > 0; col--) {
++			// find lowest tile out of bottom and right
++			current_tile = TileHeight(TileXY(col+1, row)); // bottom edge
++			if (TileHeight(TileXY(col, row+1)) < current_tile) {
++				current_tile = TileHeight(TileXY(col, row+1)); // right edge
++			}
++			
++			// set current point to only 1 level higher than neighbors if it's higher
++			current_tile++;
++			if (current_tile > 15) {
++				current_tile = 15;
++			}
++			if (TileHeight(TileXY(col, row)) > current_tile) {
++				SetTileHeight(TileXY(col, row), current_tile);
++			}
++		}
++	}
++
++	
++	ConvertGroundTilesIntoWaterTiles();
++
++	for(i=0x500; i!=0; i--)
++		RunTileLoop();	
++	
++	MarkWholeScreenDirty();
++
++	png_destroy_read_struct(&png_ptr, &info_ptr, NULL); //free all memory of libpng
++}
++
++
++#endif//WITH_PNG
++
+ void OnTick_Town(void);
+ void OnTick_Trees(void);
+ void OnTick_Station(void);
+Index: win32.c
+===================================================================
+--- win32.c	(revision 2915)
++++ win32.c	(working copy)
+@@ -834,7 +834,104 @@
+ 	return _fios_items;
+ }
+ 
++#ifdef WITH_PNG
++// Get a list of PNGs
++FiosItem *FiosGetPNGList(int *num, int mode)
++{
++	FiosItem *fios;
++	WIN32_FIND_DATA fd;
++	HANDLE h;
++	int sort_start;
+ 
++	if (_fios_scn_path == NULL) {
++		_fios_scn_path = malloc(MAX_PATH);
++		strcpy(_fios_scn_path, _path.scenario_dir);
++	}
++
++	_fios_path = _fios_scn_path;
++
++	// Parent directory, only if not of the type C:\.
++	if (_fios_path[3] != '\0' && mode != SLD_NEW_GAME) {
++		fios = FiosAlloc();
++		fios->type = FIOS_TYPE_PARENT;
++		fios->mtime = 0;
++		strcpy(fios->title, ".. (Parent directory)");
++	}
++
++	// Show subdirectories first
++	h = MyFindFirstFile(_fios_scn_path, "*.*", &fd);
++	if (h != INVALID_HANDLE_VALUE && mode != SLD_NEW_GAME) {
++		do {
++			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY &&
++					strcmp(fd.cFileName, ".") != 0 &&
++					strcmp(fd.cFileName, "..") != 0) {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_DIR;
++				fios->mtime = 0;
++				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
++				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", fd.cFileName);
++			}
++		} while (FindNextFile(h, &fd));
++		FindClose(h);
++	}
++
++	{
++		/* XXX ugly global variables ... */
++		byte order = _savegame_sort_order;
++		_savegame_sort_order = 2; // sort ascending by name
++		qsort(_fios_items, _fios_count, sizeof(FiosItem), compare_FiosItems);
++		_savegame_sort_order = order;
++	}
++
++	// this is where to start sorting
++	sort_start = _fios_count;
++
++	/* Show PNGs */
++	h = MyFindFirstFile(_fios_scn_path, "*.*", &fd);
++	if (h != INVALID_HANDLE_VALUE) {
++		do {
++			char *t;
++
++			if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
++
++			t = strrchr(fd.cFileName, '.');
++			if (t == NULL) continue;
++
++			if (strcasecmp(t, ".png") == 0) { // OpenTTD
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_PNG;
++				fios->mtime = *(uint64*)&fd.ftLastWriteTime;
++				ttd_strlcpy(fios->name, fd.cFileName, lengthof(fios->name));
++
++				*t = '\0'; // strip extension
++				ttd_strlcpy(fios->title, fd.cFileName, lengthof(fios->title));
++			}
++		} while (FindNextFile(h, &fd));
++		FindClose(h);
++	}
++
++	qsort(_fios_items + sort_start, _fios_count - sort_start, sizeof(FiosItem), compare_FiosItems);
++
++	// Drives
++	if (mode != SLD_NEW_GAME) {
++		char drives[256];
++		const char *s;
++
++		GetLogicalDriveStrings(sizeof(drives), drives);
++		for (s = drives; *s != '\0';) {
++			fios = FiosAlloc();
++			fios->type = FIOS_TYPE_DRIVE;
++			sprintf(fios->name, "%c:", s[0]);
++			sprintf(fios->title, "%c:", s[0]);
++			while (*s++ != '\0') {}
++		}
++	}
++
++	*num = _fios_count;
++	return _fios_items;
++}
++#endif //WITH_PNG
++
+ // Free the list of savegames
+ void FiosFreeSavegameList(void)
+ {
+@@ -870,7 +967,12 @@
+ 		case FIOS_TYPE_FILE:
+ 		case FIOS_TYPE_OLDFILE:
+ 		case FIOS_TYPE_SCENARIO:
+-		case FIOS_TYPE_OLD_SCENARIO: {
++#ifdef WITH_PNG
++		case FIOS_TYPE_OLD_SCENARIO:
++		case FIOS_TYPE_PNG: {
++#else //WITH_PNG
++	case FIOS_TYPE_OLD_SCENARIO: {
++#endif //WITH_PNG
+ 			static char str_buffr[512];
+ 
+ 			sprintf(str_buffr, "%s\\%s", path, item->name);
+Index: os2.c
+===================================================================
+--- os2.c	(revision 2915)
++++ os2.c	(working copy)
+@@ -320,7 +320,117 @@
+ 	return _fios_items;
+ }
+ 
++#ifdef WITH_PNG
++// Get a list of PNGs
++FiosItem *FiosGetPNGList(int *num, int mode)
++{
++	FiosItem *fios;
++	DIR *dir;
++	struct dirent *dirent;
++	struct stat sb;
++	int sort_start;
++	char filename[MAX_PATH];
+ 
++	if (_fios_scn_path == NULL) {
++		_fios_scn_path = malloc(MAX_PATH);
++		strcpy(_fios_scn_path, _path.scenario_dir);
++	}
++
++	_fios_path = _fios_scn_path;
++
++	// Parent directory, only if not of the type C:\.
++	if (_fios_path[3] != '\0' && mode != SLD_NEW_GAME) {
++		fios = FiosAlloc();
++		fios->type = FIOS_TYPE_PARENT;
++		fios->mtime = 0;
++		strcpy(fios->title, ".. (Parent directory)");
++	}
++
++	// Show subdirectories first
++	dir = opendir(_fios_path);
++	if (dir != NULL) {
++		while ((dirent = readdir(dir)) != NULL) {
++			append_path(filename, _fios_path, dirent->d_name);
++			if (!stat(filename, &sb) && S_ISDIR(sb.st_mode) &&
++					strcmp(dirent->d_name, ".") != 0 &&
++					strcmp(dirent->d_name, "..") != 0) {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_DIR;
++				fios->mtime = 0;
++				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++				snprintf(fios->title, lengthof(fios->title), "%s\\ (Directory)", dirent->d_name);
++			}
++		}
++		closedir(dir);
++	}
++
++	{
++		/* XXX ugly global variables ... */
++		byte order = _savegame_sort_order;
++		_savegame_sort_order = 2; // sort ascending by name
++		qsort(_fios_items, _fios_count, sizeof(FiosItem), compare_FiosItems);
++		_savegame_sort_order = order;
++	}
++
++	// this is where to start sorting
++	sort_start = _fios_count;
++
++	/* Show PNGs */
++	dir = opendir(_fios_path);
++	if (dir != NULL) {
++		while ((dirent = readdir(dir)) != NULL) {
++			char *t;
++
++			append_path(filename, _fios_path, dirent->d_name);
++			if (stat(filename, &sb) || S_ISDIR(sb.st_mode)) continue;
++
++			t = strrchr(dirent->d_name, '.');
++			if (t == NULL) continue;
++
++			if (strcasecmp(t, ".png") == 0) {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_PNG;
++				fios->mtime = sb.st_mtime;
++				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++
++				*t = '\0'; // strip extension
++				ttd_strlcpy(fios->title, dirent->d_name, lengthof(fios->title));
++			}
++		}
++		closedir(dir);
++	}
++
++	qsort(_fios_items + sort_start, _fios_count - sort_start, sizeof(FiosItem), compare_FiosItems);
++
++	// Drives
++	if (mode != SLD_NEW_GAME) {
++		unsigned save, disk, disk2, total;
++
++		/* save original drive */
++		_dos_getdrive(&save);
++
++		/* get available drive letters */
++
++		for (disk = 1; disk < 27; ++disk) {
++			_dos_setdrive(disk, &total);
++			_dos_getdrive(&disk2);
++
++			if (disk == disk2) {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_DRIVE;
++				sprintf(fios->name, "%c:", 'A' + disk - 1);
++				sprintf(fios->title, "%c:", 'A' + disk - 1);
++			}
++		}
++
++		_dos_setdrive(save, &total);
++	}
++
++	*num = _fios_count;
++	return _fios_items;
++}
++#endif //WITH_PNG
++
+ // Free the list of savegames
+ void FiosFreeSavegameList(void)
+ {
+@@ -356,7 +466,12 @@
+ 		case FIOS_TYPE_FILE:
+ 		case FIOS_TYPE_OLDFILE:
+ 		case FIOS_TYPE_SCENARIO:
+-		case FIOS_TYPE_OLD_SCENARIO: {
++#ifdef WITH_PNG
++		case FIOS_TYPE_OLD_SCENARIO:
++		case FIOS_TYPE_PNG: {
++#else //WITH_PNG
++	case FIOS_TYPE_OLD_SCENARIO: {
++#endif //WITH_PNG
+ 			static char str_buffr[512];
+ 
+ 			sprintf(str_buffr, "%s\\%s", path, item->name);
+Index: unix.c
+===================================================================
+--- unix.c	(revision 2915)
++++ unix.c	(working copy)
+@@ -281,7 +281,93 @@
+ 	return _fios_items;
+ }
+ 
++#ifdef WITH_PNG
++// Get a list of PNGs
++// FIXME: Gross code duplication with FiosGetSavegameList()
++FiosItem *FiosGetPNGList(int *num, int mode)
++{
++	FiosItem *fios;
++	DIR *dir;
++	struct dirent *dirent;
++	struct stat sb;
++	int sort_start;
++	char filename[MAX_PATH];
+ 
++	if (_fios_scn_path == NULL) {
++		_fios_scn_path = malloc(MAX_PATH);
++		strcpy(_fios_scn_path, _path.scenario_dir);
++	}
++
++	_fios_path = _fios_scn_path;
++
++	// Parent directory, only if not of the type C:\.
++	if (_fios_path[1] != '\0' && mode != SLD_NEW_GAME) {
++		fios = FiosAlloc();
++		fios->type = FIOS_TYPE_PARENT;
++		fios->mtime = 0;
++		strcpy(fios->title, ".. (Parent directory)");
++	}
++
++	// Show subdirectories first
++	dir = opendir(_fios_path);
++	if (dir != NULL) {
++		while ((dirent = readdir(dir)) != NULL) {
++			snprintf(filename, lengthof(filename), "%s/%s",
++				_fios_path, dirent->d_name);
++			if (!stat(filename, &sb) && S_ISDIR(sb.st_mode) &&
++					dirent->d_name[0] != '.') {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_DIR;
++				fios->mtime = 0;
++				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++				snprintf(fios->title, lengthof(fios->title), "%s/ (Directory)", dirent->d_name);
++			}
++		}
++		closedir(dir);
++	}
++
++	{
++		/* XXX ugly global variables ... */
++		byte order = _savegame_sort_order;
++		_savegame_sort_order = 2; // sort ascending by name
++		qsort(_fios_items, _fios_count, sizeof(FiosItem), compare_FiosItems);
++		_savegame_sort_order = order;
++	}
++
++	// this is where to start sorting
++	sort_start = _fios_count;
++
++	/* Show PNG files */
++	dir = opendir(_fios_path);
++	if (dir != NULL) {
++		while ((dirent = readdir(dir)) != NULL) {
++			char *t;
++
++			snprintf(filename, lengthof(filename), "%s/%s", _fios_path, dirent->d_name);
++			if (stat(filename, &sb) || S_ISDIR(sb.st_mode)) continue;
++
++			t = strrchr(dirent->d_name, '.');
++			if (t == NULL) continue;
++			
++			if (strcasecmp(t, ".png") == 0) {
++				fios = FiosAlloc();
++				fios->type = FIOS_TYPE_PNG;
++				fios->mtime = sb.st_mtime;
++				ttd_strlcpy(fios->name, dirent->d_name, lengthof(fios->name));
++
++				*t = '\0'; // strip extension
++				ttd_strlcpy(fios->title, dirent->d_name, lengthof(fios->title));
++			}
++		}
++		closedir(dir);
++	}
++
++	qsort(_fios_items + sort_start, _fios_count - sort_start, sizeof(FiosItem), compare_FiosItems);
++	*num = _fios_count;
++	return _fios_items;
++}
++#endif //WITH_PNG
++
+ // Free the list of savegames
+ void FiosFreeSavegameList(void)
+ {
+@@ -313,7 +399,12 @@
+ 		case FIOS_TYPE_FILE:
+ 		case FIOS_TYPE_OLDFILE:
+ 		case FIOS_TYPE_SCENARIO:
+-		case FIOS_TYPE_OLD_SCENARIO: {
++#ifdef WITH_PNG
++		case FIOS_TYPE_OLD_SCENARIO:
++		case FIOS_TYPE_PNG: {
++#else //WITH_PNG
++	case FIOS_TYPE_OLD_SCENARIO: {
++#endif //WITH_PNG
+ 			static char str_buffr[512];
+ 
+ 			sprintf(str_buffr, "%s/%s", path, item->name);
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2915)
++++ main_gui.c	(working copy)
+@@ -1094,6 +1094,10 @@
+ {   WIDGETS_END},
+ };
+ 
++#ifdef WITH_PNG
++void LoadLandscapeFromPNG(void);
++#endif//WITH_PNG
++
+ // Ask first to reset landscape or to make a random landscape
+ static void AskResetLandscapeWndProc(Window *w, WindowEvent *e)
+ {
+@@ -1102,7 +1106,8 @@
+ 	switch(e->event) {
+ 	case WE_PAINT:
+ 		DrawWindowWidgets(w);
+-		DrawStringMultiCenter(90, 38, mode?STR_022D_ARE_YOU_SURE_YOU_WANT_TO:STR_GENERATE_RANDOM_LANDSCAPE , 168);
++		DrawStringMultiCenter(90, 38, mode==2?STR_PNGMAP_ARE_YOU_SURE:
++								mode==1?STR_022D_ARE_YOU_SURE_YOU_WANT_TO:STR_GENERATE_RANDOM_LANDSCAPE , 168);
+ 		break;
+ 	case WE_CLICK:
+ 		switch(e->click.widget) {
+@@ -1115,7 +1120,11 @@
+ 			DeleteWindowByClass(WC_TOWN_VIEW);
+ 			DeleteWindowByClass(WC_LAND_INFO);
+ 
+-			if (mode) { // reset landscape
++			if (mode==2) { // load landscape from png
++#ifdef WITH_PNG
++				ShowSaveLoadDialog(SLD_LOAD_PNG);
++#endif//WITH_PNG
++			} else if (mode==1) { // reset landscape
+ 				ResetLandscape();
+ 			} else { // make random landscape
+ 				SndPlayFx(SND_15_BEEP);
+@@ -1252,7 +1261,7 @@
+ {   WWT_TEXTBTN,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5,                  STR_018B_CLOSE_WINDOW},
+ {   WWT_CAPTION,   RESIZE_NONE,     7,    11,   169,     0,    13, STR_0223_LAND_GENERATION,  STR_018C_WINDOW_TITLE_DRAG_THIS},
+ { WWT_STICKYBOX,   RESIZE_NONE,     7,   170,   181,     0,    13, STR_NULL,                  STR_STICKY_BUTTON},
+-{    WWT_IMGBTN,   RESIZE_NONE,     7,     0,   181,    14,   101, STR_NULL,                  STR_NULL},
++{    WWT_IMGBTN,   RESIZE_NONE,     7,     0,   181,    14,   114, STR_NULL,                  STR_NULL},
+ 
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,     2,    23,    14,    35, SPR_IMG_DYNAMITE,          STR_018D_DEMOLISH_BUILDINGS_ETC},
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,    24,    45,    14,    35, SPR_IMG_TERRAFORM_DOWN,    STR_018F_RAISE_A_CORNER_OF_LAND},
+@@ -1266,6 +1275,7 @@
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,   139,   149,    56,    67, STR_0225,                  STR_0229_DECREASE_SIZE_OF_LAND_AREA},
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,    34,   149,    75,    86, STR_0226_RANDOM_LAND,      STR_022A_GENERATE_RANDOM_LAND},
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,    34,   149,    88,    99, STR_0227_RESET_LAND,       STR_022B_RESET_LANDSCAPE},
++{   WWT_TEXTBTN,   RESIZE_NONE,    14,    34,   149,   101,   112, STR_LOAD_LAND_FROM_PNG,    STR_LOAD_LANDSCAPE_FROM_PNG},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1405,9 +1415,12 @@
+ 			AskResetLandscape(0);
+ 			break;
+ 		case 15: /* reset landscape */
+-			HandleButtonClick(w,15);
++			HandleButtonClick(w, 15);
+ 			AskResetLandscape(1);
+ 			break;
++		case 16: /* landscape from png */
++			HandleButtonClick(w, 16);
++			AskResetLandscape(2);
+ 		}
+ 		break;
+ 
+@@ -1436,7 +1449,7 @@
+ }
+ 
+ static const WindowDesc _scen_edit_land_gen_desc = {
+-	-1,-1, 182, 102,
++	-1,-1, 182, 115,
+ 	WC_SCEN_LAND_GEN,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_scen_edit_land_gen_widgets,
+@@ -1445,7 +1458,11 @@
+ 
+ static inline void ShowEditorTerraformToolBar(void)
+ {
+-	AllocateWindowDescFront(&_scen_edit_land_gen_desc, 0);
++	Window * w;
++	w = AllocateWindowDescFront(&_scen_edit_land_gen_desc, 0);
++#ifndef WITH_PNG
++	SETBIT(w->disabled_state, 16);
++#endif
+ }
+ 
+ static void ToolbarScenGenLand(Window *w)
+Index: hal.h
+===================================================================
+--- hal.h	(revision 2915)
++++ hal.h	(working copy)
+@@ -62,6 +62,9 @@
+ 	FIOS_TYPE_OLDFILE = 4,
+ 	FIOS_TYPE_SCENARIO = 5,
+ 	FIOS_TYPE_OLD_SCENARIO = 6,
++#ifdef WITH_PNG
++	FIOS_TYPE_PNG = 7,
++#endif //WITH_PNG
+ };
+ 
+ 
+@@ -79,6 +82,12 @@
+ FiosItem *FiosGetSavegameList(int *num, int mode);
+ // Get a list of scenarios
+ FiosItem *FiosGetScenarioList(int *num, int mode);
++
++#ifdef WITH_PNG
++// Get a list of PNGs
++FiosItem *FiosGetPNGList(int *num, int mode);
++#endif //WITH_PNG
++
+ // Free the list of savegames
+ void FiosFreeSavegameList(void);
+ // Browse to. Returns a filename w/path if we reached a file.

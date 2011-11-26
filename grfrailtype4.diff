@@ -1,0 +1,33 @@
+Index: newgrf.c
+===================================================================
+--- newgrf.c	(revision 3059)
++++ newgrf.c	(working copy)
+@@ -215,7 +215,14 @@
+ 			FOR_EACH_OBJECT {
+ 				uint8 tracktype = grf_load_byte(&buf);
+ 
+-				ei[i].railtype = tracktype;
++				switch (tracktype) {
++					case 0: ei[i].railtype = RAILTYPE_RAIL; break;
++					case 1: ei[i].railtype = RAILTYPE_MONO; break;
++					case 2: ei[i].railtype = RAILTYPE_MAGLEV; break;
++					default:
++						grfmsg(GMS_WARN, "RailVehicleChangeInfo: Invalid track type %d specified, ignoring.", tracktype);
++						break;
++				}
+ 			}
+ 		} break;
+ 		case 0x08: { /* AI passenger service */
+@@ -339,9 +346,10 @@
+ 					engclass = 0;
+ 				else if (traction <= 0x27)
+ 					engclass = 1;
+-				else if (traction <= 0x31)
++				else if (traction <= 0x31) {
+ 					engclass = 2;
+-				else
++					ei[i].railtype = RAILTYPE_ELECTRIC;
++				} else
+ 					break;
+ 
+ 				rvi[i].engclass = engclass;

@@ -1,0 +1,28 @@
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2437)
++++ disaster_cmd.c	(working copy)
+@@ -963,8 +963,8 @@
+ 	int i,j;
+ 
+ 	for(i=j=0; i!=lengthof(_dis_years); i++) {
+-		if (year >= _dis_years[i].min &&
+-				year < _dis_years[i].max)
++		//if (year >= _dis_years[i].min &&
++		//		year < _dis_years[i].max)
+ 					buf[j++] = i;
+ 	}
+ 
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 2437)
++++ console_cmds.c	(working copy)
+@@ -94,6 +94,8 @@
+ 		return true;
+ 	}
+ 
++	_disaster_delay = 1;
++
+ 	StartupEngines();
+ 	return true;
+ }

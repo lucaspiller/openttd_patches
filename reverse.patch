@@ -1,0 +1,173 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2387)
++++ train_cmd.c	(working copy)
+@@ -18,6 +18,8 @@
+ #include "waypoint.h"
+ #include "vehicle_gui.h"
+ 
++#include "debug.h"
++
+ #define IS_FIRSTHEAD_SPRITE(spritenum) \
+ 	(is_custom_sprite(spritenum) ? IS_CUSTOM_FIRSTHEAD_SPRITE(spritenum) : _engine_sprite_add[spritenum] == 0)
+ 
+@@ -274,13 +276,21 @@
+ {
+ 	int img = v->spritenum;
+ 	int base;
++	
++	Vehicle *n;
+ 
+ 	if (is_custom_sprite(img)) {
+ 		base = GetCustomVehicleSprite(v, direction + 4 * IS_CUSTOM_SECONDHEAD_SPRITE(img));
+ 		if (base != 0) return base;
+ 		img = _engine_original_sprites[v->engine_type];
+ 	}
+-
++	
++	if (v->reversing)
++		direction += 4;	
++		
++	if (GetLastVehicleInChain(v) == v)
++		direction += 2;
++		
+ 	base = _engine_sprite_base[img] + ((direction + _engine_sprite_add[img]) & _engine_sprite_and[img]);
+ 
+ 	if (v->cargo_count >= (v->cargo_cap >> 1))
+@@ -294,7 +304,7 @@
+ 
+ 	int img = rvi->image_index;
+ 	uint32 image = 0;
+-
++	
+ 	if (is_custom_sprite(img)) {
+ 		image = GetCustomVehicleIcon(engine, 6);
+ 		if (image == 0) img = _engine_original_sprites[engine];
+@@ -1130,7 +1140,7 @@
+ 	/* locate vehicles to swap */
+ 	for(a=v; l!=0; l--) { a = a->next; }
+ 	for(b=v; r!=0; r--) { b = b->next; }
+-
++	
+ 	if (a != b) {
+ 		/* swap the hidden bits */
+ 		{
+@@ -1141,7 +1151,6 @@
+ 
+ 		/* swap variables */
+ 		swap_byte(&a->u.rail.track, &b->u.rail.track);
+-		swap_byte(&a->direction, &b->direction);
+ 
+ 		/* toggle direction */
+ 		if (!(a->u.rail.track & 0x80)) a->direction ^= 4;
+@@ -1196,8 +1205,9 @@
+ static void ReverseTrainDirection(Vehicle *v)
+ {
+ 	int l = 0, r = -1;
+-	Vehicle *u;
+-
++	Vehicle *u, *p = NULL, *q, *last;
++	byte tmpsub;
++	
+ 	if (IsTileDepotType(v->tile, TRANSPORT_RAIL))
+ 		InvalidateWindow(WC_VEHICLE_DEPOT, v->tile);
+ 
+@@ -1217,14 +1227,34 @@
+ 		DisableTrainCrossing(tile);
+ 	}
+ 
+-	// count number of vehicles
++	// count number of vehicles and set reverse flag
++	
++	r = 0;
++	
+ 	u = v;
+-	do r++; while ( (u = u->next) != NULL );
++	last = GetLastVehicleInChain(v);
++	tmpsub = last->subtype;
++	last->subtype = v->subtype;
++	v->subtype = tmpsub;
+ 
++	while (u != NULL)
++	{
++		r++;
++		u->reversing = !u->reversing;
++		if (!(u->u.rail.track & 0x80)) u->direction ^= 4;
++		u->first = last;
++		q = u->next;
++	  	u->next = p;
++		p = u;
++		u = q;
++	}
++		
++	DEBUG(misc,0)("%d", r);
++	
+ 	/* swap start<>end, start+1<>end-1, ... */
+-	do {
+-		ReverseTrainSwapVeh(v, l++, r--);
+-	} while (l <= r);
++	//do {
++	//	ReverseTrainSwapVeh(v, l++, r--);
++	//} while (l <= r);
+ 
+ 	if (IsTileDepotType(v->tile, TRANSPORT_RAIL))
+ 		InvalidateWindow(WC_VEHICLE_DEPOT, v->tile);
+@@ -2675,7 +2705,7 @@
+ invalid_rail:
+ 	/* We've reached end of line?? */
+ 	if (prev != NULL) {
+-		error("!Disconnecting train");
++		//error("!Disconnecting train");
+ 	}
+ 	goto reverse_train_direction;
+ 
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2387)
++++ vehicle.c	(working copy)
+@@ -375,7 +375,7 @@
+ 	Vehicle* u;
+ 
+ 	if (v->first != NULL) {
+-		if (v->first->subtype == TS_Front_Engine) return v->first;
++		if (v->subtype == TS_Front_Engine) return v->first;
+ 
+ 		DEBUG(misc, 0) ("v->first cache faulty. We shouldn't be here, rebuilding cache!");
+ 	}
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2387)
++++ vehicle.h	(working copy)
+@@ -151,6 +151,7 @@
+ 	int32 y_pos;
+ 	byte z_pos;
+ 	byte direction;		// facing
++	bool reversing; 
+ 
+ 	byte spritenum; // currently displayed sprite index
+ 	                // 0xfd == custom sprite, 0xfe == custom second head sprite
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2387)
++++ train_gui.c	(working copy)
+@@ -281,6 +281,8 @@
+ 
+ static void DrawTrainImage(const Vehicle *v, int x, int y, int count, int skip, VehicleID selection)
+ {
++	//if (v->reversing)
++	//	x += (count * 29);
+ 	do {
+ 		if (--skip < 0) {
+ 			int image = GetTrainImage(v, 6);
+@@ -288,7 +290,10 @@
+ 			if (v->vehstatus & VS_CRASHED) ormod = 0x3248000;
+ 			DrawSprite(image | ormod, x+14, y+6+_traininfo_vehicle_pitch);
+ 			if (v->index == selection) DrawFrameRect(x-1, y-1, x+28, y+12, 15, 0x10);
+-			x += 29;
++	//		if (v->reversing)
++	//			x -= 29;
++	//		else
++				x+= 29;
+ 			count--;
+ 		}
+ 

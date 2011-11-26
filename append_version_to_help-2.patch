@@ -1,0 +1,32 @@
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 3308)
++++ openttd.c	(working copy)
+@@ -60,6 +60,7 @@
+ extern void SetDifficultyLevel(int mode, GameOptions *gm_opt);
+ extern void DoStartupNewPlayer(bool is_ai);
+ extern void ShowOSErrorBox(const char *buf);
++extern char _openttd_revision[];
+ 
+ /* TODO: usrerror() for errors which are not of an internal nature but
+  * caused by the user, i.e. missing files or fatal configuration errors.
+@@ -120,6 +121,11 @@
+ 	return mem;
+ }
+ 
++static void showversion(void)
++{
++	ShowInfoF("Version: %s\n", _openttd_revision);
++}
++
+ static void showhelp(void)
+ {
+ 	char buf[4096], *p;
+@@ -397,6 +403,7 @@
+ 		case -2:
+ 		case 'h':
+ 			showhelp();
++			showversion();
+ 			return 0;
+ 		}
+ 	}

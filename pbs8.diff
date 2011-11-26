@@ -1,0 +1,1907 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2456)
++++ station_cmd.c	(working copy)
+@@ -19,6 +19,7 @@
+ #include "airport.h"
+ #include "sprite.h"
+ #include "depot.h"
++#include "pbs.h"
+ 
+ enum {
+ 	/* Max stations: 64000 (64 * 1000) */
+@@ -2154,6 +2155,18 @@
+ 		} else {
+ 			AddChildSpriteScreen(image, dtss->delta_x, dtss->delta_y);
+ 		}
++#ifdef PBS_SHOW_RESERVED
++{
++	byte pbs = PBSTileReserved(ti->tile);
++	assert(pbs != 0xFF);
++	if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(0x3ED | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite(0x3EE | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_UPPER) DrawGroundSprite(0x3EF | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LOWER) DrawGroundSprite(0x3F0 | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite(0x3F2 | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite(0x3F1 | PALETTE_CRASH);
++}
++#endif
+ 	}
+ }
+ 
+Index: npf.c
+===================================================================
+--- npf.c	(revision 2456)
++++ npf.c	(working copy)
+@@ -11,6 +11,18 @@
+ 
+ AyStar _npf_aystar;
+ 
++/*
++const byte _track_exitdir_to_trackdir[6][4] = {
++	{0,    0xff, 8,    0xff},
++	{0xff, 1,    0xff, 9},
++	{2,    0xff, 0xff, 10},
++	{0xff, 3,    11,   0xf},
++	{0xff, 0xff, 4,    12},
++	{13,   5,    0xff, 0xff}
++};
++
++*/
++
+ /* The cost of each trackdir. A diagonal piece is the full NPF_TILE_LENGTH,
+  * the shorter piece is sqrt(2)/2*NPF_TILE_LENGTH =~ 0.7071
+  */
+@@ -21,6 +33,8 @@
+ 	NPF_TILE_LENGTH, NPF_TILE_LENGTH, NPF_STRAIGHT_LENGTH, NPF_STRAIGHT_LENGTH, NPF_STRAIGHT_LENGTH, NPF_STRAIGHT_LENGTH
+ };
+ 
++bool IsEndOfLine(TileIndex tile, byte trackdir);
++
+ uint NTPHash(uint key1, uint key2)
+ {
+ 	/* This function uses the old hash, which is fixed on 10 bits (1024 buckets) */
+@@ -84,6 +98,71 @@
+ 	return TILE_XY(tx,ty);
+ };
+ 
++void NPFReservePBSPath(AyStar *as)
++{
++	NPFFoundTargetData* ftd = (NPFFoundTargetData*)as->user_path;
++	bool eolstuff = false;
++
++	if (ftd->best_trackdir == 0xFF)
++		return;
++
++	if (!NPFGetFlag(&ftd->node, NPF_FLAG_PBS_EXIT) && IsEndOfLine(ftd->node.tile, ftd->node.direction) && !NPFGetFlag(&ftd->node, NPF_FLAG_SEEN_SIGNAL)) {
++		eolstuff = true;
++		NPFSetFlag(&ftd->node, NPF_FLAG_PBS_EXIT, true);
++		if (!NPFGetFlag(&ftd->node, NPF_FLAG_PBS_TARGET_SEEN))
++			NPFSetFlag(&ftd->node, NPF_FLAG_PBS_RED, true);
++	}
++
++	if (!NPFGetFlag(&ftd->node, NPF_FLAG_PBS_CHOICE)) {
++		NPFSetFlag(&ftd->node, NPF_FLAG_PBS_RED, false);
++	}
++
++	if (NPFGetFlag(&ftd->node, NPF_FLAG_PBS_EXIT) &&
++		  !NPFGetFlag(&ftd->node, NPF_FLAG_PBS_BLOCKED) &&
++		  (  ((as->user_data[NPF_PBS_MODE] & PBS_MODE_MASK) != PBS_MODE_GREEN) ||
++			   (!NPFGetFlag(&ftd->node, NPF_FLAG_PBS_RED))
++		  ) ) {
++		PathNode parent;
++		PathNode *curr = &parent;
++		PathNode *prev = NULL;
++		TileIndex start = INVALID_TILE;
++		byte trackdir = 0;
++
++		parent.node = ftd->node;
++		parent.parent = &ftd->path;
++
++		do {
++			if (!NPFGetFlag(&curr->node, NPF_FLAG_PBS_EXIT) || eolstuff) {
++				if ((PBSTileUnavail(curr->node.tile) & (1 << curr->node.direction))
++				&& !(PBSTileReserved(curr->node.tile) & (1 << (curr->node.direction & 7)))
++				&& (start != INVALID_TILE)) {
++					PBSClearPath(start, trackdir);
++					NPFSetFlag(&ftd->node, NPF_FLAG_PBS_BLOCKED, true);
++					DEBUG(pbs, 1) ("PBS: Self-crossing path!!!");
++					return;
++				};
++
++				PBSReserveTrack(curr->node.tile, (curr->node.direction & 7) );
++
++				if (prev != NULL && start == INVALID_TILE) {
++					PBSReserveTrack(prev->node.tile, (prev->node.direction & 7) );
++					start = prev->node.tile;
++					trackdir = ReverseTrackdir(prev->node.direction);
++				}
++			}
++
++			//if (IsTileType(parent->node.tile, MP_TUNNELBRIDGE) && (_map5[parent->node.tile] & 0xF0)==0 && (_map5[parent->node.tile] & 3) == _trackdir_to\_exitdir[parent->node.direction])
++//			if ((curr->parent != NULL) && IsTileType(curr->node.tile, MP_TUNNELBRIDGE) && (_map5[curr->node.tile] & 0xF0)==0)
++//						curr = curr->parent;
++
++			prev = curr;
++			curr = curr->parent;
++		} while (curr != NULL);
++	}
++
++}
++
++
+ /* Calcs the heuristic to the target station or tile. For train stations, it
+  * takes into account the direction of approach.
+  */
+@@ -105,15 +184,26 @@
+ 		/* Ships and trains can also go diagonal, so the minimum distance is shorter */
+ 		dist = DistanceTrack(from, to) * NPF_TILE_LENGTH;
+ 
+-	if (dist < ftd->best_bird_dist) {
++	DEBUG(npf, 4)("Calculating H for: (%d, %d). Result: %d", TileX(current->tile), TileY(current->tile), dist);
++
++	if ((as->user_data[NPF_PBS_MODE] != PBS_MODE_NONE)
++	&&  (!NPFGetFlag(current , NPF_FLAG_SEEN_SIGNAL))
++	&&  (!IsEndOfLine(current->tile, current->direction)))
++		return dist;
++
++	if ((dist < ftd->best_bird_dist) ||
++		((as->user_data[NPF_PBS_MODE] != PBS_MODE_NONE) && !NPFGetFlag(current, NPF_FLAG_PBS_RED) && NPFGetFlag(&ftd->node, NPF_FLAG_PBS_RED))
++) {
+ 		ftd->best_bird_dist = dist;
+ 		ftd->best_trackdir = current->user_data[NPF_TRACKDIR_CHOICE];
++		ftd->path = parent->path;
++		ftd->node = *current;
++		//debug("new low tile: %x", ftd->node.tile);
+ 	}
+-	DEBUG(npf, 4)("Calculating H for: (%d, %d). Result: %d", TileX(current->tile), TileY(current->tile), dist);
++
+ 	return dist;
+ }
+ 
+-
+ /* Fills AyStarNode.user_data[NPF_TRACKDIRCHOICE] with the chosen direction to
+  * get here, either getting it from the current choice or from the parent's
+  * choice */
+@@ -298,6 +388,11 @@
+ 	}
+ 
+ 	/* Determine extra costs */
++	
++	/* Check for reserved tracks (PBS) */
++	if (((as->user_data[NPF_PBS_MODE]&PBS_MODE_MASK) != PBS_MODE_NONE) && !(NPFGetFlag(current, NPF_FLAG_PBS_EXIT)) && !(NPFGetFlag(current, NPF_FLAG_PBS_BLOCKED)) && (PBSTileUnavail(tile) & (1<<trackdir))) {
++		NPFSetFlag(current, NPF_FLAG_PBS_BLOCKED, true);
++	};
+ 
+ 	/* Check for signals */
+ 	if (IsTileType(tile, MP_RAILWAY) && HasSignalOnTrackdir(tile, trackdir)) {
+@@ -315,6 +410,9 @@
+ 					cost += _patches.npf_rail_firstred_exit_penalty;
+ 				else
+ 					cost += _patches.npf_rail_firstred_penalty;
++
++				if (!(NPFGetFlag(current, NPF_FLAG_PBS_EXIT)) && !(NPFGetFlag(current, NPF_FLAG_PBS_RED)) && (NPFGetFlag(current, NPF_FLAG_PBS_CHOICE)))
++					NPFSetFlag(current, NPF_FLAG_PBS_RED, true);
+ 			}
+ 			/* Record the state of this signal */
+ 			NPFSetFlag(current, NPF_FLAG_LAST_SIGNAL_RED, true);
+@@ -322,9 +420,16 @@
+ 			/* Record the state of this signal */
+ 			NPFSetFlag(current, NPF_FLAG_LAST_SIGNAL_RED, false);
+ 		}
++		
++		if (!NPFGetFlag(current, NPF_FLAG_SEEN_SIGNAL) && NPFGetFlag(current, NPF_FLAG_PBS_BLOCKED)) {
++			cost += 1000;
++		}
++		if ((PBSIsPbsSignal(tile, trackdir)) && !NPFGetFlag(current, NPF_FLAG_SEEN_SIGNAL)) {
++			NPFSetFlag(current, NPF_FLAG_PBS_EXIT, true);
++		}
+ 		NPFSetFlag(current, NPF_FLAG_SEEN_SIGNAL, true);
+ 	}
+-
++	
+ 	/* Penalise the tile if it is a target tile and the last signal was
+ 	 * red */
+ 	/* HACK: We create a new_node here so we can call EndNodeCheck. Ugly as hell
+@@ -342,12 +447,25 @@
+ 	//TODO, with realistic acceleration, also the amount of straight track between
+ 	//      curves should be taken into account, as this affects the speed limit.
+ 
+-	/* Check for reverse in depot */
+-	if (IsTileDepotType(tile, TRANSPORT_RAIL) && !as->EndNodeCheck(as, &new_node)==AYSTAR_FOUND_END_NODE)
++
++	/* Check for depots */
++		if (IsTileDepotType(tile, TRANSPORT_RAIL)) {
+ 		/* Penalise any depot tile that is not the last tile in the path. This
+ 		 * _should_ penalise every occurence of reversing in a depot (and only
+ 		 * that) */
+-		cost += _patches.npf_rail_depot_reverse_penalty;
++		if (!as->EndNodeCheck(as, &new_node)==AYSTAR_FOUND_END_NODE) 
++			cost += _patches.npf_rail_depot_reverse_penalty;
++		/* PBS stuff */
++		if (!NPFGetFlag(current, NPF_FLAG_SEEN_SIGNAL)) {
++			if (NPFGetFlag(current, NPF_FLAG_PBS_BLOCKED)) {
++				cost += 1000;
++			}
++			if (PBSIsPbsSegment(tile, TrackdirToExitdir(ReverseTrackdir(trackdir))*2+1)) { // TODO: fix hack?
++				NPFSetFlag(current, NPF_FLAG_PBS_EXIT, true);
++			}
++		}
++		NPFSetFlag(current, NPF_FLAG_LAST_SIGNAL_RED, false);
++	}
+ 
+ 	/* Check for occupied track */
+ 	//TODO
+@@ -379,8 +497,12 @@
+ 	 * is correct */
+ 	if (
+ 		(fstd->station_index == -1 && tile == fstd->dest_coords) || /* We've found the tile, or */
+-		(IsTileType(tile, MP_STATION) && _map2[tile] == fstd->station_index) /* the station */
++		(IsTileType(tile, MP_STATION) && _map2[tile] == fstd->station_index) || /* the station */
++		(NPFGetFlag(node, NPF_FLAG_PBS_TARGET_SEEN))
+ 	) {
++		NPFSetFlag(&current->path.node, NPF_FLAG_PBS_TARGET_SEEN, true);
++		if ((as->user_data[NPF_PBS_MODE] != PBS_MODE_NONE) && !NPFGetFlag(node, NPF_FLAG_SEEN_SIGNAL) && !IsEndOfLine(node->tile, node->direction))
++			return AYSTAR_DONE;
+ 		return AYSTAR_FOUND_END_NODE;
+ 	} else {
+ 		return AYSTAR_DONE;
+@@ -397,8 +519,54 @@
+ 	ftd->best_path_dist = current->g;
+ 	ftd->best_bird_dist = 0;
+ 	ftd->node = current->path.node;
++	ftd->path = current->path;
+ }
+ 
++bool IsEndOfLine(TileIndex tile, byte trackdir)
++{
++	byte exitdir = TrackdirToExitdir(trackdir);
++	TileIndex dst_tile;
++	uint32 ts;
++
++	// tunnel entrance?
++	if (IsTileType(tile, MP_TUNNELBRIDGE) && (_map5[tile] & 0xF0)==0 && (_map5[tile] & 3) == exitdir)
++		return false;
++
++	// depot
++	if (IsTileDepotType(tile, TRANSPORT_RAIL))
++		return false;
++
++	/* Calculate next tile */
++	dst_tile = tile + TileOffsByDir(exitdir);
++	// determine the track status on the next tile.
++	ts = GetTileTrackStatus(dst_tile, TRANSPORT_RAIL) & TrackdirReachesTrackdirs(trackdir);
++
++	if ( (uint16)ts == 0) 
++		return true;
++
++	{
++		byte src_type = GetTileRailType(tile, trackdir);
++		byte dst_type = GetTileRailType(dst_tile, TrackdirToExitdir(trackdir));
++		if (src_type != dst_type) {
++			return true;
++		}
++		if (GetTileOwner(tile) != GetTileOwner(dst_tile))
++			return true;
++
++		if (IsTileDepotType(dst_tile, TRANSPORT_RAIL) && (TrackdirToExitdir(trackdir) != ReverseDiagdir(GetDepotDirection(dst_tile, TRANSPORT_RAIL))))
++			return true;
++
++		/* Check for oneway signal against us */
++		if (IsTileType(dst_tile, MP_RAILWAY) && GetRailTileType(dst_tile) == RAIL_TYPE_SIGNALS) {
++			if (HasSignalOnTrackdir(dst_tile, ReverseTrackdir(FindFirstBit2x64(ts))) && !HasSignalOnTrackdir(dst_tile, FindFirstBit2x64(ts)))
++				// if one way signal not pointing towards us, stop going in this direction.
++				return true;
++		}
++
++		return false;
++	}
++};
++
+ /* Will just follow the results of GetTileTrackStatus concerning where we can
+  * go and where not. Uses AyStar.user_data[NPF_TYPE] as the transport type and
+  * an argument to GetTileTrackStatus. Will skip tunnels, meaning that the
+@@ -418,6 +586,8 @@
+ 	aystar->num_neighbours = 0;
+ 	DEBUG(npf, 4)("Expanding: (%d, %d, %d) [%d]", TileX(src_tile), TileY(src_tile), src_trackdir, src_tile);
+ 
++	aystar->EndNodeCheck(aystar, current);
++
+ 	/* Find dest tile */
+ 	if (IsTileType(src_tile, MP_TUNNELBRIDGE) && (_map5[src_tile] & 0xF0)==0 && (DiagDirection)(_map5[src_tile] & 3) == src_exitdir) {
+ 		/* This is a tunnel. We know this tunnel is our type,
+@@ -507,7 +677,15 @@
+ 	/* Select only trackdirs we can reach from our current trackdir */
+ 	trackdirbits &= TrackdirReachesTrackdirs(src_trackdir);
+ 	if (_patches.forbid_90_deg && (type == TRANSPORT_RAIL || type == TRANSPORT_WATER)) /* Filter out trackdirs that would make 90 deg turns for trains */
+-		trackdirbits &= ~TrackdirCrossesTrackdirs(src_trackdir);
++
++	trackdirbits &= ~TrackdirCrossesTrackdirs(src_trackdir);
++
++	if (KillFirstBit2x64(trackdirbits) != 0)
++		NPFSetFlag(&current->path.node, NPF_FLAG_PBS_CHOICE, true);
++
++	if (!(NPFGetFlag(&current->path.node, NPF_FLAG_PBS_EXIT)) && ((aystar->user_data[NPF_PBS_MODE]&PBS_MODE_MASK) == PBS_MODE_ANY))
++		trackdirbits &= ~PBSTileUnavail(dst_tile);
++
+ 	DEBUG(npf,6)("After filtering: (%d, %d), possible trackdirs: %#x", TileX(dst_tile), TileY(dst_tile), trackdirbits);
+ 
+ 	i = 0;
+@@ -548,7 +726,7 @@
+  * multiple targets that are spread around, we should perform a breadth first
+  * search by specifiying CalcZero as our heuristic.
+  */
+-NPFFoundTargetData NPFRouteInternal(AyStarNode* start1, AyStarNode* start2, NPFFindStationOrTileData* target, AyStar_EndNodeCheck target_proc, AyStar_CalculateH heuristic_proc, TransportType type, Owner owner, uint reverse_penalty) {
++NPFFoundTargetData NPFRouteInternal(AyStarNode* start1, AyStarNode* start2, NPFFindStationOrTileData* target, AyStar_EndNodeCheck target_proc, AyStar_CalculateH heuristic_proc, TransportType type, Owner owner, uint reverse_penalty, byte pbs_mode) {
+ 	int r;
+ 	NPFFoundTargetData result;
+ 
+@@ -566,6 +744,11 @@
+ 	else
+ 		assert(0);
+ 
++	if (pbs_mode != PBS_MODE_NONE)
++		_npf_aystar.BeforeExit = NPFReservePBSPath;
++	else
++		_npf_aystar.BeforeExit = NULL;
++
+ 	/* Initialize Start Node(s) */
+ 	start1->user_data[NPF_TRACKDIR_CHOICE] = INVALID_TRACKDIR;
+ 	start1->user_data[NPF_NODE_FLAGS] = 0;
+@@ -589,6 +772,7 @@
+ 	/* Initialize user_data */
+ 	_npf_aystar.user_data[NPF_TYPE] = type;
+ 	_npf_aystar.user_data[NPF_OWNER] = owner;
++	_npf_aystar.user_data[NPF_PBS_MODE] = pbs_mode;
+ 
+ 	/* GO! */
+ 	r = AyStarMain_Main(&_npf_aystar);
+@@ -606,7 +790,7 @@
+ 	return result;
+ }
+ 
+-NPFFoundTargetData NPFRouteToStationOrTileTwoWay(TileIndex tile1, Trackdir trackdir1, TileIndex tile2, Trackdir trackdir2, NPFFindStationOrTileData* target, TransportType type, Owner owner) {
++NPFFoundTargetData NPFRouteToStationOrTileTwoWay(TileIndex tile1, Trackdir trackdir1, TileIndex tile2, Trackdir trackdir2, NPFFindStationOrTileData* target, TransportType type, Owner owner, byte pbs_mode) {
+ 	AyStarNode start1;
+ 	AyStarNode start2;
+ 
+@@ -619,11 +803,25 @@
+ 	start2.direction = trackdir2;
+ 	start2.user_data[NPF_TRACKDIR_CHOICE] = INVALID_TRACKDIR;
+ 
+-	return NPFRouteInternal(&start1, (IsValidTile(tile2) ? &start2 : NULL), target, NPFFindStationOrTile, NPFCalcStationOrTileHeuristic, type, owner, 0);
++	return NPFRouteInternal(&start1, (IsValidTile(tile2) ? &start2 : NULL), target, NPFFindStationOrTile, NPFCalcStationOrTileHeuristic, type, owner, 0, pbs_mode);
+ }
+ 
+-NPFFoundTargetData NPFRouteToStationOrTile(TileIndex tile, Trackdir trackdir, NPFFindStationOrTileData* target, TransportType type, Owner owner) {
+-	return NPFRouteToStationOrTileTwoWay(tile, trackdir, INVALID_TILE, 0, target, type, owner);
++/*<<<<<<< .mine
++NPFFoundTargetData NPFRouteToStationOrTile(TileIndex tile, byte trackdir, NPFFindStationOrTileData* target, TransportType type, Owner owner, byte pbs_mode) {
++	AyStarNode start;
++
++	assert(tile != 0);
++
++	start.tile = tile;
++	start.direction = trackdir;
++	/ * We set this in case the target is also the start tile, we will just
++	 * return a not found then * /
++	start.user_data[NPF_TRACKDIR_CHOICE] = 0xff;
++
++	return NPFRouteToStationOrTileTwoWay(tile, trackdir, INVALID_TILE, 0, target, type, owner, pbs_mode);
++-------*/
++NPFFoundTargetData NPFRouteToStationOrTile(TileIndex tile, Trackdir trackdir, NPFFindStationOrTileData* target, TransportType type, Owner owner, byte pbs_mode) {
++	return NPFRouteToStationOrTileTwoWay(tile, trackdir, INVALID_TILE, 0, target, type, owner, pbs_mode);
+ }
+ 
+ NPFFoundTargetData NPFRouteToDepotBreadthFirstTwoWay(TileIndex tile1, Trackdir trackdir1, TileIndex tile2, Trackdir trackdir2, TransportType type, Owner owner, uint reverse_penalty) {
+@@ -641,7 +839,7 @@
+ 
+ 	/* perform a breadth first search. Target is NULL,
+ 	 * since we are just looking for any depot...*/
+-	return NPFRouteInternal(&start1, (IsValidTile(tile2) ? &start2 : NULL), NULL, NPFFindDepot, NPFCalcZero, type, owner, reverse_penalty);
++	return NPFRouteInternal(&start1, (IsValidTile(tile2) ? &start2 : NULL), NULL, NPFFindDepot, NPFCalcZero, type, owner, reverse_penalty, PBS_MODE_NONE);
+ }
+ 
+ NPFFoundTargetData NPFRouteToDepotBreadthFirst(TileIndex tile, Trackdir trackdir, TransportType type, Owner owner) {
+@@ -692,6 +890,8 @@
+ 	else
+ 		assert(0);
+ 
++	_npf_aystar.BeforeExit = NULL;
++
+ 	/* Initialize target */
+ 	target.station_index = -1; /* We will initialize dest_coords inside the loop below */
+ 	_npf_aystar.user_target = &target;
+@@ -699,6 +899,7 @@
+ 	/* Initialize user_data */
+ 	_npf_aystar.user_data[NPF_TYPE] = type;
+ 	_npf_aystar.user_data[NPF_OWNER] = owner;
++	_npf_aystar.user_data[NPF_PBS_MODE] = PBS_MODE_NONE;
+ 
+ 	/* Initialize Start Node */
+ 	start.tile = tile;
+Index: pbs.c
+===================================================================
+--- pbs.c	(revision 0)
++++ pbs.c	(revision 0)
+@@ -0,0 +1,239 @@
++#include "stdafx.h"
++#include "openttd.h"
++#include "pbs.h"
++#include "functions.h"
++#include "debug.h"
++#include "map.h"
++#include "tile.h"
++#include "npf.h"
++#include "pathfind.h"
++#include "depot.h"
++
++/** @file pbs.c Path-Based-Signalling implementation file
++ *  @see pbs.h */
++
++/* reserved track encoding:
++ normal railway tracks:
++   map3lo bits 4..6 = railbit of reserved track + 1, if this is zero it means nothing is reserved on this tile
++   map3lo bit  7    = if this is set, then the opposite rail (rb^1) is also reserved
++ waypoints/stations:
++   map3lo bit 6 set = track is reserved
++ tunnels/bridges:
++   map3hi bit 0 set = track with railbit 0 is reserved
++   map3hi bit 1 set = track with railbit 1 is reserved
++ level crossings:
++   map5 bit 3 set = the rail track is reserved
++*/
++
++/**
++ * maps an encoded reserved track (from map3lo bits 4..7)
++ * to the tracks that are reserved.
++ * 0xFF are invalid entries and should never be accessed.
++ */
++static const byte encrt_to_reserved[16] = {
++	0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0xFF,
++	0xFF, 0xFF, 0xFF, 0x0C, 0x0C, 0x30, 0x30, 0xFF
++};
++
++/**
++ * maps an encoded reserved track (from map3lo bits 4..7)
++ * to the track(dir)s that are unavailable due to reservations.
++ * 0xFFFF are invalid entries and should never be accessed.
++ */
++static const int16 encrt_to_unavail[16] = {
++	0x0000, 0x3F3F, 0x3F3F, 0x3737, 0x3B3B, 0x1F1F, 0x2F2F, 0xFFFF,
++	0xFFFF, 0xFFFF, 0xFFFF, 0x3F3F, 0x3F3F, 0x3F3F, 0x3F3F, 0xFFFF
++};
++
++void PBSReserveTrack(TileIndex tile, byte track) {
++	assert(IsValidTile(tile));
++	assert(track <= 5);
++	switch (GetTileType(tile)) {
++		case MP_RAILWAY:
++			if ((_map5[tile] & ~1) == 0xC4) {
++				// waypoint
++				SETBIT(_map3_lo[tile], 6);
++			} else {
++				// normal rail track
++				byte encrt = (_map3_hi[tile] & 0xF0) >> 4;
++
++				if (encrt == 0)
++					encrt = track + 1;
++				else if (encrt == (track^1) + 1)
++					encrt |= 8;
++
++				_map3_hi[tile] &= ~0xF0;
++				_map3_hi[tile] |= encrt << 4;
++			}
++			break;
++		case MP_TUNNELBRIDGE:
++			_map3_hi[tile] |= (1 << track) & 3;
++			break;
++		case MP_STATION:
++			SETBIT(_map3_lo[tile], 6);
++			break;
++		case MP_STREET:
++			// make sure it is a railroad crossing
++			if (!IsLevelCrossing(tile)) return;
++			SETBIT(_map5[tile], 0);
++			break;
++		default:
++			return;
++	};
++#ifdef PBS_SHOW_RESERVED
++	MarkTileDirtyByTile(tile);
++#endif
++}
++
++byte PBSTileReserved(TileIndex tile) {
++	assert(IsValidTile(tile));
++	switch (GetTileType(tile)) {
++		case MP_RAILWAY:
++			if ((_map5[tile] & ~1) == 0xC4) {
++				// waypoint
++				return HASBIT(_map3_lo[tile], 6) ? 3 : 0;
++			} else {
++				// normal track
++				byte res = encrt_to_reserved[(_map3_hi[tile] & 0xF0) >> 4];
++				assert(res != 0xFF);
++				return res;
++			};
++		case MP_TUNNELBRIDGE:
++			return (_map3_hi[tile] & 3);
++		case MP_STATION:
++			return HASBIT(_map3_lo[tile], 6) ? 3 : 0;
++		case MP_STREET:
++			// make sure its a railroad crossing
++			if (!IsLevelCrossing(tile)) return 0;
++			// check if its reserved
++			if (!HASBIT(_map5[tile], 0)) return 0;
++			// return the track for the correct direction
++			return HASBIT(_map5[tile], 3) ? 1 : 2;
++		default:
++			return 0;
++	};
++};
++
++uint16 PBSTileUnavail(TileIndex tile) {
++	assert(IsValidTile(tile));
++	switch (GetTileType(tile)) {
++		case MP_RAILWAY:
++			if ((_map5[tile] & ~1) == 0xC4) {
++				// waypoint
++				return HASBIT(_map3_lo[tile], 6) ? 0x3F3F : 0;
++			} else {
++				// normal track
++				uint16 res = encrt_to_unavail[(_map3_hi[tile] & 0xF0) >> 4];
++				assert(res != 0xFFFF);
++				return res;
++			};
++		case MP_TUNNELBRIDGE:
++			return (_map3_hi[tile] & 3) | ((_map3_hi[tile] & 3) << 8);
++		case MP_STATION:
++			return HASBIT(_map3_lo[tile], 6) ? 0x3F3F : 0;
++		case MP_STREET:
++			// make sure its a railroad crossing
++			if (!IsLevelCrossing(tile)) return 0;
++			// check if its reserved
++			return (HASBIT(_map5[tile], 0)) ? 0x3F3F : 0;
++		default:
++			return 0;
++	};
++};
++
++void PBSClearTrack(TileIndex tile, byte track) {
++	assert(IsValidTile(tile));
++	assert(track <= 5);
++	switch (GetTileType(tile)) {
++		case MP_RAILWAY:
++			if ((_map5[tile] & ~1) == 0xC4) {
++				// waypoint
++				CLRBIT(_map3_lo[tile], 6);
++			} else {
++				// normal rail track
++				byte encrt = (_map3_hi[tile] & 0xF0) >> 4;
++
++				if (encrt == track + 1)
++					encrt = 0;
++				else if (encrt == track + 1 + 8)
++					encrt = (track^1) + 1;
++				else if (encrt == (track^1) + 1 + 8)
++					encrt &= 7;
++
++				_map3_hi[tile] &= ~0xF0;
++				_map3_hi[tile] |= encrt << 4;
++			}
++			break;
++		case MP_TUNNELBRIDGE:
++			_map3_hi[tile] &= ~((1 << track) & 3);
++			break;
++		case MP_STATION:
++			CLRBIT(_map3_lo[tile], 6);
++			break;
++		case MP_STREET:
++			// make sure it is a railroad crossing
++			if (!IsLevelCrossing(tile)) return;
++			CLRBIT(_map5[tile], 0);
++			break;
++		default:
++			return;
++	};
++#ifdef PBS_SHOW_RESERVED
++	MarkTileDirtyByTile(tile);
++#endif
++};
++
++void PBSClearPath(TileIndex tile, byte trackdir) {
++	uint16 res;
++	FindLengthOfTunnelResult flotr;
++	assert(IsValidTile(tile));
++	assert((trackdir & ~8) <= 5);
++	do {
++		PBSClearTrack(tile, trackdir & 7);
++
++		if (IsTileType(tile, MP_TUNNELBRIDGE) && (_map5[tile] & 0xF0)==0 && (unsigned)(_map5[tile] & 3) == TrackdirToExitdir(trackdir)) {
++			// this is a tunnel
++			flotr = FindLengthOfTunnel(tile, TrackdirToExitdir(trackdir));
++
++			tile = flotr.tile;
++		} else {
++			byte exitdir = TrackdirToExitdir(trackdir);
++			if (IsTileDepotType(tile, TRANSPORT_RAIL) && (exitdir != GetDepotDirection(tile, TRANSPORT_RAIL)))
++				return;
++			tile = AddTileIndexDiffCWrap(tile, TileIndexDiffCByDir(exitdir));
++			if (IsTileDepotType(tile, TRANSPORT_RAIL) && (exitdir != ReverseDiagdir(GetDepotDirection(tile, TRANSPORT_RAIL))))
++				return;
++		};
++
++		res = PBSTileReserved(tile);
++		res |= res << 8;
++		res &= TrackdirReachesTrackdirs(trackdir);
++		trackdir = FindFirstBit2x64(res);
++
++	} while (res != 0);
++};
++
++bool PBSIsPbsSignal(TileIndex tile, byte trackdir)
++{
++	assert(IsValidTile(tile));
++	assert((trackdir & ~8) <= 5);
++
++	if (!_patches.new_pathfinding_all)
++		return false;
++
++	if (!IsTileType(tile, MP_RAILWAY))
++		return false;
++
++	if (GetRailTileType(tile) != RAIL_TYPE_SIGNALS)
++		return false;
++
++	if (!(_map3_lo[tile] & _signal_along_trackdir[trackdir]))
++		return false;
++
++	//if ((_map3_hi[tile] & 3) == 3)
++	if ((_map3_hi[tile] & 8) == 8)
++		return true;
++	else
++		return false;
++};
++
+Index: debug.c
+===================================================================
+--- debug.c	(revision 2456)
++++ debug.c	(working copy)
+@@ -14,6 +14,7 @@
+ int _debug_net_level;
+ int _debug_spritecache_level;
+ int _debug_oldloader_level;
++int _debug_pbs_level;
+ int _debug_npf_level;
+ 
+ 
+@@ -44,6 +45,7 @@
+ 	DEBUG_LEVEL(net),
+ 	DEBUG_LEVEL(spritecache),
+ 	DEBUG_LEVEL(oldloader),
++	DEBUG_LEVEL(pbs),
+ 	DEBUG_LEVEL(npf)
+ 	};
+ #undef DEBUG_LEVEL
+Index: rail.c
+===================================================================
+--- rail.c	(revision 2456)
++++ rail.c	(working copy)
+@@ -75,6 +75,15 @@
+ 	{TRACKDIR_RIGHT_N,  TRACKDIR_RIGHT_S,  INVALID_TRACKDIR,  INVALID_TRACKDIR}
+ };
+ 
++const Trackdir _track_enterdir_to_trackdir[6][4] = { // TODO: replace magic with enums
++	{0,    0xff, 8,    0xff},
++	{0xff, 1,    0xff, 9},
++	{0xff, 2,    10,   0xff},
++	{3,    0xff, 0xff, 11},
++	{12,   4,    0xff, 0xff},
++	{0xff, 0xff, 5,    13}
++};
++
+ const Trackdir _track_direction_to_trackdir[][DIR_END] = {
+ 	{INVALID_TRACKDIR, TRACKDIR_DIAG1_NE, INVALID_TRACKDIR, INVALID_TRACKDIR,  INVALID_TRACKDIR, TRACKDIR_DIAG1_SW, INVALID_TRACKDIR, INVALID_TRACKDIR},
+ 	{INVALID_TRACKDIR, INVALID_TRACKDIR,  INVALID_TRACKDIR, TRACKDIR_DIAG2_SE, INVALID_TRACKDIR, INVALID_TRACKDIR,  INVALID_TRACKDIR, TRACKDIR_DIAG2_NW},
+Index: npf.h
+===================================================================
+--- npf.h	(revision 2456)
++++ npf.h	(working copy)
+@@ -4,6 +4,7 @@
+ #include "openttd.h"
+ #include "aystar.h"
+ #include "vehicle.h"
++#include "pbs.h"
+ #include "tile.h"
+ #include "rail.h"
+ 
+@@ -35,16 +36,23 @@
+ enum { /* Indices into AyStar.userdata[] */
+ 	NPF_TYPE = 0, /* Contains a TransportTypes value */
+ 	NPF_OWNER, /* Contains an Owner value */
++	NPF_PBS_MODE, /* Contains the pbs mode, see pbs.h */
+ };
+ 
+ enum { /* Indices into AyStarNode.userdata[] */
+ 	NPF_TRACKDIR_CHOICE = 0, /* The trackdir chosen to get here */
+ 	NPF_NODE_FLAGS,
+ };
++
+ typedef enum { /* Flags for AyStarNode.userdata[NPF_NODE_FLAGS]. Use NPFGetBit() and NPFGetBit() to use them. */
+ 	NPF_FLAG_SEEN_SIGNAL, /* Used to mark that a signal was seen on the way, for rail only */
+ 	NPF_FLAG_REVERSE, /* Used to mark that this node was reached from the second start node, if applicable */
+ 	NPF_FLAG_LAST_SIGNAL_RED, /* Used to mark that the last signal on this path was red */
++	NPF_FLAG_PBS_EXIT, /* Used to mark tracks inside a pbs block, for rail only, for the end node, this is set when the path found goes through a pbs block */
++	NPF_FLAG_PBS_BLOCKED, /* Used to mark that this path crosses another pbs path */
++	NPF_FLAG_PBS_RED, /* Used to mark that this path goes through a red exit-pbs signal */
++	NPF_FLAG_PBS_CHOICE, /*  */
++	NPF_FLAG_PBS_TARGET_SEEN, /*  */
+ } NPFNodeFlag;
+ 
+ typedef struct NPFFoundTargetData { /* Meant to be stored in AyStar.userpath */
+@@ -52,6 +60,7 @@
+ 	uint best_path_dist; /* The shortest path. Is (uint)-1 if no path is found */
+ 	Trackdir best_trackdir; /* The trackdir that leads to the shortest path/closest birds dist */
+ 	AyStarNode node; /* The node within the target the search led us to */
++	PathNode path;
+ } NPFFoundTargetData;
+ 
+ /* These functions below are _not_ re-entrant, in favor of speed! */
+@@ -59,12 +68,14 @@
+ /* Will search from the given tile and direction, for a route to the given
+  * station for the given transport type. See the declaration of
+  * NPFFoundTargetData above for the meaning of the result. */
+-NPFFoundTargetData NPFRouteToStationOrTile(TileIndex tile, Trackdir trackdir, NPFFindStationOrTileData* target, TransportType type, Owner owner);
++NPFFoundTargetData NPFRouteToStationOrTile(TileIndex tile, Trackdir trackdir, NPFFindStationOrTileData* target, TransportType type, Owner owner, byte pbs_mode);
++
+ /* Will search as above, but with two start nodes, the second being the
+  * reverse. Look at the NPF_FLAG_REVERSE flag in the result node to see which
+  * direction was taken (NPFGetBit(result.node, NPF_FLAG_REVERSE)) */
+-NPFFoundTargetData NPFRouteToStationOrTileTwoWay(TileIndex tile1, Trackdir trackdir1, TileIndex tile2, Trackdir trackdir2, NPFFindStationOrTileData* target, TransportType type, Owner owner);
+ 
++NPFFoundTargetData NPFRouteToStationOrTileTwoWay(TileIndex tile1, Trackdir trackdir1, TileIndex tile2, Trackdir trackdir2, NPFFindStationOrTileData* target, TransportType type, Owner owner, byte pbs_mode);
++
+ /* Will search a route to the closest depot. */
+ 
+ /* Search using breadth first. Good for little track choice and inaccurate
+Index: pbs.h
+===================================================================
+--- pbs.h	(revision 0)
++++ pbs.h	(revision 0)
+@@ -0,0 +1,92 @@
++#ifndef PBS_H
++#define PBS_H
++
++/** @file pbs.h Path-Based-Signalling header file
++ *  @see pbs.c */
++
++#include "vehicle.h"
++#include "tile.h"
++#include "map.h"
++#include "rail.h"
++
++/// With this enabled, reserved tracks will be shown darkened
++#define PBS_SHOW_RESERVED
++
++/**
++ * constants used for pbs_mode argument of npf-functions
++ */
++enum pbs_modes {
++	PBS_MODE_NONE = 0,		// no pbs
++	PBS_MODE_GREEN = 1,		// look for green exit signal from pbs block
++	PBS_MODE_ANY = 2,			// look for any exit signal from block
++
++	PBS_MODE_MASK = 0x0F,
++
++	//PBS_MODE_FLAG_SAVE = 1 << 8,
++};
++
++/**
++ * constants used for v->u.rail.pbs_status
++ */
++enum PBSStatus {
++	PBS_STAT_NONE = 0,
++	PBS_STAT_HAS_PATH = 1,
++	PBS_STAT_NEED_PATH = 2,
++};
++
++
++void PBSReserveTrack(TileIndex tile, byte track);
++/**<
++ * Marks a track as reserved.
++ * @param tile The tile of the track.
++ * @param track The track to reserve, valid values 0-5.
++ */
++
++byte PBSTileReserved(TileIndex tile);
++/**<
++ * Check which tracks are reserved on a tile.
++ * @param tile The tile which you want to check.
++ * @return The tracks reserved on that tile, each of the bits 0-5 is set when the corresponding track is reserved.
++ */
++
++uint16 PBSTileUnavail(TileIndex tile);
++/**<
++ * Check which trackdirs are unavailable due to reserved tracks on a tile.
++ * @param tile The tile which you want to check.
++ * @return The tracks reserved on that tile, each of the bits 0-5,8-13 is set when the corresponding trackdir is unavailable.
++ */
++
++void PBSClearTrack(TileIndex tile, byte track);
++/**<
++ * Unreserves a track.
++ * @param tile The tile of the track.
++ * @param track The track to unreserve, valid values 0-5.
++ */
++
++void PBSClearPath(TileIndex tile, byte trackdir);
++/**<
++ * Follows a planned(reserved) path, and unreserves the tracks.
++ * @param tile The tile on which the path starts
++ * @param trackdir The trackdirection in which the path starts
++ */
++
++bool PBSIsPbsSignal(TileIndex tile, byte trackdir);
++/**<
++ * Checks if there are pbs signals on a track.
++ * @param tile The tile you want to check
++ * @param trackdir The trackdir you want to check
++ * @return True when there are pbs signals on that tile
++ */
++
++bool PBSIsPbsSegment(uint tile, byte direction);
++/**<
++ * Checks if all signals encountered by going in a certain direction from a tile are pbs signals,
++ * used to check if a depot is inside a pbs block.
++ * @param tile The start tile (depot tile)
++ * @param direction The direction to go in
++ * @return True when only pbs signals are encountered
++ * TODO: Ditch the direction argument, this function is only used for depots, and then this can be extracted from the tile
++ * TODO: This function is a bit hackish atm, at least move it to pbs.c or something
++ */
++
++#endif
+Index: debug.h
+===================================================================
+--- debug.h	(revision 2456)
++++ debug.h	(working copy)
+@@ -14,6 +14,7 @@
+ 	extern int _debug_net_level;
+ 	extern int _debug_spritecache_level;
+ 	extern int _debug_oldloader_level;
++	extern int _debug_pbs_level;
+ 	extern int _debug_npf_level;
+ #endif
+ 
+Index: rail.h
+===================================================================
+--- rail.h	(revision 2456)
++++ rail.h	(working copy)
+@@ -317,6 +317,15 @@
+ }
+ 
+ /**
++ * Maps a track and an (4-way) dir to the trackdir that represents the track
++ * with the exit in the given direction.
++ */
++static inline Trackdir TrackEnterdirToTrackdir(Track track, DiagDirection diagdir) {
++	extern const Trackdir _track_enterdir_to_trackdir[TRACK_END][DIAGDIR_END];
++	return _track_enterdir_to_trackdir[track][diagdir];
++}
++
++/**
+  * Maps a track and a full (8-way) direction to the trackdir that represents
+  * the track running in the given direction.
+  */
+Index: aystar.c
+===================================================================
+--- aystar.c	(revision 2456)
++++ aystar.c	(working copy)
+@@ -230,6 +230,10 @@
+ 	else if (r == AYSTAR_LIMIT_REACHED)
+ 		printf("[AyStar] Exceeded search_nodes, no path found\n");
+ #endif
++
++	if (aystar->BeforeExit != NULL)
++		aystar->BeforeExit(aystar);
++
+ 	if (r != AYSTAR_STILL_BUSY)
+ 		/* We're done, clean up */
+ 		aystar->clear(aystar);
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 2456)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -10,6 +10,8 @@
+ #include "player.h"
+ #include "town.h"
+ #include "sound.h"
++#include "pbs.h"
++#include "debug.h"
+ 
+ extern void DrawCanalWater(uint tile);
+ 
+@@ -772,6 +774,7 @@
+ 		byte m5;
+ 		uint c = tile;
+ 		uint16 new_data;
++		byte pbs;
+ 
+ 		//checks if the owner is town then decrease town rating by RATING_TUNNEL_BRIDGE_DOWN_STEP until
+ 		// you have a "Poor" (0) town rating
+@@ -780,6 +783,7 @@
+ 
+ 		do {
+ 			m5 = _map5[c];
++			pbs = PBSTileReserved(c);
+ 
+ 			if (m5 & 0x40) {
+ 				if (m5 & 0x20) {
+@@ -793,6 +797,9 @@
+ 				SetTileType(c, new_data >> 12);
+ 				_map5[c] = (byte)new_data;
+ 				_map2[c] = 0;
++				_map3_hi[c] &= 0x0F;
++				if (direction ? HASBIT(pbs,0) : HASBIT(pbs,1))
++					PBSReserveTrack(c, direction ? 0 : 1);
+ 
+ 				MarkTileDirtyByTile(c);
+ 
+@@ -1145,7 +1152,19 @@
+ 			}
+ 		}
+ 	}
++#ifdef PBS_SHOW_RESERVED
++{
++	byte pbs = PBSTileReserved(ti->tile);
++	assert(pbs != 0xFF);
++	if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(0x3ED | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite(0x3EE | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_UPPER) DrawGroundSprite(0x3EF | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LOWER) DrawGroundSprite(0x3F0 | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite(0x3F2 | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite(0x3F1 | PALETTE_CRASH);
+ }
++#endif
++}
+ 
+ static uint GetSlopeZ_TunnelBridge(TileInfo *ti) {
+ 	uint z = ti->z;
+@@ -1428,6 +1447,8 @@
+ 					return 0;
+ 				}
+ 				if (fc == _tunnel_fractcoord_2[dir]) {
++					if (v->next == NULL)
++						PBSClearTrack(v->tile, FIND_FIRST_BIT(v->u.rail.track));
+ 					v->tile = tile;
+ 					v->u.rail.track = 0x40;
+ 					v->vehstatus |= VS_HIDDEN;
+Index: aystar.h
+===================================================================
+--- aystar.h	(revision 2456)
++++ aystar.h	(working copy)
+@@ -96,6 +96,11 @@
+  */
+ typedef void AyStar_FoundEndNode(AyStar *aystar, OpenListNode *current);
+ 
++/*
++ * Is called when aystar ends it pathfinding, but before cleanup.
++ */
++typedef void AyStar_BeforeExit(AyStar *aystar);
++
+ // For internal use, see aystar.c
+ typedef void AyStar_AddStartNode(AyStar *aystar, AyStarNode* start_node, uint g);
+ typedef int AyStar_Main(AyStar *aystar);
+@@ -115,6 +120,7 @@
+ 	AyStar_GetNeighbours* GetNeighbours;
+ 	AyStar_EndNodeCheck* EndNodeCheck;
+ 	AyStar_FoundEndNode* FoundEndNode;
++	AyStar_BeforeExit* BeforeExit;
+ 
+ 	/* These are completely untouched by AyStar, they can be accesed by
+ 	 * the application specific routines to input and output data.
+Index: roadveh_cmd.c
+===================================================================
+--- roadveh_cmd.c	(revision 2456)
++++ roadveh_cmd.c	(working copy)
+@@ -1104,7 +1104,7 @@
+ 		trackdir = DiagdirToDiagTrackdir(enterdir);
+ 		//debug("Finding path. Enterdir: %d, Trackdir: %d", enterdir, trackdir);
+ 
+-		ftd = NPFRouteToStationOrTile(tile - TileOffsByDir(enterdir), trackdir, &fstd, TRANSPORT_ROAD, v->owner);
++		ftd = NPFRouteToStationOrTile(tile - TileOffsByDir(enterdir), trackdir, &fstd, TRANSPORT_ROAD, v->owner, PBS_MODE_NONE);
+ 		if (ftd.best_trackdir == 0xff) {
+ 			/* We are already at our target. Just do something */
+ 			//TODO: maybe display error?
+@@ -1181,7 +1181,7 @@
+   fstd.dest_coords = tile;
+   fstd.station_index = -1;	// indicates that the destination is a tile, not a station
+ 
+-  return NPFRouteToStationOrTile(v->tile, trackdir, &fstd, TRANSPORT_ROAD, v->owner).best_path_dist;
++  return NPFRouteToStationOrTile(v->tile, trackdir, &fstd, TRANSPORT_ROAD, v->owner, PBS_MODE_NONE).best_path_dist;
+ }
+ 
+ typedef struct RoadDriveEntry {
+Index: ai_pathfinder.c
+===================================================================
+--- ai_pathfinder.c	(revision 2456)
++++ ai_pathfinder.c	(working copy)
+@@ -96,6 +96,8 @@
+ 	result->EndNodeCheck = AyStar_AiPathFinder_EndNodeCheck;
+ 	result->FoundEndNode = AyStar_AiPathFinder_FoundEndNode;
+ 	result->GetNeighbours = AyStar_AiPathFinder_GetNeighbours;
++	
++	result->BeforeExit = NULL;
+ 
+ 	result->free = AyStar_AiPathFinder_Free;
+ 
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2456)
++++ train_cmd.c	(working copy)
+@@ -1,3 +1,4 @@
++
+ #include "stdafx.h"
+ #include "openttd.h"
+ #include "debug.h"
+@@ -16,6 +17,7 @@
+ #include "player.h"
+ #include "sound.h"
+ #include "depot.h"
++#include "debug.h"
+ #include "waypoint.h"
+ #include "vehicle_gui.h"
+ 
+@@ -1319,14 +1321,94 @@
+ 	}
+ }
+ 
++TileIndex GetVehicleTileOutOfTunnel(const Vehicle *v, bool reverse)
++{
++	TileIndex tile;
++	byte direction = (!reverse) ? v->direction >> 1 : ReverseDiagdir(v->direction >> 1);
++	TileIndexDiff delta = TileOffsByDir(direction);
++
++	if (v->u.rail.track != 0x40)
++		return v->tile;
++
++	for (tile = v->tile;; tile += delta) {
++		if (IsTileType(tile, MP_TUNNELBRIDGE) &&
++				(_map5[tile] & 0xF3) != (direction) &&
++				GetTileZ(tile) == v->z_pos)
++ 			break;
++ 	}
++ 	return tile;
++
++};
++
+ static void ReverseTrainDirection(Vehicle *v)
+ {
+ 	int l = 0, r = -1;
+ 	Vehicle *u;
++	TileIndex tile;
++	byte trackdir;
+ 
++	u = GetLastVehicleInChain(v);
++	tile = GetVehicleTileOutOfTunnel(u, false);
++	trackdir = ReverseTrackdir(GetVehicleTrackdir(u));
++
++	if (PBSTileReserved(tile) & (1 << (trackdir&7))) {
++		NPFFindStationOrTileData fstd;
++		NPFFoundTargetData ftd;
++		
++		NPFFillWithOrderData(&fstd, v);
++
++		tile = GetVehicleTileOutOfTunnel(u, true);
++
++		DEBUG(pbs, 2) ("pbs: (%i) choose reverse (RV), tile:%x, trackdir:%i",v->unitnumber,  u->tile, trackdir);
++		ftd = NPFRouteToStationOrTile(tile, trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_ANY);
++	
++		if (ftd.best_trackdir == 0xFF) {
++			DEBUG(pbs, 0) ("pbs: (%i) no nodes encountered (RV)", v->unitnumber);
++			CLRBIT(v->u.rail.flags, VRF_REVERSING);
++			return;
++		}
++
++    // we found a way out of the pbs block
++		if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_EXIT)) {
++			if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_BLOCKED)) {
++				CLRBIT(v->u.rail.flags, VRF_REVERSING);
++				return;
++			}
++		}/* else {
++			CLRBIT(v->u.rail.flags, VRF_REVERSING);
++			return;
++		};*/
++	}/* else if (v->u.rail.pbs_status == PBS_STAT_HAS_PATH) {
++		CLRBIT(v->u.rail.flags, VRF_REVERSING);
++		return;
++	}*/
++
++	tile = GetVehicleTileOutOfTunnel(v, false);
++	trackdir = GetVehicleTrackdir(v);
++
++	if (v->u.rail.pbs_status == PBS_STAT_HAS_PATH) {
++		byte trackdir = GetVehicleTrackdir(v);
++		TileIndex tile = AddTileIndexDiffCWrap(v->tile, TileIndexDiffCByDir(TrackdirToExitdir(trackdir)));
++		uint32 ts;
++		assert(tile != INVALID_TILE);
++		ts = GetTileTrackStatus(tile, TRANSPORT_RAIL);
++		ts &= TrackdirReachesTrackdirs(trackdir);
++		assert(ts != 0 && KillFirstBit2x64(ts) == 0);
++		trackdir = FindFirstBit2x64(ts); 
++		PBSClearPath(tile, trackdir);
++//		if (PBSTileReserved(v->tile) & v->u.rail.track)
++//			PBSReserveTrack(tile, trackdir & 7);
++		v->u.rail.pbs_status = PBS_STAT_NONE;
++	} else if (PBSTileReserved(tile) & (1 << (trackdir&7))) {
++		PBSClearPath(tile, trackdir);
++		if (v->u.rail.track != 0x40)
++			PBSReserveTrack(tile, trackdir & 7);
++	};
++
+ 	if (IsTileDepotType(v->tile, TRANSPORT_RAIL))
+ 		InvalidateWindow(WC_VEHICLE_DEPOT, v->tile);
+ 
++
+ 	/* Check if we were approaching a rail/road-crossing */
+ 	{
+ 		TileIndex tile = v->tile;
+@@ -1770,13 +1852,37 @@
+ 		}
+ 
+ 		v->load_unload_time_rem = 0;
++		
++		if (PBSIsPbsSegment(v->tile, v->direction)) {
++			byte trackdir = GetVehicleTrackdir(v);
++					//_track_direction_to_trackdir[FIND_FIRST_BIT(v->u.rail.track)][v->direction];
++			NPFFindStationOrTileData fstd;
++			NPFFoundTargetData ftd;
++			
++			if (PBSTileUnavail(v->tile) & (1 << trackdir))
++				return true;
+ 
++			NPFFillWithOrderData(&fstd, v);
++
++			DEBUG(pbs, 2) ("pbs: (%i) choose depot (DP), tile:%x, trackdir:%i",v->unitnumber,  v->tile, trackdir);
++			ftd = NPFRouteToStationOrTile(v->tile, trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_GREEN);
++
++			// we found a way out of the pbs block
++			if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_EXIT)) {
++				if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_BLOCKED) || NPFGetFlag(&ftd.node, NPF_FLAG_PBS_RED))
++					return true;
++				else
++					goto green;
++			}
++		}
++			
++		
+ 		if (UpdateSignalsOnSegment(v->tile, v->direction)) {
+ 			InvalidateWindowClasses(WC_TRAINS_LIST);
+ 			return true;
+ 		}
+ 	}
+-
++green:
+ 	VehicleServiceInDepot(v);
+ 	InvalidateWindowClasses(WC_TRAINS_LIST);
+ 	TrainPlayLeaveStationSound(v);
+@@ -1926,14 +2032,33 @@
+ 		NPFFindStationOrTileData fstd;
+ 		NPFFoundTargetData ftd;
+ 		Trackdir trackdir;
++		uint16 pbs_tracks;
+ 
+ 		NPFFillWithOrderData(&fstd, v);
+ 		/* The enterdir for the new tile, is the exitdir for the old tile */
+ 		trackdir = GetVehicleTrackdir(v);
+ 		assert(trackdir != 0xff);
+ 
+-		ftd = NPFRouteToStationOrTile(tile - TileOffsByDir(enterdir), trackdir, &fstd, TRANSPORT_RAIL, v->owner);
++		pbs_tracks = PBSTileReserved(tile);
++		pbs_tracks |= pbs_tracks << 8;
++		pbs_tracks &= TrackdirReachesTrackdirs(trackdir);
++		if (pbs_tracks || (v->u.rail.pbs_status == PBS_STAT_NEED_PATH)) {
++			DEBUG(pbs, 2) ("pbs: (%i) choosefromblock, tile_org:%x tile_dst:%x  trackdir:%i  pbs_tracks:%i",v->unitnumber, tile,tile - TileOffsByDir(enterdir), trackdir, pbs_tracks);
+ 
++			// clear the currently planned path
++			if (v->u.rail.pbs_status != PBS_STAT_NEED_PATH) PBSClearPath(tile, FindFirstBit2x64(pbs_tracks));
++
++			// try to find a route to a green exit signal
++			ftd = NPFRouteToStationOrTile(tile - TileOffsByDir(enterdir), trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_ANY);
++
++			// if no route found, find one to any exit signal
++/*			if (ftd.best_bird_dist != 0 || ftd.best_trackdir == 0xff) {
++				ftd = NPFRouteToStationOrTile(tile - TileOffsByDir(enterdir), trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_ANY);
++				DEBUG(pbs, 1) ("pbs: (%i) no green sig found, PBS_MODE_ANY result:%i%i", v->index, ftd.best_bird_dist, ftd.best_trackdir);
++		}*/
++		} else
++			ftd = NPFRouteToStationOrTile(tile - TileOffsByDir(enterdir), trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_NONE);
++
+ 		if (ftd.best_trackdir == 0xff) {
+ 			/* We are already at our target. Just do something */
+ 			//TODO: maybe display error?
+@@ -2070,7 +2195,7 @@
+ 		assert(trackdir != 0xff);
+ 		assert(trackdir_rev != 0xff);
+ 
+-		ftd = NPFRouteToStationOrTileTwoWay(v->tile, trackdir, last->tile, trackdir_rev, &fstd, TRANSPORT_RAIL, v->owner);
++		ftd = NPFRouteToStationOrTileTwoWay(v->tile, trackdir, last->tile, trackdir_rev, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_NONE);
+ 		if (ftd.best_bird_dist != 0) {
+ 			/* We didn't find anything, just keep on going straight ahead */
+ 			reverse_best = false;
+@@ -2599,6 +2724,8 @@
+ 			(v->u.rail.track & 0x40 && (v->direction & 2) != (realcoll->direction & 2)))
+ 		return;
+ 
++	//DEBUG(pbs,0) ("collision, %i-%i", v->index, coll->index);
++	//assert(0);
+ 	//two drivers + passangers killed in train v
+ 	num = 2 + CountPassengersInTrain(v);
+ 	if (!(coll->vehstatus & VS_CRASHED))
+@@ -2666,7 +2793,7 @@
+ 				} else {
+ 					/* is not inside depot */
+ 
+-					if (!TrainCheckIfLineEnds(v))
++					if ((prev == NULL) && (!TrainCheckIfLineEnds(v)))
+ 						return;
+ 
+ 					r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
+@@ -2721,11 +2848,63 @@
+ 				}
+ 
+ 				if (prev == NULL) {
++					byte trackdir;
+ 					/* Currently the locomotive is active. Determine which one of the
+ 					 * available tracks to choose */
+ 					chosen_track = 1 << ChooseTrainTrack(v, gp.new_tile, enterdir, bits);
+ 					assert(chosen_track & tracks);
+ 
++					trackdir = TrackEnterdirToTrackdir(FIND_FIRST_BIT(chosen_track), enterdir);
++					assert(trackdir != 0xff);
++//					DEBUG(misc,0) ("chosen track (%i)  tile:%x  track:%i", v->unitnumber, gp.new_tile, chosen_track);
++					//assert(gp.new_tile < MapSize());
++					if (PBSIsPbsSignal(gp.new_tile,trackdir)) {
++						// encountered a pbs signal, and possible a pbs block
++						DEBUG(pbs, 3) ("pbs: (%i) arrive AT signal, tile:%x  pbs_stat:%i",v->unitnumber, gp.new_tile, v->u.rail.pbs_status);
++
++						if (v->u.rail.pbs_status == PBS_STAT_NONE) {
++							// we havent planned a path already, so try to find one now
++							NPFFindStationOrTileData fstd;
++							NPFFoundTargetData ftd;
++
++							NPFFillWithOrderData(&fstd, v);
++
++							if (v->unitnumber == 12) {
++								v->unitnumber--;
++								v->unitnumber++;
++							}
++
++
++							DEBUG(pbs, 2) ("pbs: (%i) choose signal (TC), tile:%x, trackdir:%i",v->unitnumber,  gp.new_tile, trackdir);
++							ftd = NPFRouteToStationOrTile(gp.new_tile, trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_GREEN);
++							//DEBUG(pbs, 2) ("pbs: (%i) choose signal (TC) done", v->unitnumber);
++
++							
++							if (v->u.rail.force_proceed != 0)
++								goto green_light;
++
++							if (ftd.best_trackdir == 0xFF)
++								goto red_light;
++							
++							// we found a way out of the pbs block
++							if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_EXIT)) {
++								if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_BLOCKED) || NPFGetFlag(&ftd.node, NPF_FLAG_PBS_RED))
++									goto red_light;
++								else {
++									goto green_light;
++								}
++								
++							};
++
++						} else {
++							// we have already planned a path through this pbs block
++							// on entering the block, we reset our status
++							v->u.rail.pbs_status = PBS_STAT_NONE;
++							goto green_light;
++						};
++						DEBUG(pbs, 3) ("pbs: (%i) no green light found, or was no pbs-block",v->unitnumber);
++					};
++
+ 					/* Check if it's a red signal and that force proceed is not clicked. */
+ 					if ( (tracks>>16)&chosen_track && v->u.rail.force_proceed == 0) goto red_light;
+ 				} else {
+@@ -2734,6 +2913,9 @@
+ 					/* The wagon is active, simply follow the prev vehicle. */
+ 					chosen_track = (byte)(_matching_tracks[GetDirectionToVehicle(prev, gp.x, gp.y)] & bits);
+ 				}
++green_light:
++				if (v->next == NULL)
++					PBSClearTrack(gp.old_tile, FIND_FIRST_BIT(v->u.rail.track));
+ 
+ 				/* make sure chosen track is a valid track */
+ 				assert(chosen_track==1 || chosen_track==2 || chosen_track==4 || chosen_track==8 || chosen_track==16 || chosen_track==32);
+@@ -2762,12 +2944,12 @@
+ 				}
+ 
+ 				if (v->subtype == TS_Front_Engine)
+- 				TrainMovedChangeSignals(gp.new_tile, enterdir);
++				TrainMovedChangeSignals(gp.new_tile, enterdir);
+ 
+ 				/* Signals can only change when the first
+ 				 * (above) or the last vehicle moves. */
+ 				if (v->next == NULL)
+- 				TrainMovedChangeSignals(gp.old_tile, (enterdir) ^ 2);
++				TrainMovedChangeSignals(gp.old_tile, (enterdir) ^ 2);
+ 
+ 				if (prev == NULL) {
+ 					AffectSpeedByDirChange(v, chosen_dir);
+@@ -2882,6 +3064,16 @@
+ 	EndVehicleMove(v);
+ 	DeleteVehicle(v);
+ 
++	// clear up reserved pbs tracks
++	/*
++	if (PBSTileReserved(v->tile) & v->u.rail.track) {
++		if (v->tile != u->tile) {
++			PBSClearTrack(v->tile, FIND_FIRST_BIT(v->u.rail.track));
++		} else if (v == u) {
++		};
++	}
++	*/
++	
+ 	if (!(v->u.rail.track & 0xC0))
+ 		SetSignalsOnBothDir(v->tile, FIND_FIRST_BIT(v->u.rail.track));
+ 
+@@ -3009,6 +3201,7 @@
+ 	uint x,y;
+ 	int t;
+ 	uint32 ts;
++	byte trackdir;
+ 
+ 	if ((uint)(t=v->breakdown_ctr) > 1) {
+ 		v->vehstatus |= VS_TRAIN_SLOWING;
+@@ -3047,6 +3240,11 @@
+ 	// determine the track status on the next tile.
+ 	ts = GetTileTrackStatus(tile, TRANSPORT_RAIL) & _reachable_tracks[t];
+ 
++	if (ts & 0x3F3F)
++		trackdir = FindFirstBit2x64(ts & 0x3F3F);
++	else
++		trackdir = 0xFF;
++
+ 	/* Calc position within the current tile ?? */
+ 	x = v->x_pos & 0xF;
+ 	y = v->y_pos & 0xF;
+@@ -3099,6 +3297,40 @@
+ 		return false;
+ 	}
+ 
++	if  (v->u.rail.pbs_status == PBS_STAT_HAS_PATH)
++		return true;
++
++	if ((trackdir != 0xFF) && (PBSIsPbsSignal(tile,trackdir)) && !(IsTileType(v->tile, MP_STATION) && (v->current_order.station == _map2[v->tile]))) {
++		NPFFindStationOrTileData fstd;
++		NPFFoundTargetData ftd;
++
++		NPFFillWithOrderData(&fstd, v);
++
++		if (v->unitnumber == 55) {
++			trackdir--;
++			trackdir++;
++		}
++
++		DEBUG(pbs, 2) ("pbs: (%i) choose signal (CEOL), tile:%x  trackdir:%i", v->unitnumber, tile, trackdir);
++		ftd = NPFRouteToStationOrTile(tile, trackdir, &fstd, TRANSPORT_RAIL, v->owner, PBS_MODE_GREEN);
++		DEBUG(pbs, 2) ("pbs: (%i) choose signal (CEOL) done", v->unitnumber);
++
++//		if ((ftd.best_bird_dist == 0) && NPFGetFlag(&ftd.node, NPF_FLAG_PBS_TRACK) && !NPFGetFlag(&ftd.node, NPF_FLAG_PBS_RED) && !NPFGetFlag(&ftd.node, NPF_FLAG_PBS_BLOCKED)) {
++//			v->u.rail.pbs_status = PBS_STAT_HAS_PATH;
++//			return true;
++//		};
++
++		if (ftd.best_trackdir != 0xFF && NPFGetFlag(&ftd.node, NPF_FLAG_PBS_EXIT)) {
++			if (NPFGetFlag(&ftd.node, NPF_FLAG_PBS_BLOCKED) || NPFGetFlag(&ftd.node, NPF_FLAG_PBS_RED))
++			{;}
++			else {
++				v->u.rail.pbs_status = PBS_STAT_HAS_PATH;
++				return true;
++			}
++		};
++							
++	};
++
+ 	// slow down
+ 	v->vehstatus |= VS_TRAIN_SLOWING;
+ 	t = _breakdown_speeds[x & 0xF];
+@@ -3186,6 +3418,9 @@
+ 	v->tick_counter++;
+ 
+ 	if (v->subtype == TS_Front_Engine) {
++//		if (v->unitnumber != 86) {
++//			v->vehstatus= VS_STOPPED;
++//		};
+ 		TrainLocoHandler(v, false);
+ 
+ 		// make sure vehicle wasn't deleted.
+@@ -3259,6 +3494,12 @@
+ 	Depot *depot;
+ 	TrainFindDepotData tfdd;
+ 
++	if (PBSTileReserved(v->tile) & v->u.rail.track)
++		return;
++
++	if (v->u.rail.pbs_status == PBS_STAT_HAS_PATH)
++		return;
++
+ 	if (_patches.servint_trains == 0)
+ 		return;
+ 
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2456)
++++ table/sprites.h	(working copy)
+@@ -42,7 +42,7 @@
+ 	SPR_ASCII_SPACE_BIG   = 450,
+ 
+ 	/* Extra graphic spritenumbers */
+-	SPR_CANALS_BASE		= 5126,
++	SPR_CANALS_BASE		= 5382,
+ 	SPR_SLOPES_BASE		= SPR_CANALS_BASE + 70,
+ 	SPR_AUTORAIL_BASE		= SPR_SLOPES_BASE + 78,
+ 	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
+Index: table/files.h
+===================================================================
+--- table/files.h	(revision 2456)
++++ table/files.h	(working copy)
+@@ -26,7 +26,7 @@
+ 		{ "TRG1.GRF", {0x93,0x11,0x67,0x62,0x80,0xe5,0xb1,0x40,0x77,0xa8,0xee,0x41,0xc1,0xb4,0x21,0x92} },     //    0 - 4792 inclusive
+ 		{ "TRGI.GRF", {0xda,0x6a,0x6c,0x9d,0xcc,0x45,0x1e,0xec,0x88,0xd7,0x92,0x11,0x43,0x7b,0x76,0xa8} },     // 4793 - 4889 inclusive
+ 		{ "dosdummy.grf", {0x07,0x01,0xe6,0xc4,0x07,0x6a,0x5b,0xc3,0xf4,0x9f,0x01,0xad,0x21,0x6c,0xa0,0xc2} }, // 4890 - 4895 inclusive
+-		{ "signalsw.grf", {0x76,0x1b,0x42,0x25,0x44,0x0d,0x21,0xc7,0xe0,0xb4,0x25,0xd8,0x2f,0xc8,0x52,0x38} }, // 4896 - 5125 inclusive
++		{ "nsignalsw.grf", {0x76,0x1b,0x42,0x25,0x44,0x0d,0x21,0xc7,0xe0,0xb4,0x25,0xd8,0x2f,0xc8,0x52,0x38} }, // 4896 - 5381 inclusive
+ 		{ NULL, { 0 } }
+ 	},
+ 	{	{ "TRGC.GRF", {0xed,0x44,0x66,0x37,0xe0,0x34,0x10,0x4c,0x55,0x59,0xb3,0x2c,0x18,0xaf,0xe7,0x8d} },
+@@ -39,7 +39,7 @@
+ 	{
+ 		{ "TRG1R.GRF", {0xb0,0x4c,0xe5,0x93,0xd8,0xc5,0x01,0x6e,0x07,0x47,0x3a,0x74,0x3d,0x7d,0x33,0x58} },    //    0 - 4792 inclusive
+ 		{ "TRGIR.GRF", {0x0c,0x24,0x84,0xff,0x6b,0xe4,0x9f,0xc6,0x3a,0x83,0xbe,0x6a,0xb5,0xc3,0x8f,0x32} },    // 4793 - 4895 inclusive
+-		{ "signalsw.grf", {0x76,0x1b,0x42,0x25,0x44,0x0d,0x21,0xc7,0xe0,0xb4,0x25,0xd8,0x2f,0xc8,0x52,0x38} }, // 4896 - 5125 inclusive
++		{ "nsignalsw.grf", {0x76,0x1b,0x42,0x25,0x44,0x0d,0x21,0xc7,0xe0,0xb4,0x25,0xd8,0x2f,0xc8,0x52,0x38} }, // 4896 - 5381 inclusive
+ 		{ NULL, { 0 } },
+ 		{ NULL, { 0 } }
+ 	},
+Index: road_cmd.c
+===================================================================
+--- road_cmd.c	(revision 2456)
++++ road_cmd.c	(working copy)
+@@ -1,5 +1,6 @@
+ #include "stdafx.h"
+ #include "openttd.h"
++#include "table/sprites.h"
+ #include "table/strings.h"
+ #include "map.h"
+ #include "tile.h"
+@@ -11,6 +12,7 @@
+ #include "gfx.h"
+ #include "sound.h"
+ #include "depot.h"
++#include "pbs.h"
+ 
+ /* When true, GetTrackStatus for roads will treat roads under reconstruction
+  * as normal roads instead of impassable. This is used when detecting whether
+@@ -246,6 +248,7 @@
+ 
+ 			cost = _price.remove_road * 2;
+ 			if (flags & DC_EXEC) {
++				byte pbs_track = PBSTileReserved(tile);
+ 				ChangeTownRating(t, -road_remove_cost[(byte)edge_road], RATING_ROAD_MINIMUM);
+ 
+ 				ModifyTile(tile,
+@@ -254,6 +257,8 @@
+ 					_map3_hi[tile] & 0xF, /* map3_lo */
+ 					c											/* map5 */
+ 				);
++				if (pbs_track != 0)
++					PBSReserveTrack(tile, FIND_FIRST_BIT(pbs_track));
+ 			}
+ 			return cost;
+ 		} else
+@@ -354,6 +359,7 @@
+ 	int32 cost;
+ 	byte pieces = (byte)p1, existing = 0;
+ 	TileIndex tile;
++	
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -396,6 +402,7 @@
+ 			goto do_clear;
+ 
+ 		if (flags & DC_EXEC) {
++			byte pbs_track = PBSTileReserved(tile);
+ 			ModifyTile(tile,
+ 				MP_SETTYPE(MP_STREET) |
+ 				MP_MAP2 | MP_MAP3LO | MP_MAP3HI | MP_MAP5,
+@@ -404,6 +411,8 @@
+ 				_map3_lo[tile] & 0xF, /* map3_hi */
+ 				m5 /* map5 */
+ 			);
++			if (pbs_track != 0)
++				PBSReserveTrack(tile, FIND_FIRST_BIT(pbs_track));
+ 		}
+ 		return _price.build_road * 2;
+ 	} else if (ti.type == MP_TUNNELBRIDGE) {
+@@ -826,6 +835,20 @@
+ 		}
+ 
+ 		DrawGroundSprite(image + (_map3_hi[ti->tile] & 0xF) * 12);
++
++#ifdef PBS_SHOW_RESERVED
++{
++	byte pbs = PBSTileReserved(ti->tile);
++	assert(pbs != 0xFF);
++	if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(0x3ED | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite(0x3EE | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_UPPER) DrawGroundSprite(0x3EF | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LOWER) DrawGroundSprite(0x3F0 | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite(0x3F2 | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite(0x3F1 | PALETTE_CRASH);
++}
++#endif
++
+ 	} else {
+ 		uint32 ormod;
+ 		int player;
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2456)
++++ rail_cmd.c	(working copy)
+@@ -16,7 +16,9 @@
+ #include "station.h"
+ #include "sprite.h"
+ #include "depot.h"
++#include "pbs.h"
+ #include "waypoint.h"
++#include "npf.h"
+ #include "rail.h"
+ 
+ extern uint16 _custom_sprites_base;
+@@ -759,9 +761,22 @@
+ 			} else {
+ 				if (pre_signal) {
+ 					// cycle between normal -> pre -> exit -> combo -> ...
+-					byte type = (GetSignalType(tile, track) + 1) & 0x03;
+-					_map3_hi[tile] &= ~0x03;
+-					_map3_hi[tile] |= type;
++//<<<<<<< .mine
++					// TODO: fix up this hacky mess :-p
++					byte type = (_map3_hi[tile] & 0x03) + ((_map3_hi[tile] & 0x08) >> 1);
++					DEBUG(pbs, 0) ("change signals, type:%i", type);
++					++type;
++					if (type == 5)
++						type = 0;
++					_map3_hi[tile] &= ~0x0B;
++					_map3_hi[tile] |= type & 0x03;
++					type <<= 1;
++					_map3_hi[tile] |= type & 0x08;
++//-------
++//					byte type = (GetSignalType(tile, track) + 1) & 0x03;
++//					_map3_hi[tile] &= ~0x03;
++//					_map3_hi[tile] |= type;
++//>>>>>>> .r2456
+ 				} else {
+ 					// cycle between two-way -> one-way -> one-way -> ...
+ 					/* TODO: Rewrite switch into something more general */
+@@ -1116,7 +1131,7 @@
+ #include "table/track_land.h"
+ 
+ // used for presignals
+-static const SpriteID _signal_base_sprites[16] = {
++static const SpriteID _signal_base_sprites[32] = {
+ 	0x4FB,
+ 	0x1323,
+ 	0x1333,
+@@ -1128,16 +1143,41 @@
+ 	0x1373,
+ 	0x1383,
+ 
++	// pbs
++	0x1393,
++	0x13A3,  // not used (yet?)
++	0x13B3,  // not used (yet?)
++	0x13C3,  // not used (yet?)
++
++	// pbs + sema
++	0x13D3,
++	0x13E3,  // not used (yet?)
++	0x13F3,  // not used (yet?)
++	0x1403,  // not used (yet?)
++
++
+ 	// mirrored versions
+ 	0x4FB,
+ 	0x1323,
+ 	0x1333,
+ 	0x1343,
+ 
+-	0x13C6,
+-	0x13D6,
+-	0x13E6,
+-	0x13F6,
++	0x1446,
++	0x1456,
++	0x1466,
++	0x1476,
++
++	// pbs
++	0x1393,
++	0x13A3,  // not used (yet?)
++	0x13B3,  // not used (yet?)
++	0x13C3,  // not used (yet?)
++
++	// pbs + sema
++	0x14C6,
++	0x14D6,  // not used (yet?)
++	0x14E6,  // not used (yet?)
++	0x14F6,  // not used (yet?)
+ };
+ 
+ // used to determine the side of the road for the signal
+@@ -1155,7 +1195,7 @@
+ 	uint v = _signal_position[(image_and_pos & 0xF) + (otherside ? 12 : 0)];
+ 	uint x = ti->x | (v&0xF);
+ 	uint y = ti->y | (v>>4);
+-	uint sprite = _signal_base_sprites[(_map3_hi[ti->tile] & 7) + (otherside ? 8 : 0)] + (image_and_pos>>4) + ((condition != 0) ? 1 : 0);
++	uint sprite = _signal_base_sprites[(_map3_hi[ti->tile] & 15) + (otherside ? 16 : 0)] + (image_and_pos>>4) + ((condition != 0) ? 1 : 0);
+ 	AddSortableSpriteToDraw(sprite, x, y, 1, 1, 10, GetSlopeZ(x,y));
+ }
+ 
+@@ -1366,6 +1406,19 @@
+ 			if (m5 & TRACK_BIT_RIGHT) DrawGroundSprite(0x3F1 + tracktype_offs);
+ 		}
+ 
++#ifdef PBS_SHOW_RESERVED
++		{
++			byte pbs = PBSTileReserved(ti->tile);
++			assert(pbs != 0xFF);
++			if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite((0x3ED + tracktype_offs) | PALETTE_CRASH);
++			if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite((0x3EE + tracktype_offs) | PALETTE_CRASH);
++			if (pbs & TRACK_BIT_UPPER) DrawGroundSprite((0x3EF + tracktype_offs) | PALETTE_CRASH);
++			if (pbs & TRACK_BIT_LOWER) DrawGroundSprite((0x3F0 + tracktype_offs) | PALETTE_CRASH);
++			if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite((0x3F2 + tracktype_offs) | PALETTE_CRASH);
++			if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite((0x3F1 + tracktype_offs) | PALETTE_CRASH);
++		}
++#endif
++
+ 		if (_display_opt & DO_FULL_DETAIL) {
+ 			_detailed_track_proc[_map2[ti->tile] & RAIL_MAP2LO_GROUND_MASK](ti);
+ 		}
+@@ -1475,6 +1528,19 @@
+ 
+ 		DrawGroundSprite(image);
+ 
++#ifdef PBS_SHOW_RESERVED
++{
++	byte pbs = PBSTileReserved(ti->tile);
++	assert(pbs != 0xFF);
++	if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite((0x3ED + tracktype_offs) | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite((0x3EE + tracktype_offs) | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_UPPER) DrawGroundSprite((0x3EF + tracktype_offs) | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LOWER) DrawGroundSprite((0x3F0 + tracktype_offs) | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite((0x3F2 + tracktype_offs) | PALETTE_CRASH);
++	if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite((0x3F1 + tracktype_offs) | PALETTE_CRASH);
++}
++#endif
++
+ 		while ((image=drss->image) != 0) {
+ 			DrawSpecialBuilding(image, type < 4 ? tracktype_offs : 0, ti,
+ 			                    drss->subcoord_x, drss->subcoord_y, 0,
+@@ -1519,6 +1585,7 @@
+ 	int cur_stack;
+ 	bool stop;
+ 	bool has_presignal;
++	bool has_pbssignal;
+ 
+ 	// presignal info
+ 	int presignal_exits;
+@@ -1528,6 +1595,10 @@
+ 	byte bit[NUM_SSD_ENTRY];
+ 	TileIndex tile[NUM_SSD_ENTRY];
+ 
++	int pbs_cur;
++	// these are used to keep track of the signals that change.
++	TileIndex pbs_tile[NUM_SSD_ENTRY];
++
+ 	// these are used to keep track of the stack that modifies presignals recursively
+ 	TileIndex next_tile[NUM_SSD_STACK];
+ 	byte next_dir[NUM_SSD_STACK];
+@@ -1545,12 +1616,19 @@
+ 					ssd->tile[ssd->cur] = tile; // remember the tile index
+ 					ssd->bit[ssd->cur] = track; // and the controlling bit number
+ 					ssd->cur++;
++//					DEBUG(pbs, 0) ("sigstuff tile:%x  track:%i",tile,track);
++					ssd->has_pbssignal |= PBSIsPbsSignal(tile, ReverseTrackdir(track));
+ 				}
+ 
+ 				// remember if this block has a presignal.
+ 				ssd->has_presignal |= (_map3_hi[tile]&1);
+ 			}
+ 
++			if ((_map3_lo[tile] & _signals_table_both[track]) != 0) {
++				ssd->pbs_tile[ssd->pbs_cur] = tile; // remember the tile index
++				ssd->pbs_cur++;
++			}
++
+ 			// is this an exit signal that points out from the segment?
+ 			if ((_map3_hi[tile]&2) && _map3_lo[tile]&_signals_table_other[track]) {
+ 				ssd->presignal_exits++;
+@@ -1565,6 +1643,26 @@
+ 	return false;
+ }
+ 
++static bool SetSignalsEnumProcPBS(uint tile, SetSignalsData *ssd, int track, uint length, byte *state)
++{
++	// the tile has signals?
++	if (IsTileType(tile, MP_RAILWAY)) {
++		if (GetRailTileType(tile) == RAIL_TYPE_SIGNALS) {
++			if ((_map3_lo[tile] & _signals_table_both[track]) != 0) {
++
++				if (ssd->cur != NUM_SSD_ENTRY) {
++					ssd->tile[ssd->cur] = tile; // remember the tile index
++					ssd->bit[ssd->cur] = track & 7; // and the controlling bit number
++					ssd->cur++;
++				}
++				return true;
++			}
++		} else if (IsTileDepotType(tile, TRANSPORT_RAIL))
++			return true; // don't look further if the tile is a depot
++	}
++	return false;
++}
++
+ /* Struct to parse data from VehicleFromPos to SignalVehicleCheckProc */
+ typedef struct SignalVehicleCheckStruct {
+ 	TileIndex tile;
+@@ -1692,6 +1790,15 @@
+ 	//   there is at least one green exit signal OR
+ 	//   there are no exit signals in the segment
+ 
++	if (false && !(ssd->stop) && (ssd->has_pbssignal))
++	for(i=0; i!=ssd->pbs_cur; i++) {
++		TileIndex tile = ssd->pbs_tile[i];
++		_map3_hi[tile] &= ~0x0B;
++		_map3_hi[tile] |= 0x08;
++		MarkTileDirtyByTile(tile);
++	}
++
++
+ 	// then mark the signals in the segment accordingly
+ 	for(i=0; i!=ssd->cur; i++) {
+ 		uint tile = ssd->tile[i];
+@@ -1752,8 +1859,9 @@
+ 
+ 	for(;;) {
+ 		// go through one segment and update all signals pointing into that segment.
+-		ssd.cur = ssd.presignal_exits = ssd.presignal_exits_free = 0;
++		ssd.cur = ssd.pbs_cur = ssd.presignal_exits = ssd.presignal_exits_free = 0;
+ 		ssd.has_presignal = false;
++		ssd.has_pbssignal = false;
+ 
+ 		FollowTrack(tile, 0xC000 | TRANSPORT_RAIL, direction, (TPFEnumProc*)SetSignalsEnumProc, SetSignalsAfterProc, &ssd);
+ 		ChangeSignalStates(&ssd);
+@@ -1773,6 +1881,30 @@
+ 	return (bool)result;
+ }
+ 
++bool PBSIsPbsSegment(uint tile, byte direction)
++{
++	SetSignalsData ssd;
++	bool result = false;
++	int i;
++
++	ssd.cur_stack = 0;
++	direction>>=1;
++
++	ssd.cur = ssd.presignal_exits = ssd.presignal_exits_free = 0;
++	ssd.has_presignal = false;
++
++	FollowTrack(tile, 0xC000 | TRANSPORT_RAIL, direction, (TPFEnumProc*)SetSignalsEnumProcPBS, SetSignalsAfterProc, &ssd);
++	for(i=0; i!=ssd.cur; i++) {
++		uint tile = ssd.tile[i];
++		byte bit = ssd.bit[i];
++		if (!PBSIsPbsSignal(tile, bit) && !PBSIsPbsSignal(tile, bit | 8))
++			return false;
++		result = true;
++	};
++	
++	return result;
++}
++
+ void SetSignalsOnBothDir(uint tile, byte track)
+ {
+ 	static const byte _search_dir_1[6] = {1, 3, 1, 3, 5, 3};
+@@ -2061,6 +2193,8 @@
+ 	} else if (_fractcoords_enter[dir] == fract_coord) {
+ 		if (_enter_directions[dir] == v->direction) {
+ 			/* enter the depot */
++			if (v->next == NULL)
++				PBSClearTrack(v->tile, FIND_FIRST_BIT(v->u.rail.track));
+ 			v->u.rail.track = 0x80,
+ 			v->vehstatus |= VS_HIDDEN; /* hide it */
+ 			v->direction ^= 4;
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2456)
++++ vehicle.c	(working copy)
+@@ -1916,8 +1916,9 @@
+ 	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,flags), SLE_UINT8, 2, 255),
+ 	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,days_since_order_progr), SLE_UINT16, 2, 255),
+ 
+-	// reserve extra space in savegame here. (currently 13 bytes)
+-	SLE_CONDARR(NullStruct,null,SLE_FILE_U8 | SLE_VAR_NULL, 13, 2, 255),
++	SLE_CONDVARX(offsetof(Vehicle,u)+offsetof(VehicleRail,pbs_status), SLE_UINT8, 2, 255),
++	// reserve extra space in savegame here. (currently 12 bytes)
++	SLE_CONDARR(NullStruct,null,SLE_FILE_U8 | SLE_VAR_NULL, 12, 2, 255),
+ 
+ 	SLE_END()
+ };
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2456)
++++ vehicle.h	(working copy)
+@@ -68,6 +68,8 @@
+ 	byte railtype;
+ 
+ 	byte flags;
++
++	byte pbs_status;
+ } VehicleRail;
+ 
+ enum {
+Index: ship_cmd.c
+===================================================================
+--- ship_cmd.c	(revision 2456)
++++ ship_cmd.c	(working copy)
+@@ -574,7 +574,7 @@
+ 
+ 		NPFFillWithOrderData(&fstd, v);
+ 
+-		ftd = NPFRouteToStationOrTile(src_tile, trackdir, &fstd, TRANSPORT_WATER, v->owner);
++		ftd = NPFRouteToStationOrTile(src_tile, trackdir, &fstd, TRANSPORT_WATER, v->owner, PBS_MODE_NONE);
+ 
+ 		if (ftd.best_trackdir != 0xff)
+ 			/* If ftd.best_bird_dist is 0, we found our target and ftd.best_trackdir contains
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2456)
++++ Makefile	(working copy)
+@@ -644,6 +644,7 @@
+ C_SOURCES += order_cmd.c
+ C_SOURCES += order_gui.c
+ C_SOURCES += pathfind.c
++C_SOURCES += pbs.c
+ C_SOURCES += player_gui.c
+ C_SOURCES += players.c
+ C_SOURCES += pool.c
+Index: tile.h
+===================================================================
+--- tile.h	(revision 2456)
++++ tile.h	(working copy)
+@@ -74,9 +74,12 @@
+ 	return TileHeight(tile) * 8;
+ }
+ 
+-static inline TileType GetTileType(TileIndex tile)
++static TileType GetTileType(TileIndex tile)
+ {
+ 	assert(tile < MapSize());
++	//if (!(tile < MapSize())) {
++//		return 0;
++//	}
+ 	return GB(_map_type_and_height[tile], 4, 4);
+ }
+ 

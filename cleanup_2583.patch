@@ -1,0 +1,88 @@
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2583)
++++ functions.h	(working copy)
+@@ -79,7 +79,7 @@
+ void CDECL ShowInfoF(const char *str, ...);
+ void NORETURN CDECL error(const char *str, ...);
+ 
+-/* ttd.c */
++/* openttd.c */
+ 
+ // **************
+ // * Warning: DO NOT enable this unless you understand what it does
+Index: npf.c
+===================================================================
+--- npf.c	(revision 2583)
++++ npf.c	(working copy)
+@@ -71,12 +71,13 @@
+ 	}
+ };
+ 
+-static uint NTPHash(uint key1, uint key2)
+-{
+-	/* This function uses the old hash, which is fixed on 10 bits (1024 buckets) */
+-	return PATHFIND_HASH_TILE(key1);
+-}
+ 
++//static uint NTPHash(uint key1, uint key2)
++//{
++//	/* This function uses the old hash, which is fixed on 10 bits (1024 buckets) */
++//	return PATHFIND_HASH_TILE(key1);
++//}
++
+ /**
+  * Calculates a hash value for use in the NPF.
+  * @param key1	The TileIndex of the tile to hash
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2583)
++++ openttd.h	(working copy)
+@@ -1,5 +1,5 @@
+-#ifndef TTD_H
+-#define TTD_H
++#ifndef OPENTTD_H
++#define OPENTTD_H
+ 
+ #ifndef VARDEF
+ #define VARDEF extern
+@@ -548,4 +548,4 @@
+ #include "functions.h"
+ #include "variables.h"
+ 
+-#endif /* TTD_H */
++#endif /* OPENTTD_H */
+Index: strings.c
+===================================================================
+--- strings.c	(revision 2583)
++++ strings.c	(working copy)
+@@ -983,4 +983,4 @@
+ 
+ 	if (!ReadLanguagePack(def))
+ 		error("can't read language pack '%s'", dl->ent[def].file);
+-}
+\ No newline at end of file
++}
+Index: Makefile
+===================================================================
+--- Makefile	(revision 2583)
++++ Makefile	(working copy)
+@@ -639,6 +639,7 @@
+ C_SOURCES += main_gui.c
+ C_SOURCES += map.c
+ C_SOURCES += md5.c
++C_SOURCES += mersenne.c
+ C_SOURCES += minilzo.c
+ C_SOURCES += misc.c
+ C_SOURCES += misc_cmd.c
+Index: mersenne.c
+===================================================================
+--- mersenne.c	(revision 2583)
++++ mersenne.c	(working copy)
+@@ -69,4 +69,4 @@
+ 
+ void SeedMT(uint32 seed) {}
+ 
+-#endif
+\ No newline at end of file
++#endif

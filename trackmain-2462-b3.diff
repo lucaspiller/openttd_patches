@@ -1,0 +1,509 @@
+Index: rail.h
+===================================================================
+--- rail.h	(revision 2462)
++++ rail.h	(working copy)
+@@ -63,27 +63,35 @@
+ /* These are used to specify a single track. Can be translated to a trackbit
+  * with TrackToTrackbit */
+ typedef enum Tracks {
+-  TRACK_DIAG1 = 0,
+-  TRACK_DIAG2 = 1,
+-  TRACK_UPPER = 2,
+-  TRACK_LOWER = 3,
+-  TRACK_LEFT  = 4,
+-  TRACK_RIGHT = 5,
+-  TRACK_END,
+-  INVALID_TRACK = 0xFF,
++	TRACK_DIAG1 = 0,
++	TRACK_DIAG2 = 1,
++	TRACK_UPPER = 2,
++	TRACK_LOWER = 3,
++	TRACK_LEFT  = 4,
++	TRACK_RIGHT = 5,
++	TRACK_END,
++	INVALID_TRACK = 0xFF,
+ } Track;
+ 
+ /* These are the bitfield variants of the above */
+ typedef enum TrackBits {
+-  TRACK_BIT_DIAG1 = 1,  // 0
+-  TRACK_BIT_DIAG2 = 2,  // 1
+-  TRACK_BIT_UPPER = 4,  // 2
+-  TRACK_BIT_LOWER = 8,  // 3
+-  TRACK_BIT_LEFT  = 16, // 4
+-  TRACK_BIT_RIGHT = 32, // 5
++	TRACK_BIT_DIAG1 = 1,  // 0
++	TRACK_BIT_DIAG2 = 2,  // 1
++	TRACK_BIT_UPPER = 4,  // 2
++	TRACK_BIT_LOWER = 8,  // 3
++	TRACK_BIT_LEFT  = 16, // 4
++	TRACK_BIT_RIGHT = 32, // 5
+ 	TRACK_BIT_MASK  = 0x3F,
+ } TrackBits;
+ 
++typedef enum TrackBitCombos {
++	/* Those select specific edges of the tile */
++	TRACK_EDGE_NW = TRACK_BIT_DIAG2 | TRACK_BIT_UPPER | TRACK_BIT_LEFT,
++	TRACK_EDGE_NE = TRACK_BIT_DIAG1 | TRACK_BIT_UPPER | TRACK_BIT_RIGHT,
++	TRACK_EDGE_SW = TRACK_BIT_DIAG1 | TRACK_BIT_LOWER | TRACK_BIT_LEFT,
++	TRACK_EDGE_SE = TRACK_BIT_DIAG2 | TRACK_BIT_LOWER | TRACK_BIT_RIGHT,
++} TrackBitCombos;
++
+ /* These are a combination of tracks and directions. Values are 0-5 in one
+ direction (corresponding to the Track enum) and 8-13 in the other direction. */
+ typedef enum Trackdirs {
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2462)
++++ lang/english.txt	(working copy)
+@@ -1946,6 +1946,7 @@
+ STR_6814_TRAIN_REVERSING                                        :{LTBLUE}Train reversing: {ORANGE}{STRING}
+ STR_6815_DISASTERS                                              :{LTBLUE}Disasters: {ORANGE}{STRING}
+ STR_16816_CITY_APPROVAL                                         :{LTBLUE}City council's attitude towards area restructuring: {ORANGE}{STRING}
++STR_DIFF_TRACK_MAINTENANCE                                      :{LTBLUE}Track maintenance cost: {ORANGE}{STRING}
+ ############ range for difficulty settings ends
+ 
+ STR_26816_NONE                                                  :None
+Index: players.c
+===================================================================
+--- players.c	(revision 2462)
++++ players.c	(working copy)
+@@ -203,7 +203,7 @@
+ 	return true;
+ }
+ 
+-static void SubtractMoneyFromAnyPlayer(Player *p, int32 cost)
++void SubtractMoneyFromAnyPlayer(Player *p, int32 cost)
+ {
+ 	p->money64 -= cost;
+ 	UpdatePlayerMoney32(p);
+@@ -496,6 +496,8 @@
+ 
+ 	GeneratePresidentName(p);
+ 
++	p->track_maintenance = 0;
++
+ 	InvalidateWindow(WC_GRAPH_LEGEND, 0);
+ 	InvalidateWindow(WC_TOOLBAR_MENU, 0);
+ 	InvalidateWindow(WC_CLIENT_LIST, 0);
+@@ -996,6 +998,8 @@
+ 	SLE_CONDVAR(Player,is_ai,			SLE_UINT8, 2, 255),
+ 	SLE_CONDVAR(Player,is_active,	SLE_UINT8, 4, 255),
+ 
++	SLE_CONDVAR(Player,track_maintenance, SLE_INT32, 15, 255),
++
+ 	// reserve extra space in savegame here. (currently 64 bytes)
+ 	SLE_CONDARR(NullStruct,null,SLE_FILE_U64 | SLE_VAR_NULL, 8, 2, 255),
+ 
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 2462)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -10,6 +10,8 @@
+ #include "player.h"
+ #include "town.h"
+ #include "sound.h"
++#include "debug.h"
++#include "pathfind.h"
+ 
+ extern void DrawCanalWater(uint tile);
+ 
+@@ -1290,8 +1292,73 @@
+ 	/* not used */
+ }
+ 
++extern int GetSingleRailCost(byte tracktype);
++
+ static void TileLoop_TunnelBridge(uint tile)
+ {
++
++	// Add track maintenance cost
++	if ((_map5[tile] & 0x84) == 0x80 ) {	//is rail bridge bridge
++		int cost = _bridge_type_price_mod[(_map2[tile] & 0xF0) >> 4] / 25;
++		Player *p;
++
++
++		if (_map5[tile] & 0x40) { //middle part of bridge
++			TileIndex start, end;
++			start = FindEdgesOfBridge(tile, &end);
++
++			cost += GetSingleRailCost( (_map3_lo[tile] & 0xF0) >> 4);
++
++			if (_map_owner[start] < MAX_PLAYERS) {
++				p = DEREF_PLAYER(_map_owner[start]);
++				p->track_maintenance += cost;
++				if (_debug_misc_level >= 2)
++						ShowCostOrIncomeAnimation(TileX(tile) * 16, TileY(tile) * 16, TilePixelHeight(tile) + 8, cost);
++			}
++
++			if ( (_map5[tile] & 0x38) == 0x20) {	//there is railway under the bridge (we have no costs for road (yet))
++				Player *p2 = DEREF_PLAYER(_map_owner[tile]);
++				int cost2 = 0;
++				//we assume the rail is owned by a player, so we skip the < MAX_PLAYERS test
++
++				cost2 += GetSingleRailCost(_map3_lo[tile] & 0xF);
++
++				p2->track_maintenance += cost2;
++
++				if (_debug_misc_level >= 2)
++						ShowCostOrIncomeAnimation(TileX(tile) * 16, TileY(tile) * 16, TilePixelHeight(tile), cost2);
++			}
++
++		} else {	//bridge ending
++
++			cost += GetSingleRailCost(_map3_lo[tile] & 0xF);
++
++			if (_map_owner[tile] < MAX_PLAYERS) {
++				p = DEREF_PLAYER(_map_owner[tile]);
++				p->track_maintenance += cost;
++				if (_debug_misc_level >= 2)
++						ShowCostOrIncomeAnimation(TileX(tile) * 16, TileY(tile) * 16, TilePixelHeight(tile) + 8, cost);
++			}
++		}
++	} else {	//no bridge, must be a tunnel (else we wouldn't be here (I hope))
++		if ((_map5[tile] & 0xE) == 0) {	//no road tunnel, and only eastward point tunnels
++			//are considered, (so that we don't count stuff twice)
++			if (_map_owner[tile] < MAX_PLAYERS) {
++				Player *p = DEREF_PLAYER(_map_owner[tile]);
++				FindLengthOfTunnelResult flotr = FindLengthOfTunnel(tile, _map5[tile] & 3);
++				int tcost = 0;	//Track cost
++				int cost;
++
++				tcost += GetSingleRailCost(_map3_lo[tile] & 0xF);
++
++				cost = (25 + tcost) * flotr.length;
++				p->track_maintenance += cost;
++				if (_debug_misc_level >= 2)
++						ShowCostOrIncomeAnimation(TileX(tile) * 16, TileY(tile) * 16, TilePixelHeight(tile), cost);
++			}
++		}
++	}
++
+ 	if (_opt.landscape == LT_HILLY) {
+ 		if ( GetTileZ(tile) > _opt.snow_line) {
+ 			if (!(_map3_hi[tile] & 0x80)) {
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2462)
++++ openttd.h	(working copy)
+@@ -146,7 +146,7 @@
+ };
+ 
+ enum {
+-	NUM_PRICES = 49,
++	NUM_PRICES = 50,
+ };
+ 
+ typedef struct Prices {
+@@ -197,9 +197,10 @@
+ 	int32 roadveh_running;
+ 	int32 ship_running;
+ 	int32 build_industry;
++	int32 track_maintenance;
+ } Prices;
+ 
+-#define GAME_DIFFICULTY_NUM 18
++#define GAME_DIFFICULTY_NUM 19
+ 
+ typedef struct GameDifficulty {
+ 	int max_no_competitors;
+@@ -220,6 +221,7 @@
+ 	int line_reverse_mode;
+ 	int disasters;
+ 	int town_council_tolerance;	// minimum required town ratings to be allowed to demolish stuff
++	int track_maintenance;
+ } GameDifficulty;
+ 
+ enum {
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2462)
++++ saveload.c	(working copy)
+@@ -23,7 +23,7 @@
+ #include "saveload.h"
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 14,
++	SAVEGAME_MAJOR_VERSION = 15,
+ 	SAVEGAME_MINOR_VERSION = 0,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+Index: player.h
+===================================================================
+--- player.h	(revision 2462)
++++ player.h	(working copy)
+@@ -184,6 +184,8 @@
+ 	int64 yearly_expenses[3][13];
+ 	PlayerEconomyEntry cur_economy;
+ 	PlayerEconomyEntry old_economy[24];
++
++	int32 track_maintenance;
+ } Player;
+ 
+ void ChangeOwnershipOfPlayerItems(byte old_player, byte new_player);
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2462)
++++ rail_cmd.c	(working copy)
+@@ -18,6 +18,7 @@
+ #include "depot.h"
+ #include "waypoint.h"
+ #include "rail.h"
++#include "debug.h"
+ 
+ extern uint16 _custom_sprites_base;
+ 
+@@ -82,6 +83,116 @@
+  *               11uuuudd => rail depot
+  */
+ 
++static void GetNumSwitches(const byte m5, int *two_way, int *three_way)
++{
++	int num2 = 0, num3 = 0;
++ 
++	if ((m5 & TRACK_EDGE_NW) != 0) {
++		switch (m5 & TRACK_EDGE_NW) {
++			case TRACK_BIT_DIAG2 | TRACK_BIT_UPPER | TRACK_BIT_LEFT:
++				num3++; break;
++			case TRACK_BIT_LEFT | TRACK_BIT_DIAG2: case TRACK_BIT_LEFT | TRACK_BIT_UPPER: case TRACK_BIT_UPPER | TRACK_BIT_DIAG2:
++				num2++; break;
++		}
++	}
++
++	if ((m5 & TRACK_EDGE_SW) != 0){
++		switch (m5 & TRACK_EDGE_SW) {
++			case TRACK_BIT_DIAG1 | TRACK_BIT_LOWER | TRACK_BIT_LEFT:
++				num3++; break;
++			case TRACK_BIT_LOWER | TRACK_BIT_LEFT: case TRACK_BIT_DIAG1 | TRACK_BIT_LEFT: case TRACK_BIT_DIAG1 | TRACK_BIT_LOWER:
++				num2++; break;
++		}
++	}
++
++	if ((m5 & TRACK_EDGE_SE) != 0) {
++		switch (m5 & TRACK_EDGE_SE) {
++			case TRACK_BIT_DIAG2 | TRACK_BIT_LOWER | TRACK_BIT_RIGHT:
++				num3++; break;
++			case TRACK_BIT_LOWER | TRACK_BIT_RIGHT: case TRACK_BIT_DIAG2 | TRACK_BIT_RIGHT: case TRACK_BIT_DIAG2 | TRACK_BIT_LOWER:
++				num2++; break;
++		}
++	}
++
++	if ((m5 & TRACK_EDGE_NE) != 0) {
++		switch (m5 & TRACK_EDGE_NE) {
++			case TRACK_BIT_DIAG1 | TRACK_BIT_UPPER | TRACK_BIT_RIGHT:
++				num3++; break;
++			case TRACK_BIT_UPPER | TRACK_BIT_RIGHT: case TRACK_BIT_DIAG1 | TRACK_BIT_RIGHT: case TRACK_BIT_DIAG1 | TRACK_BIT_UPPER:
++				num2++; break;
++		}
++	}
++
++	*two_way = num2;
++	*three_way = num3;
++}
++
++static int GetNumSignals(const byte m5, const byte sig)
++{
++	int num = 0;
++
++	//each signal has its own bit
++	if (HASBIT(sig, 4)) num++;
++	if (HASBIT(sig, 5)) num++;
++	if (HASBIT(sig, 6)) num++;
++	if (HASBIT(sig, 7)) num++;
++
++	return num;
++}
++
++typedef enum {
++	BASE_PRICE_LONG      =   3,	//Diagonal track
++	BASE_PRICE_SHORT     =   2,	//horizontal or vertical track
++	BASE_PRICE_SIGNALS   =   3,	//ONE signal
++	BASE_PRICE_TWOWAY    =   4,	//one two-way switch
++	BASE_PRICE_THREEWAY  =  12,	//one three-way switch
++
++	BASE_PRICE_DEPOT     = 400
++} RailMaintenanceCosts;
++
++byte MaintenanceModifierType[] = {
++	1,	//normal rail
++	3,	//monorail
++	5		//maglev
++};
++
++int GetSingleRailCost(byte tracktype)
++{
++	return BASE_PRICE_LONG * MaintenanceModifierType[tracktype];
++}
++
++static int RailMaintenanceCost(TileIndex tile)
++{
++	byte m5 = _map5[tile];
++	byte m3 = _map3_lo[tile];
++	int cost = 0;
++	int two_way = 0;
++	int three_way = 0;
++
++	if ( (m5 & RAIL_TILE_TYPE_MASK) == RAIL_TYPE_DEPOT_WAYPOINT)
++		return BASE_PRICE_DEPOT;
++
++	if (m5 & TRACK_BIT_DIAG1) cost += BASE_PRICE_LONG;
++	if (m5 & TRACK_BIT_DIAG2) cost += BASE_PRICE_LONG;
++	if (m5 & TRACK_BIT_UPPER) cost += BASE_PRICE_SHORT;
++	if (m5 & TRACK_BIT_LOWER) cost += BASE_PRICE_SHORT;
++	if (m5 & TRACK_BIT_LEFT ) cost += BASE_PRICE_SHORT;
++	if (m5 & TRACK_BIT_RIGHT) cost += BASE_PRICE_SHORT;
++
++	cost *= MaintenanceModifierType[m3 & 0xF];
++
++	if ( (m5 & RAIL_TILE_TYPE_MASK) == RAIL_TYPE_SIGNALS)
++		cost += GetNumSignals(m5, m3) * BASE_PRICE_SIGNALS;
++
++	GetNumSwitches(m5, &two_way, &three_way);
++	cost += two_way * BASE_PRICE_TWOWAY;
++	cost += three_way * BASE_PRICE_THREEWAY;
++
++	return cost;
++}
++
++
++
+ static bool CheckTrackCombination(TileIndex tile, TrackBits to_build, uint flags)
+ {
+ 	RailTileType type = GetRailTileType(tile);
+@@ -1848,7 +1959,20 @@
+ 	byte rail;
+ 	uint16 m2;
+ 	byte owner;
++	Player *p;
++	int cost;
+ 
++	SET_EXPENSES_TYPE(EXPENSES_PROPERTY);
++
++	owner = _map_owner[tile];
++	p = DEREF_PLAYER(owner);
++	cost = RailMaintenanceCost(tile);
++
++	p->track_maintenance += cost;
++	if (_debug_misc_level >= 2)
++		ShowCostOrIncomeAnimation(TileX(tile) * 16, TileY(tile) * 16, TilePixelHeight(tile), cost);
++
++
+ 	m2 = _map2[tile] & 0xF;
+ 
+ 	/* special code for alps landscape */
+@@ -1887,8 +2011,6 @@
+ 		} else if (rail == TRACK_BIT_RIGHT) {
+ 			a2 = RAIL_GROUND_FENCE_VERT2;
+ 		} else {
+-			owner = GetTileOwner(tile);
+-
+ 			if ( (!(rail&(TRACK_BIT_DIAG2|TRACK_BIT_UPPER|TRACK_BIT_LEFT)) && (rail&TRACK_BIT_DIAG1)) || rail==(TRACK_BIT_LOWER|TRACK_BIT_RIGHT)) {
+ 				if (!IsTileType(tile + TILE_XY(0,-1), MP_RAILWAY) ||
+ 						!IsTileOwner(tile + TILE_XY(0, -1), owner) ||
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2462)
++++ misc.c	(working copy)
+@@ -770,7 +770,8 @@
+ static const SaveLoad _game_opt_desc[] = {
+ 	// added a new difficulty option (town attitude) in version 4
+ 	SLE_CONDARR(GameOptions,diff,						SLE_FILE_I16 | SLE_VAR_I32, 17, 0, 3),
+-	SLE_CONDARR(GameOptions,diff,						SLE_FILE_I16 | SLE_VAR_I32, 18, 4, 255),
++	SLE_CONDARR(GameOptions,diff,						SLE_FILE_I16 | SLE_VAR_I32, 18, 4, 14),
++	SLE_CONDARR(GameOptions,diff,           SLE_FILE_I16 | SLE_VAR_I32, 19, 15, 255),
+ 	SLE_VAR(GameOptions,diff_level,			SLE_UINT8),
+ 	SLE_VAR(GameOptions,currency,				SLE_UINT8),
+ 	SLE_VAR(GameOptions,kilometers,			SLE_UINT8),
+Index: economy.c
+===================================================================
+--- economy.c	(revision 2462)
++++ economy.c	(working copy)
+@@ -761,6 +761,7 @@
+ 	1600,		// roadveh_running
+ 	5600,		// ship_running
+ 	1000000, // build_industry
++	1000,       // track maintenance
+ };
+ 
+ void StartupEconomy(void)
+@@ -1497,8 +1498,12 @@
+ 	return result;
+ }
+ 
++extern void SubtractMoneyFromAnyPlayer(Player *p, int32 cost);
++
+ void PlayersMonthlyLoop(void)
+ {
++	Player *p;
++
+ 	PlayersGenStatistics();
+ 	if (_patches.inflation && _cur_year < MAX_YEAR_END)
+ 		AddInflation();
+@@ -1507,6 +1512,12 @@
+ 	_current_player = OWNER_NONE;
+ 	HandleEconomyFluctuations();
+ 	SubsidyMonthlyHandler();
++
++   //Apply the Track Maintenance
++	FOR_ALL_PLAYERS(p) {
++		SubtractMoneyFromAnyPlayer(p, p->track_maintenance * _price.track_maintenance * _opt.diff.track_maintenance / 9000);
++		p->track_maintenance = 0;
++	}
+ }
+ 
+ static void DoAcquireCompany(Player *p)
+@@ -1653,8 +1664,11 @@
+ // Prices
+ static void SaveLoad_PRIC(void)
+ {
+-	SlArray(&_price, NUM_PRICES, SLE_INT32);
+-	SlArray(&_price_frac, NUM_PRICES, SLE_UINT16);
++	int num = NUM_PRICES;
++
++	if (_sl.full_version < 0xF00 && !_sl.save) num--;
++	SlArray(&_price, num, SLE_INT32);
++	SlArray(&_price_frac, num, SLE_UINT16);
+ }
+ 
+ // Cargo payment rates
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2462)
++++ settings_gui.c	(working copy)
+@@ -307,6 +307,7 @@
+ 	{  0,   1,  1, STR_6834_AT_END_OF_LINE_AND_AT_STATIONS},
+ 	{  0,   1,  1, STR_6836_OFF},
+ 	{  0,   2,  1, STR_6839_PERMISSIVE},
++	{  0,   2,  1, STR_6823_NONE}
+ };
+ 
+ static inline bool GetBitAndShift(uint32 *b)
+@@ -334,13 +335,14 @@
+ 	O: economy (0 = steady, 1 = fluctuating)
+ 	P: Train reversing (0 = end of line + stations, 1 = end of line)
+ 	Q: disasters
+-	R: area restructuring (0 = permissive, 2 = hostile)
++	R: area restructuring (0 = permissive, 2 = hostile)A
++	S: track maintenace
+ */
+ static const int16 _default_game_diff[3][GAME_DIFFICULTY_NUM] = { /*
+-	 A, B, C, D,   E, F, G, H, I, J, K, L, M, N, O, P, Q, R*/
+-	{2, 2, 1, 3, 300, 2, 0, 2, 0, 1, 2, 0, 1, 0, 0, 0, 0, 0},	//easy
+-	{4, 1, 1, 2, 150, 3, 1, 3, 1, 2, 1, 1, 2, 1, 1, 1, 1, 1},	//medium
+-	{7, 0, 2, 2, 100, 4, 1, 3, 2, 2, 0, 2, 3, 2, 1, 1, 1, 2},	//hard
++	 A, B, C, D,   E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S */
++	{2, 2, 1, 3, 300, 2, 0, 2, 0, 1, 2, 0, 1, 0, 0, 0, 0, 0, 0},	//easy
++	{4, 1, 1, 2, 150, 3, 1, 3, 1, 2, 1, 1, 2, 1, 1, 1, 1, 1, 1},	//medium
++	{7, 0, 2, 2, 100, 4, 1, 3, 2, 2, 0, 2, 3, 2, 1, 1, 1, 2, 2},	//hard
+ };
+ 
+ void SetDifficultyLevel(int mode, GameOptions *gm_opt)
+@@ -360,7 +362,7 @@
+ enum {
+ 	GAMEDIFF_WND_TOP_OFFSET = 45,
+ 	GAMEDIFF_WND_ROWSIZE    = 9
+-};
++} DIFF_WND_LAYOUT;
+ 
+ // Temporary holding place of values in the difficulty window until 'Save' is clicked
+ static GameOptions _opt_mod_temp;

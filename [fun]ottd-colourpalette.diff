@@ -1,0 +1,57 @@
+Index: NewSVN/misc_gui.c
+===================================================================
+--- NewSVN/misc_gui.c	(revision 209)
++++ NewSVN/misc_gui.c	(working copy)
+@@ -184,35 +184,35 @@
+ {
+ 	switch(e->event) {
+ 	case WE_PAINT: {
+-		int x,y;
++		int i, x, y;
+ 		DrawWindowWidgets(w);
+ 
+-		x = 200;
+-		y = 0;
+-		DrawStringCentered(x, y += 17, STR_00B6_ORIGINAL_COPYRIGHT, 0);
+-		DrawStringCentered(x, y += 10, STR_00B7_VERSION, 0);
+-		DrawString(20, y += 20, STR_00B8_ORIGINAL_DESIGN_PROGRAM, 0);
+-		DrawString(20, y += 10, STR_00B9_ORIGINAL_GRAPHICS, 0);
+-		DrawString(20, y += 30, STR_SPECIAL_THANKS, 0);
+-		// will probably be dynamic when stringhandling is finally reworked.
+-		DrawString(20, y += 10, STR_SPECIAL_THANKS_SIGNALS, 0);
+-		DrawString(20, y += 10, STR_SPECIAL_THANKS_CANALS, 0);
+-		DrawString(20, y += 10, STR_SPECIAL_THANKS_FOUNDATIONS, 0);
+-		DrawStringMultiCenter(x, w->height - 15, STR_00BA_COPYRIGHT_OPENTTD, 0x18E);
+-		break;
++		y = 30;
++		x = 0;
++		for (i = 1; i <= 256; i++) {
++			char buf[20];
++			sprintf(buf, "%d", i-1);
++
++			DoDrawString(buf, 2+x, y, 16);
++			GfxFillRect(24+x, y, 50+x, y+10, i-1); // show highlighted item with a different colour
++			y += 15;
++			if ((i % 30) == 0) {x += 60; y = 30;}
+ 		}
++		DEBUG(misc, 0) ("game colours printed...");
++
++	}	break;
+ 	}
+ }
+ 
+ static const Widget _about_widgets[] = {
+ {   WWT_CLOSEBOX,    14,     0,    10,     0,    13, STR_00C5,					STR_NULL},
+-{    WWT_CAPTION,    14,    11,   399,     0,    13, STR_015B_OPENTTD,	STR_NULL},
+-{      WWT_PANEL,    14,     0,   399,    14,   271, 0x0,								STR_NULL},
++{    WWT_CAPTION,    14,    11,   532,     0,    13, STR_015B_OPENTTD,	STR_NULL},
++{      WWT_PANEL,    14,     0,   532,    14,   499, 0x0,								STR_NULL},
+ {    WIDGETS_END},
+ };
+ 
+ static const WindowDesc _about_desc = {
+-	WDP_CENTER, WDP_CENTER, 400, 272,
++	WDP_CENTER, WDP_CENTER, 533, 500,
+ 	WC_GAME_OPTIONS,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_about_widgets,

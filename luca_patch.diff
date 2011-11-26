@@ -1,0 +1,129 @@
+Index: ttd.c
+===================================================================
+--- ttd.c	(revision 2236)
++++ ttd.c	(working copy)
+@@ -1025,6 +1025,36 @@
+ 		_current_player = p;
+ 	}
+ 
++	if (_game_mode == GM_MENU && _tick_counter - _sign_last_update > 370) {
++		// 370 ticks ~ 10 secs
++		SignStruct *ss;
++		Window *w = FindWindowById(WC_MAIN_WINDOW, 0);
++		assert(w);
++
++		char buf1[64];
++		int zoom_level;
++		bool found = false;
++
++		while (!found) {
++			_view_sign_number++;
++			if (_view_sign_number + 1 > GetSignPoolSize())
++				_view_sign_number = 0;
++			ss = GetSign(_view_sign_number);
++			if (ss != NULL && ss->str != NULL)
++				found = true;
++		}
++		
++		GetString(buf1, ss->str);
++		zoom_level = strtol(buf1, NULL, 10);
++		if (zoom_level < 0 || zoom_level > 3)
++			zoom_level = 0;
++		
++		DEBUG(misc, 0) ("Sign number: %d Zoom: %d", _view_sign_number + 1, zoom_level);
++		w->viewport->zoom = zoom_level;
++                ScrollMainWindowToTile(TILE_FROM_XY(ss->x, ss->y));
++		_sign_last_update = _tick_counter;
++	}
++
+ 	_in_state_game_loop = false;
+ }
+ 
+Index: ttd.h
+===================================================================
+--- ttd.h	(revision 2236)
++++ ttd.h	(working copy)
+@@ -527,6 +527,9 @@
+ };
+ VARDEF byte _no_scroll;
+ 
++VARDEF uint16 _sign_last_update;
++VARDEF uint32 _view_sign_number;
++
+ #include "functions.h"
+ #include "variables.h"
+ 
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 2236)
++++ viewport.c	(working copy)
+@@ -916,7 +916,7 @@
+ 	int left, top, right, bottom;
+ 	StringSpriteToDraw *sstd;
+ 
+-	if (!(_display_opt & DO_SHOW_SIGNS))
++	if (!(_display_opt & DO_SHOW_SIGNS || _game_mode == GM_MENU))
+ 		return;
+ 
+ 	left = dpi->left;
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2236)
++++ disaster_cmd.c	(working copy)
+@@ -947,14 +947,14 @@
+ 
+ #define MK(a,b) {a-20,b-20}
+ static const DisasterYears _dis_years[8] = {
+-	MK(30,55),
+-	MK(40,70),
+-	MK(60,90),
+-	MK(70,100),
+-	MK(100,200),
+-	MK(40,65),
+-	MK(75,110),
+-	MK(50,85),
++//	MK(30,55),
++//	MK(40,70),
++//	MK(60,90),
++//	MK(70,100),
++//	MK(100,200),
++//	MK(40,65),
++//	MK(75,110),
++//	MK(50,85),
+ };
+ 
+ 
+@@ -965,14 +965,14 @@
+ 	int i,j;
+ 
+ 	for(i=j=0; i!=lengthof(_dis_years); i++) {
+-		if (year >= _dis_years[i].min &&
+-				year < _dis_years[i].max)
++		//if (year >= _dis_years[i].min &&
++		//		year < _dis_years[i].max)
+ 					buf[j++] = i;
+ 	}
+ 
+ 	if (j == 0)
+ 		return;
+-
++	IConsoleError("Doing disaster!");
+ 	_disaster_initprocs[buf[(uint16)Random() * j >> 16]]();
+ }
+ 
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 2236)
++++ console_cmds.c	(working copy)
+@@ -116,6 +116,7 @@
+ DEF_CONSOLE_CMD(ConResetEngines)
+ {
+ 	StartupEngines();
++	_disaster_delay = 1;
+ 	return 0;
+ }
+ 
+Index: data/opntitle.dat
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream

@@ -1,0 +1,424 @@
+Only in openttd_queue_aircraft: Release
+diff -r -u --exclude-from=excludes.txt open_ttd_original/aircraft_cmd.c openttd_queue_aircraft/aircraft_cmd.c
+--- open_ttd_original/aircraft_cmd.c	Sat May 14 08:36:16 2005
++++ openttd_queue_aircraft/aircraft_cmd.c	Fri Jun  3 20:39:22 2005
+@@ -15,6 +15,7 @@
+ #include "player.h"
+ #include "airport.h"
+ #include "vehicle_gui.h"
++#include "queue.h"
+ 
+ static bool AirportMove(Vehicle *v, const AirportFTAClass *Airport);
+ static bool AirportSetBlocks(Vehicle *v, AirportFTA *current_pos, const AirportFTAClass *Airport);
+@@ -788,14 +789,15 @@
+ 
+ static bool UpdateAircraftSpeed(Vehicle *v)
+ {
+-	uint spd = v->acceleration * 2;
++	uint32 spd = v->acceleration * 2;
+ 	byte t;
+ 
+-	v->subspeed = (t=v->subspeed) + (byte)spd;
+-	spd = min( v->cur_speed + (spd >> 8) + (v->subspeed < t), v->max_speed);
++	spd = v->cur_speed + v->acceleration;
++	v->subspeed = (t=v->subspeed) + (uint32)spd;
++	spd = min( v->cur_speed + (spd >> 8) + (v->subspeed < t), v->max_speed * _patches.aircraft_speed_coeff);
+ 
+ 	// adjust speed for broken vehicles
+-	if(v->vehstatus&VS_AIRCRAFT_BROKEN) spd = min(spd, 27);
++	if(v->vehstatus&VS_AIRCRAFT_BROKEN) spd = min(spd, 27 * _patches.aircraft_speed_coeff);
+ 
+ 	//updates statusbar only if speed have changed to save CPU time
+ 	if (spd != v->cur_speed) {
+@@ -811,10 +813,10 @@
+ 	if (spd == 0)
+ 		return false;
+ 
+-	if ((byte)++spd == 0)
++	if ((uint32)++spd == 0)
+ 		return true;
+ 
+-	v->progress = (t = v->progress) - (byte)spd;
++	v->progress = (t = v->progress) - (uint32)spd;
+ 
+ 	return (t < v->progress);
+ }
+@@ -1552,8 +1554,27 @@
+ 	byte landingtype;
+ 	AirportFTA *current;
+ 	uint16 tcur_speed, tsubspeed;
++	//const uint queue_max_size = 256;
++	//Queue* aircraft_queue = NULL;
+ 
++	// Includes top_queue!!
++	//static uint16 queue_length = 0;
++
++	// Top vehicle is always already popped and placed in this variable.
++	// Allows me to check the top vehicle without popping the queue.
++	//static Vehicle *top_queue = NULL;
++
++	//static 
++	
++	bool can_land;
++	
++	can_land = false;
++
++	// Get the target airport
+ 	st = GetStation(v->u.air.targetairport);
++
++	//debug("Airport %p | plane %p | station %p", Airport, v, st);
++
+ 	// flying device is accepted at this station
+ 	// small airport --> no helicopters (AIRCRAFT_ONLY)
+ 	// all other airports --> all types of flying devices (ALL)
+@@ -1561,20 +1582,57 @@
+ 	// runway busy or not allowed to use this airstation, circle
+ 	if (! (v->subtype == Airport->acc_planes ||
+ 			st->airport_tile == 0 || (st->owner != OWNER_NONE && st->owner != v->owner) )) {
+-
+ 		// {32,FLYING,NOTHING_block,37}, {32,LANDING,N,33}, {32,HELILANDING,N,41},
+ 		// if it is an airplane, look for LANDING, for helicopter HELILANDING
+ 		// it is possible to choose from multiple landing runways, so loop until a free one is found
+ 		landingtype = (v->subtype != 0) ? LANDING : HELILANDING;
+ 		current = Airport->layout[v->u.air.pos].next_in_chain;
++
++
++		// Check to see if we're going to land at an airport.
++
++		// Fisrt, check queue - if we are on top, or if it's empty,
++		// we can land.
++
++		// If it's already in the queue, don't re-add it
++		// Otherwise, add it to queue
++		if(!v->u.air.in_queue && _patches.aircraft_queueing == true) {
++			// Add to queue
++			// 5 = priority, unused right now.
++			st->airport_queue->push(st->airport_queue, v, 5);
++			v->u.air.in_queue = true;
++		}
++
++		// save speed before, since if AirportHasBlock is false, it resets them to 0
++		// we don't want that for plane in air
++		// hack for speed thingie
++		tcur_speed = v->cur_speed;
++		tsubspeed = v->subspeed;
++
++		// If we're on top, go in
++		if(st->airport_queue->getTop(st->airport_queue) == v && _patches.aircraft_queueing == true) {
++			if (!AirportHasBlock(v, current, Airport)) {			
++				can_land = true;
++				st->airport_queue->pop(st->airport_queue);
++				v->u.air.in_queue = false;
++			} else {
++				can_land = false;
++			}
++		}
++
++		if(_patches.aircraft_queueing == false) {
++			if (!AirportHasBlock(v, current, Airport)) {			
++				can_land = true;
++			} else {
++				can_land = false;
++			}
++		}
++
++
+ 		while (current != NULL) {
+ 			if (current->heading == landingtype) {
+-				// save speed before, since if AirportHasBlock is false, it resets them to 0
+-				// we don't want that for plane in air
+-				// hack for speed thingie
+-				tcur_speed = v->cur_speed;
+-				tsubspeed = v->subspeed;
+-				if (!AirportHasBlock(v, current, Airport)) {
++
++				if(can_land == true) {
+ 					v->u.air.state = landingtype; // LANDING / HELILANDING
+ 					// it's a bit dirty, but I need to set position to next position, otherwise
+ 					// if there are multiple runways, plane won't know which one it took (because
+@@ -1583,6 +1641,7 @@
+ 					SETBITS(st->airport_flags, Airport->layout[v->u.air.pos].block);
+ 					return;
+ 				}
++
+ 				v->cur_speed = tcur_speed;
+ 				v->subspeed = tsubspeed;
+ 			}
+diff -r -u --exclude-from=excludes.txt open_ttd_original/aircraft_gui.c openttd_queue_aircraft/aircraft_gui.c
+--- open_ttd_original/aircraft_gui.c	Sun May 15 14:50:54 2005
++++ openttd_queue_aircraft/aircraft_gui.c	Fri Jun  3 18:06:15 2005
+@@ -513,13 +513,13 @@
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+ 				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 8);
++				SetDParam(1, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+ 				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 8);
++				SetDParam(1, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				str = STR_HEADING_FOR_HANGAR + _patches.vehicle_speed;
+ 			} break;
+ 
+@@ -530,7 +530,7 @@
+ 			default:
+ 				if (v->num_orders == 0) {
+ 					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->cur_speed * 8);
++					SetDParam(0, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				} else
+ 					str = STR_EMPTY;
+ 				break;
+Only in openttd_queue_aircraft: airport.c.bak
+diff -r -u --exclude-from=excludes.txt open_ttd_original/airport_movement.h openttd_queue_aircraft/airport_movement.h
+--- open_ttd_original/airport_movement.h	Sun Jan  9 02:49:40 2005
++++ openttd_queue_aircraft/airport_movement.h	Fri Jun  3 17:17:44 2005
+@@ -216,9 +216,9 @@
+ 	{  3,104,AMED_NOSPDCLAMP | AMED_BRAKE,0},			// 34 Just landed, brake until end of runway
+ 	{ 12,104,0,0},																// 35 Just landed, turn around and taxi 1 square
+ 	{  7, 84,0,0},																// 36 Taxi from runway to crossing
+-	{-31,209,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 37 Fly around waiting for a landing spot (north-east)
+-	{  1,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 38 Fly around waiting for a landing spot (north-west)
+-	{273,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 39 Fly around waiting for a landing spot (south-west)
++	{193,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 37 Fly around waiting for a landing spot (north-east)
++	{388,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 38 Fly around waiting for a landing spot (north-west)
++	{419, 81,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 39 Fly around waiting for a landing spot (south-west)
+ 	{305, 81,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 40 Fly around waiting for a landing spot (south)
+ 	// Helicopter
+ 	{128, 80,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 41 Bufferspace before helipad
+diff -r -u --exclude-from=excludes.txt open_ttd_original/lang/american.txt openttd_queue_aircraft/lang/american.txt
+--- open_ttd_original/lang/american.txt	Mon May 16 14:19:04 2005
++++ openttd_queue_aircraft/lang/american.txt	Fri Jun  3 18:02:01 2005
+@@ -1090,6 +1090,9 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_AIRQUEUE										:{LTBLUE}Queue aircraft at airports{ORANGE}
++STR_CONFIG_PATCHES_AIR_COEFF									:{LTBLUE}Aircraft speedup (1=TTD default, 8=realistic):{ORANGE} {STRING}
++
+ STR_TEMPERATE_LANDSCAPE                                         :temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :sub-tropical landscape
+diff -r -u --exclude-from=excludes.txt open_ttd_original/lang/english.txt openttd_queue_aircraft/lang/english.txt
+--- open_ttd_original/lang/english.txt	Sat May 14 14:25:00 2005
++++ openttd_queue_aircraft/lang/english.txt	Fri Jun  3 18:02:01 2005
+@@ -1090,6 +1090,9 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with the chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_AIRQUEUE										:{LTBLUE}Queue aircraft at airports{ORANGE}
++STR_CONFIG_PATCHES_AIR_COEFF									:{LTBLUE}Aircraft speedup (1=TTD default, 8=realistic):{ORANGE} {STRING}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+diff -r -u --exclude-from=excludes.txt open_ttd_original/queue.c openttd_queue_aircraft/queue.c
+--- open_ttd_original/queue.c	Thu Apr  7 15:33:32 2005
++++ openttd_queue_aircraft/queue.c	Tue May 31 23:37:45 2005
+@@ -114,6 +114,18 @@
+ 	return result;
+ }
+ 
++static void* Fifo_GetTop(Queue* q)
++{
++	void* result;
++	if (q->data.fifo.head == q->data.fifo.tail)
++		return NULL;
++	result = q->data.fifo.elements[q->data.fifo.tail];
++
++	// Only getting top, do not take off
++	//q->data.fifo.tail = (q->data.fifo.tail + 1) % q->data.fifo.max_size;
++	return result;
++}
++
+ static bool Fifo_Delete(Queue* q, void* item, int priority)
+ {
+ 	return false;
+@@ -131,6 +143,7 @@
+ 	q->data.fifo.tail = 0;
+ 	q->data.fifo.elements = malloc(max_size * sizeof(void*));
+ 	q->freeq = false;
++	q->getTop = Fifo_GetTop;
+ 	return q;
+ }
+ 
+diff -r -u --exclude-from=excludes.txt open_ttd_original/queue.h openttd_queue_aircraft/queue.h
+--- open_ttd_original/queue.h	Thu Apr  7 15:19:16 2005
++++ openttd_queue_aircraft/queue.h	Tue May 31 23:40:20 2005
+@@ -14,6 +14,9 @@
+ typedef void Queue_ClearProc(Queue* q, bool free_values);
+ typedef void Queue_FreeProc(Queue* q, bool free_values);
+ 
++// Get top without popping
++typedef void* Queue_GetTopProc(Queue* q);
++
+ typedef struct InsSortNode InsSortNode;
+ struct InsSortNode {
+ 	void* item;
+@@ -55,6 +58,11 @@
+ 	 * items are free()'d too.
+ 	 */
+ 	Queue_FreeProc* free;
++	/* Obtains the top of the queue, allowing the user to look at the 
++	 * queue without destroying it.
++	 * WARNING: ONLY IMPLEMENTED IN FIFO SO FAR!
++	 */
++	Queue_GetTopProc* getTop;
+ 
+ 	union {
+ 		struct {
+diff -r -u --exclude-from=excludes.txt open_ttd_original/settings.c openttd_queue_aircraft/settings.c
+--- open_ttd_original/settings.c	Sat May  7 18:00:36 2005
++++ openttd_queue_aircraft/settings.c	Fri Jun  3 17:40:42 2005
+@@ -920,6 +920,9 @@
+ 
+ 	{"ainew_active",				SDT_BOOL,		(void*)false, &_patches.ainew_active,					NULL},
+ 
++	{"aircraft_queueing",		SDT_BOOL,		(void*)false,	&_patches.aircraft_queueing,			NULL},
++	{"plane_speed_coeff",		SDT_UINT16,		(void*)8,	&_patches.aircraft_speed_coeff,			NULL},
++
+ 	{"map_x", SDT_UINT32, (void*)8, &_patches.map_x, NULL},
+ 	{"map_y", SDT_UINT32, (void*)8, &_patches.map_y, NULL},
+ 
+diff -r -u --exclude-from=excludes.txt open_ttd_original/settings_gui.c openttd_queue_aircraft/settings_gui.c
+--- open_ttd_original/settings_gui.c	Sat May 14 17:01:56 2005
++++ openttd_queue_aircraft/settings_gui.c	Fri Jun  3 17:52:12 2005
+@@ -702,6 +702,7 @@
+ 	{PE_UINT16, PF_0ISDIS, STR_CONFIG_PATCHES_SERVINT_AIRCRAFT, "servint_aircraft", &_patches.servint_aircraft, 5,800,  5, &InValidateDetailsWindow},
+ 	{PE_UINT16, PF_0ISDIS, STR_CONFIG_PATCHES_SERVINT_SHIPS,		"servint_ships",    &_patches.servint_ships,		5,800,  5, &InValidateDetailsWindow},
+ 	{PE_BOOL,   0,         STR_CONFIG_PATCHES_NOSERVICE,        "no_servicing_if_no_breakdowns", &_patches.no_servicing_if_no_breakdowns, 0, 0, 0, NULL},
++	{PE_UINT16,   0,         STR_CONFIG_PATCHES_AIR_COEFF,        "aircraft_speed_coeff", &_patches.aircraft_speed_coeff, 1, 8, 1, NULL},
+ };
+ 
+ static const PatchEntry _patches_stations[] = {
+@@ -714,6 +715,7 @@
+ 	{PE_UINT8,	0, STR_CONFIG_PATCHES_STATION_SPREAD,		"station_spread", &_patches.station_spread,						4, 64,  1, &InvalidateStationBuildWindow},
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_SERVICEATHELIPAD, "service_at_helipad", &_patches.serviceathelipad,					0,  0,  0, NULL},
+ 	{PE_BOOL, 0, STR_CONFIG_PATCHES_CATCHMENT, "modified_catchment", &_patches.modified_catchment, 0, 0, 0, NULL},
++	{PE_BOOL, 0, STR_CONFIG_PATCHES_AIRQUEUE, "aircraft_queueing", &_patches.aircraft_queueing, 0, 0, 0, NULL},
+ 
+ };
+ 
+@@ -1123,7 +1125,7 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    10,     0,    10,     0,    13, STR_00C5,												STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    10,    11,   369,     0,    13, STR_CONFIG_PATCHES_CAPTION,			STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    14,    41, 0x0,															STR_NULL},
+-{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   320, 0x0,															STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   336, 0x0,															STR_NULL},
+ 
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,    10,    96,    16,    27, STR_CONFIG_PATCHES_GUI,					STR_NULL},
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,    97,   183,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION,	STR_NULL},
+@@ -1135,7 +1137,7 @@
+ };
+ 
+ static const WindowDesc _patches_selection_desc = {
+-	WDP_CENTER, WDP_CENTER, 370, 321,
++	WDP_CENTER, WDP_CENTER, 370, 337,
+ 	WC_GAME_OPTIONS,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_patches_selection_widgets,
+diff -r -u --exclude-from=excludes.txt open_ttd_original/station.h openttd_queue_aircraft/station.h
+--- open_ttd_original/station.h	Sat May 14 08:36:16 2005
++++ openttd_queue_aircraft/station.h	Wed Jun  1 01:43:51 2005
+@@ -73,6 +73,7 @@
+ 	//uint16 airport_flags;
+ 	uint32 airport_flags;
+ 	StationID index;
++	Queue *airport_queue;			// airport queue
+ 
+ 	VehicleID last_vehicle;
+ 	GoodsEntry goods[NUM_CARGO];
+diff -r -u --exclude-from=excludes.txt open_ttd_original/station_cmd.c openttd_queue_aircraft/station_cmd.c
+--- open_ttd_original/station_cmd.c	Tue May 17 16:58:58 2005
++++ openttd_queue_aircraft/station_cmd.c	Fri Jun  3 12:16:52 2005
+@@ -460,6 +460,8 @@
+ 		ge->last_age = 0xFF;
+ 	}
+ 
++	st->airport_queue = new_Fifo(255);
++
+ 	_global_station_sort_dirty = true; // build a new station
+ }
+ 
+@@ -1781,6 +1783,8 @@
+ 		InvalidateWindow(WC_STATION_LIST, st->owner);
+ 	}
+ 
++	st->airport_queue = new_Fifo(255);
++
+ 	return cost;
+ }
+ 
+@@ -1826,6 +1830,7 @@
+ 		DeleteStationIfEmpty(st);
+ 	}
+ 
++
+ 	return cost;
+ }
+ 
+@@ -2417,6 +2422,11 @@
+ 	DeleteDestinationFromVehicleOrder(order);
+ 
+ 	DeleteSubsidyWithStation(index);
++
++	st->airport_queue->free(st->airport_queue, true);
++	// Freed by above?
++	//free(st->airport_queue);
++
+ }
+ 
+ void DeleteAllPlayerStations(void)
+@@ -3114,6 +3124,9 @@
+ 				InitializeRoadStop(st->truck_stops, NULL, st->lorry_tile_obsolete, st->index);
+ 			}
+ 		}
++
++		st->airport_queue = new_Fifo(255);
++
+ 	}
+ 
+ 	/* This is to ensure all pointers are within the limits of _stations_size */
+Only in openttd_queue_aircraft: station_cmd.c.bak
+Only in openttd_queue_aircraft/table: strings.h
+Only in openttd_queue_aircraft: ttd.ncb
+Only in openttd_queue_aircraft: ttd.suo
+diff -r -u --exclude-from=excludes.txt open_ttd_original/variables.h openttd_queue_aircraft/variables.h
+--- open_ttd_original/variables.h	Wed May 11 08:46:18 2005
++++ openttd_queue_aircraft/variables.h	Fri Jun  3 17:38:37 2005
+@@ -193,6 +193,9 @@
+ 	byte drag_signals_density; // many signals density
+ 	bool ainew_active;  // Is the new AI active?
+ 
++	bool aircraft_queueing; // Aircraft queueing patch
++	uint aircraft_speed_coeff; // Coefficient of aircraft speed, based on Benben's patch
++
+ 	/*
+ 	 * New Path Finding
+ 	 */
+diff -r -u --exclude-from=excludes.txt open_ttd_original/vehicle.c openttd_queue_aircraft/vehicle.c
+--- open_ttd_original/vehicle.c	Tue May 17 16:58:58 2005
++++ openttd_queue_aircraft/vehicle.c	Wed Jun  1 00:00:40 2005
+@@ -202,6 +202,8 @@
+ 	memset(v, 0, sizeof(Vehicle));
+ 	v->index = index;
+ 
++	v->u.air.in_queue = false;
++
+ 	assert(v->orders == NULL);
+ 
+ 	v->left_coord = INVALID_COORD;
+diff -r -u --exclude-from=excludes.txt open_ttd_original/vehicle.h openttd_queue_aircraft/vehicle.h
+--- open_ttd_original/vehicle.h	Sat May 14 15:25:18 2005
++++ openttd_queue_aircraft/vehicle.h	Wed Jun  1 00:00:40 2005
+@@ -78,6 +78,7 @@
+   byte previous_pos;
+ 	uint16 targetairport;
+ 	byte state;
++	bool in_queue;
+ } VehicleAir;
+ 
+ typedef struct VehicleRoad {

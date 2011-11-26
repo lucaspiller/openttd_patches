@@ -1,0 +1,129 @@
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 2482)
++++ vehicle_gui.c	(working copy)
+@@ -900,15 +900,17 @@
+ 					ShowDropDownMenu(w, _rail_types_list, _railtype_selected_in_replace_gui, 15, engine_avail, 1);
+ 					break;
+ 				}
+-				case 4: {
++				case 4: { /* Start autoreplace */
+ 					_autoreplace_array[WP(w,replaceveh_d).sel_engine[0]] = WP(w,replaceveh_d).sel_engine[1];
+ 					SetWindowDirty(w);
++					DoCommandP(0, 1, WP(w,replaceveh_d).sel_engine[0], NULL, CMD_REPLACE_VEHICLE_SEND_TO_DEPOT);					
+ 					break;
+ 				}
+ 
+-				case 6: {
+-					_autoreplace_array[WP(w,replaceveh_d).sel_engine[0]] = WP(w,replaceveh_d).sel_engine[0];
++				case 6: { /* Stop autoreplace */
++					_autoreplace_array[WP(w,replaceveh_d).sel_engine[0]] = WP(w,replaceveh_d).sel_engine[0];			
+ 					SetWindowDirty(w);
++					DoCommandP(0, 0, WP(w,replaceveh_d).sel_engine[0], NULL, CMD_REPLACE_VEHICLE_SEND_TO_DEPOT);
+ 					break;
+ 				}
+ 
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2482)
++++ vehicle.c	(working copy)
+@@ -47,6 +47,7 @@
+ 
+ void VehicleServiceInDepot(Vehicle *v)
+ {
++	v->replacing = false;
+ 	v->date_of_last_service = _date;
+ 	v->breakdowns_since_last_service = 0;
+ 	v->reliability = GetEngine(v->engine_type)->reliability;
+@@ -54,12 +55,15 @@
+ 
+ bool VehicleNeedsService(const Vehicle *v)
+ {
++	if (v->vehstatus & VS_CRASHED)
++		return false; /* Crashed vehicles don't need service anymore */
++	
++	if (v->replacing)
++		return true;
++		
+ 	if (_patches.no_servicing_if_no_breakdowns && _opt.diff.vehicle_breakdowns == 0)
+ 		return false;
+ 
+-	if (v->vehstatus & VS_CRASHED)
+-		return false; /* Crashed vehicles don't need service anymore */
+-
+ 	return _patches.servint_ispercent ?
+ 		(v->reliability < GetEngine(v->engine_type)->reliability * (100 - v->service_interval) / 100) :
+ 		(v->date_of_last_service + v->service_interval < _date);
+@@ -1326,6 +1330,27 @@
+ extern int32 CmdRefitShip(int x, int y, uint32 flags, uint32 p1, uint32 p2);
+ extern int32 CmdRefitAircraft(int x, int y, uint32 flags, uint32 p1, uint32 p2);
+ 
++/** Sets an engine type to go to a depot. Used by Replace Vehicle GUI.
++ * @param x,y unused
++ * @param p1 start/stop process
++ * - p1 = 0 - clear send to depot flag
++ * - p1 = 1 - set send to depot flag
++ * @param p2 engine type to replace
++ */
++int32 CmdReplaceVehicleSendToDepot(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++{
++	Vehicle *v;
++	FOR_ALL_VEHICLES(v) {
++		if ((v->type == VEH_Train || v->type == VEH_Road || v->type == VEH_Ship || v->type == VEH_Aircraft) && CheckOwnership(v->owner) && v->engine_type == p2) {
++			if (v->type == VEH_Train && v->subtype != TS_Front_Engine)
++				continue;
++			
++			v->replacing = p1;
++		}
++	}	
++	return 0;
++}
++
+ /** Replaces a vehicle (used to be called autorenew).
+  * @param x,y unused
+  * @param p1 index of vehicle being replaced
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2482)
++++ vehicle.h	(working copy)
+@@ -233,6 +233,8 @@
+ 	int32 profit_this_year;
+ 	int32 profit_last_year;
+ 	uint32 value;
++	
++	bool replacing;
+ 
+ 	union {
+ 		VehicleRail rail;
+Index: command.c
+===================================================================
+--- command.c	(revision 2482)
++++ command.c	(working copy)
+@@ -154,6 +154,7 @@
+ DEF_COMMAND(CmdRemoveSignalTrack);
+ 
+ DEF_COMMAND(CmdReplaceVehicle);
++DEF_COMMAND(CmdReplaceVehicleSendToDepot);
+ 
+ /* The master command table */
+ static const Command _command_proc_table[] = {
+@@ -296,6 +297,7 @@
+ 	{CmdGiveMoney,                           0}, /* 113 */
+ 	{CmdChangePatchSetting,         CMD_SERVER}, /* 114 */
+ 	{CmdReplaceVehicle,                      0}, /* 115 */
++	{CmdReplaceVehicleSendToDepot,           0}, /* 116 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: command.h
+===================================================================
+--- command.h	(revision 2482)
++++ command.h	(working copy)
+@@ -134,6 +134,7 @@
+ 	CMD_CHANGE_PATCH_SETTING = 114,
+ 
+ 	CMD_REPLACE_VEHICLE = 115,
++	CMD_REPLACE_VEHICLE_SEND_TO_DEPOT = 116,
+ };
+ 
+ enum {

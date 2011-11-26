@@ -1,0 +1,18 @@
+Index: ttd.c
+===================================================================
+--- ttd.c	(revision 2385)
++++ ttd.c	(working copy)
+@@ -1096,11 +1096,13 @@
+ 	int m;
+ 
+ 	// autosave game?
++	/*
+ 	if (_do_autosave) {
+ 		_do_autosave = false;
+ 		DoAutosave();
+ 		RedrawAutosave();
+ 	}
++	*/
+ 
+ 	// handle scrolling of the main window
+ 	if (_dirkeys) HandleKeyScrolling();

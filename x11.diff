@@ -1,0 +1,367 @@
+Index: video/x11.h
+===================================================================
+--- video/x11.h	(Revision 0)
++++ video/x11.h	(Revision 0)
+@@ -0,0 +1,10 @@
++/* $Id$ */
++
++#ifndef VIDEO_X11_H
++#define VIDEO_X11_H
++
++#include "../hal.h"
++
++extern const HalVideoDriver _x11_video_driver;
++
++#endif
+Index: video/x11.c
+===================================================================
+--- video/x11.c	(Revision 0)
++++ video/x11.c	(Revision 0)
+@@ -0,0 +1,293 @@
++#include "../stdafx.h"
++#include "../openttd.h"
++#include "../debug.h"
++#include "../functions.h"
++#include "../gfx.h"
++#include "../variables.h"
++#include "../window.h"
++#include "x11.h"
++
++// XXX hack
++#define Window X11Window
++
++#include <unistd.h>
++#include <sys/time.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++
++static Display* display = NULL;
++static int      screen  = 0;
++static Visual*  visual  = NULL;
++static Window   root    = 0;
++static Window   win     = 0;
++static GC       gc      = 0;
++static XImage*  image   = NULL;
++static uint32*  buffer  = NULL;
++static uint32   pal[256];
++
++static const char* CreateWindow(void)
++{
++	_screen.dst_ptr =
++		malloc(_screen.width * _screen.height * sizeof(*_screen.dst_ptr));
++	if (_screen.dst_ptr == NULL) return "Failed to allocate frame buffer";
++
++	if (DisplayPlanes(display, screen) == 8) {
++		assert(0);
++		//buffer = _screen.dst_ptr;
++	} else {
++		assert(DisplayPlanes(display, screen) = 24);
++		buffer = malloc(_screen.width * _screen.height * sizeof(*buffer));
++		if (buffer == NULL) return "Failed to allocate shadow frame buffer";
++	}
++
++	win = XCreateWindow(
++		display, root,
++		0, 0, _screen.width, _screen.height,
++		0, 24, CopyFromParent, CopyFromParent, 0, NULL
++	);
++	XSelectInput(display, win, 
++		KeyPressMask |
++		KeyReleaseMask |
++		ButtonPressMask |
++		ButtonReleaseMask |
++		EnterWindowMask |
++		LeaveWindowMask |
++		PointerMotionMask |
++		ExposureMask |
++		VisibilityChangeMask |
++		FocusChangeMask |
++		StructureNotifyMask
++	);
++	XMapWindow(display, win);
++
++	gc = XCreateGC(display, win, 0, 0);
++
++	image = XCreateImage(display, visual,
++		24, ZPixmap, 0, (char*)buffer, _screen.width, _screen.height, 32, 0
++	);
++
++	XFlush(display);
++	return NULL;
++}
++
++static void DestroyWindow(void)
++{
++	if (_screen.dst_ptr != buffer) free(_screen.dst_ptr);
++	XDestroyImage(image);
++	XDestroyWindow(display, win);
++}
++
++static const char* X11VideoStart(const char* const* parm)
++{
++	const char* ret;
++
++	display = XOpenDisplay(NULL);
++	if (display == NULL) return "Failed to open display";
++	DEBUG(misc, 1) ("Opened display %s", DisplayString(display));
++
++	screen = DefaultScreen(display);
++	DEBUG(misc, 1) ("Colour depth is %d", DisplayPlanes(display, screen));
++
++	visual = DefaultVisual(display, screen);
++	root = RootWindow(display, screen);
++
++	_screen.width  = _cur_resolution[0];
++	_screen.height = _cur_resolution[1];
++	_screen.pitch  = _cur_resolution[0];
++	ret = CreateWindow();
++	if (ret != NULL) return ret;
++
++	return NULL;
++}
++
++static void X11VideoStop(void)
++{
++	DestroyWindow();
++	XCloseDisplay(display);
++}
++
++static void X11VideoMakeDirty(int left, int top, int width, int height)
++{
++	int x;
++	int y;
++	for (y = top; y < top + height; y++) {
++		for (x = left; x < left + width; x++) {
++			int i = y * _screen.width + x;
++			byte c = _screen.dst_ptr[i];
++			buffer[i] = pal[c];
++		}
++	}
++	XPutImage(display, win, gc, image, left, top, left, top, width, height);
++}
++
++static uint32 GetTime(void)
++{
++	struct timeval tim;
++
++	gettimeofday(&tim, NULL);
++	return tim.tv_usec / 1000 + tim.tv_sec * 1000;
++}
++
++static void UpdatePalette(uint start, uint end)
++{
++	uint i;
++
++	for (i = start; i != end; i++) {
++		pal[i] =
++			_cur_palette[i].b | (_cur_palette[i].g << 8) | (_cur_palette[i].r << 16);
++	}
++	X11VideoMakeDirty(0, 0, _screen.width, _screen.height);
++}
++
++static int X11VideoMainLoop(void)
++{
++	uint32 tick = GetTime();
++	uint pal_tick = 0;
++
++	for (;;) {
++		XEvent e;
++
++		if (_exit_game) return ML_QUIT;
++
++		if (XCheckMaskEvent(display, 0xFFFFFFFF, &e)) {
++			switch (e.type) {
++				case ButtonPress:
++					switch (e.xbutton.button) {
++						case 1:
++							_left_button_down = true;
++							break;
++
++						case 3:
++							_right_button_down = true;
++							_right_button_clicked = true;
++							break;
++
++						case 4:
++							_cursor.wheel--;
++							break;
++
++						case 5:
++							_cursor.wheel++;
++							break;
++					}
++					break;
++
++				case ButtonRelease:
++					if (_rightclick_emulate) {
++						_right_button_down = false;
++						_left_button_down = false;
++						_left_button_clicked = false;
++					}	else {
++						switch (e.xbutton.button) {
++							case 1:
++								_left_button_down = false;
++								_left_button_clicked = false;
++								break;
++
++							case 3:
++								_right_button_down = false;
++								break;
++						}
++					}
++					break;
++
++				case Expose: {
++					int x = e.xexpose.x;
++					int y = e.xexpose.y;
++					int w = e.xexpose.width;
++					int h = e.xexpose.height;
++
++					XPutImage(display, win, gc, image, x, y, x, y, w, h);
++					break;
++				}
++
++				case MotionNotify:
++					if (_cursor.fix_at) {
++						int dx = e.xmotion.x - _cursor.pos.x;
++						int dy = e.xmotion.y - _cursor.pos.y;
++						if (dx != 0 || dy != 0) {
++							_cursor.delta.x += dx;
++							_cursor.delta.y += dy;
++						}
++						XWarpPointer(
++							display, None, win, 0, 0, 0, 0, _cursor.pos.x, _cursor.pos.y
++						);
++					} else {
++						_cursor.delta.x = e.xmotion.x - _cursor.pos.x;
++						_cursor.delta.y = e.xmotion.y - _cursor.pos.y;
++						_cursor.pos.x = e.xmotion.x;
++						_cursor.pos.y = e.xmotion.y;
++						_cursor.dirty = true;
++					}
++					break;
++
++				case ConfigureNotify:
++					ChangeResInGame(
++						e.xconfigurerequest.width, e.xconfigurerequest.height
++					);
++					break;
++
++				default:
++					break;
++			}
++		}
++
++		if (_fast_forward && !_pause) tick = GetTime();
++		if (GetTime() >= tick) {
++			tick += 30;
++
++			if ((++pal_tick & 3) == 0 && _pal_first_dirty != -1) {
++				UpdatePalette(_pal_first_dirty, _pal_last_dirty + 1);
++			}
++
++			GameLoop();
++			UpdateWindows();
++		} else {
++			DrawTextMessage();
++			DrawMouseCursor();
++			usleep(1000);
++		}
++	}
++}
++
++static bool X11VideoChangeRes(int w, int h)
++{
++	if (_screen.dst_ptr != buffer) free(_screen.dst_ptr);
++	XDestroyImage(image);
++
++	_screen.width  = w;
++	_screen.height = h;
++	_screen.pitch  = w;
++
++	_screen.dst_ptr =
++		malloc(_screen.width * _screen.height * sizeof(*_screen.dst_ptr));
++
++	if (DisplayPlanes(display, screen) == 8) {
++		assert(0);
++		//buffer = _screen.dst_ptr;
++	} else {
++		assert(DisplayPlanes(display, screen) = 24);
++		buffer = malloc(_screen.width * _screen.height * sizeof(*buffer));
++	}
++
++	image = XCreateImage(display, visual,
++		24, ZPixmap, 0, (char*)buffer, _screen.width, _screen.height, 32, 0
++	);
++
++	GameSizeChanged();
++	return true;
++}
++
++static void X11VideoFullScreen(bool full_screen)
++{
++	// TODO
++}
++
++const HalVideoDriver _x11_video_driver = {
++	X11VideoStart,
++	X11VideoStop,
++	X11VideoMakeDirty,
++	X11VideoMainLoop,
++	X11VideoChangeRes,
++	X11VideoFullScreen
++};
+Index: unix.c
+===================================================================
+--- unix.c	(Revision 2724)
++++ unix.c	(Arbeitskopie)
+@@ -19,6 +19,7 @@
+ #include "video/dedicated_v.h"
+ #include "video/null_v.h"
+ #include "video/sdl_v.h"
++#include "video/x11.h"
+ 
+ #include <dirent.h>
+ #include <unistd.h>
+@@ -371,6 +372,9 @@
+ 
+ const DriverDesc _video_driver_descs[] = {
+ 	{"null",	"Null Video Driver",	&_null_video_driver,	0},
++#ifdef WITH_X11
++	{ "x11", "X11 Video Driver", &_x11_video_driver, 2 },
++#endif
+ #if defined(WITH_SDL)
+ 	{ "sdl",	"SDL Video Driver",		&_sdl_video_driver,		1},
+ #endif
+Index: Makefile
+===================================================================
+--- Makefile	(Revision 2724)
++++ Makefile	(Arbeitskopie)
+@@ -1,5 +1,7 @@
+ # $Id$
+ 
++WITH_X11 = YES
++
+ # This Makefile is partially based on "a completely generic Makefile",
+ # originally created by Justin Husted <husted@cs>
+ #
+@@ -435,6 +437,11 @@
+ endif
+ endif
+ 
++ifdef WITH_X11
++CDEFS += -DWITH_X11
++CFLAGS += -I/usr/X11R6/include
++LDFLAGS += -L/usr/X11R6/lib -lX11
++endif
+ 
+ # zlib config
+ ifdef WITH_ZLIB
+@@ -712,6 +719,7 @@
+ C_SOURCES += sound/null_s.c
+ C_SOURCES += video/dedicated_v.c
+ C_SOURCES += video/null_v.c
++C_SOURCES += video/x11.c
+ 
+ CXX_SOURCES =
+ 

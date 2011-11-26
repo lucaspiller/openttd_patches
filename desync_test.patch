@@ -1,0 +1,253 @@
+Index: network.c
+===================================================================
+--- network.c	(revision 2833)
++++ network.c	(working copy)
+@@ -31,6 +31,7 @@
+ #include "console.h" /* IConsoleCmdExec */
+ #include <stdarg.h> /* va_list */
+ #include "md5.h"
++#include "saveload.h"
+ 
+ #ifdef __MORPHOS__
+ // the library base is required here
+@@ -1156,8 +1157,23 @@
+ #else
+ 			if (_sync_seed_1 != _random_seeds[0][0]) {
+ #endif
++				char* file = (char*) malloc(22);
++				char old_format[8];
++				bool old_split = _savegame_split;
++				
++				sprintf(old_format, _savegame_format);
++				sprintf(_savegame_format, "none");
++				_savegame_split = true;
++
++				sprintf(file, "desync-%d.sav", _frame_counter);
++				SaveOrLoad(file, SL_SAVE);
++				free(file);
++				
++				sprintf(_savegame_format, old_format);
++				_savegame_split = old_split;
++				
+ 				NetworkError(STR_NETWORK_ERR_DESYNC);
+-				DEBUG(net, 0)("[NET] Sync error detected!");
++				DEBUG(net, 0)("[NET] Sync error detected (frame %d)!", _frame_counter);
+ 				NetworkClientError(NETWORK_RECV_STATUS_DESYNC, DEREF_CLIENT(0));
+ 				return false;
+ 			}
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2833)
++++ variables.h	(working copy)
+@@ -339,6 +339,7 @@
+ VARDEF uint16 _cur_resolution[2];
+ 
+ VARDEF char _savegame_format[8];
++VARDEF bool _savegame_split;
+ 
+ VARDEF char *_config_file;
+ VARDEF char *_highscore_file;
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2833)
++++ saveload.c	(working copy)
+@@ -1299,7 +1299,7 @@
+ 	/* We have written our stuff to memory, now write it to file! */
+ 	hdr[0] = fmt->tag;
+ 	hdr[1] = TO_BE32((SAVEGAME_MAJOR_VERSION << 16) + (SAVEGAME_MINOR_VERSION << 8));
+-	if (fwrite(hdr, sizeof(hdr), 1, _sl.fh) != 1) SlError("file write failed");
++	//if (fwrite(hdr, sizeof(hdr), 1, _sl.fh) != 1) SlError("file write failed");
+ 
+ 	if (!fmt->init_write()) SlError("cannot initialize compressor");
+ 	tmp = _sl.buf; // XXX - init_write can change _sl.buf, so update it
+@@ -1322,7 +1322,7 @@
+ 		_sl.buf = tmp; // XXX - reset _sl.buf to its original value to let it continue its internal usage
+ 	}
+ 
+-	fmt->uninit_write();
++	fmt->uninit_write();	
+ 	assert(_ts.count == _sl.offs_base);
+ 	GetSavegameFormat("memory")->uninit_write(); // clean the memorypool
+ 	fclose(_sl.fh);
+@@ -1352,7 +1352,7 @@
+ {
+ 	uint32 hdr[2];
+ 	const SaveLoadFormat *fmt;
+-  uint version;
++	uint version;
+ 
+ 	/* An instance of saving is already active, so wait until it is done */
+ 	if (_ts.saveinprogress) {
+@@ -1389,6 +1389,7 @@
+ 	/* XXX - Setup setjmp error handler if an error occurs anywhere deep during
+ 	 * loading/saving execute a longjmp() and continue execution here */
+ 	if (setjmp(_sl.excpt)) {
++		DEBUG(misc,0)("Aborting....");
+ 		AbortSaveLoad();
+ 
+ 		// deinitialize compressor.
+@@ -1404,36 +1405,102 @@
+ 		}
+ 	}
+ 
+-  /* We first initialize here to avoid: "warning: variable `version' might
+-   * be clobbered by `longjmp' or `vfork'" */
++	/* We first initialize here to avoid: "warning: variable `version' might
++	* be clobbered by `longjmp' or `vfork'" */
+ 	version = 0;
+ 
+ 	/* General tactic is to first save the game to memory, then use an available writer
+ 	 * to write it to file, either in threaded mode if possible, or single-threaded */
+ 	if (mode == SL_SAVE) { /* SAVE game */
+-		fmt = GetSavegameFormat("memory"); // write to memory
+-
+-		_sl.write_bytes = fmt->writer;
+-		_sl.excpt_uninit = fmt->uninit_write;
+-		if (!fmt->init_write()) {
+-			DEBUG(misc, 0) ("Initializing writer %s failed.", fmt->name);
+-			return AbortSaveLoad();
++		if (_savegame_split) { /* We want to save each chunk into a seperate file */
++			const ChunkHandler *ch;
++			const ChunkHandler* const *chsc;
++			char* file = (char*) malloc(strlen(filename) + 5);	
++			uint p;
++			
++			fclose(_sl.fh);
++			
++			for (p = 0; p != CH_NUM_PRI_LEVELS; p++) {
++				for (chsc = _sl.chs; (ch = *chsc++) != NULL;) {
++					while (true) {
++						if (((ch->flags >> CH_PRI_SHL) & (CH_NUM_PRI_LEVELS - 1)) == p) { /* We are going to save this chunk */
++							fmt = GetSavegameFormat("memory"); // write to memory
++		
++							DEBUG(misc, 0) ("Saving chunk %c%c%c%c", ch->id >> 24, ch->id>>16, ch->id>>8, ch->id);
++		
++							_sl.write_bytes = fmt->writer;
++							_sl.excpt_uninit = fmt->uninit_write;
++							
++							if (!fmt->init_write()) {
++								DEBUG(misc, 0) ("Initializing writer %s failed.", fmt->name);
++								return AbortSaveLoad();
++							}
++				
++							_sl_version = SAVEGAME_MAJOR_VERSION;
++							sprintf(file, "%s-%c%c%c%c", filename, ch->id >> 24, ch->id>>16, ch->id>>8, ch->id);
++							
++							_sl.fh = fopen(file, "wb");			
++							if (_sl.fh == NULL) {
++								DEBUG(misc, 0) ("Cannot open savegame for saving/loading.");
++								return SL_ERROR;
++							}
++							
++							_sl.bufe = _sl.bufp = NULL;
++							_sl.offs_base = 0;
++							_sl.int_to_ref_proc = IntToReference;
++							_sl.ref_to_int_proc = ReferenceToInt;
++							_sl.save = mode;
++							_sl.includes = _desc_includes;
++							_sl.chs = _chunk_handlers;
++			
++							BeforeSaveGame();					
++							
++							/* Save the chunk */
++							SlSaveChunk(ch);
++							
++							/* Terminator */
++							SlWriteUint32(0);
++							SlWriteFill(); // flush the save buffer
++							
++							/* Write to file */
++							SaveFileStart();
++							SaveFileToDisk(NULL);
++						}
++						
++						if (ch->flags & CH_LAST)
++							break;
++						ch++;
++					}
++				}
++			}
++		
++		free(file);		
++		
++		} else { /* We want to save it in one big file */
++			fmt = GetSavegameFormat("memory"); // write to memory
++	
++			_sl.write_bytes = fmt->writer;
++			_sl.excpt_uninit = fmt->uninit_write;
++			if (!fmt->init_write()) {
++				DEBUG(misc, 0) ("Initializing writer %s failed.", fmt->name);
++				return AbortSaveLoad();
++			}
++	
++			_sl_version = SAVEGAME_MAJOR_VERSION;
++	
++			BeforeSaveGame();
++			SlSaveChunks();
++			SlWriteFill(); // flush the save buffer
++	
++			/* Write to file */
++			SaveFileStart();
++			if (_network_server ||
++					(save_thread = OTTDCreateThread(&SaveFileToDisk, NULL)) == NULL) {
++				DEBUG(misc, 1) ("cannot create savegame thread, reverting to single-threaded mode...");
++				SaveFileToDisk(NULL);
++			}
+ 		}
+ 
+-		_sl_version = SAVEGAME_MAJOR_VERSION;
+-
+-		BeforeSaveGame();
+-		SlSaveChunks();
+-		SlWriteFill(); // flush the save buffer
+-
+-		/* Write to file */
+-		SaveFileStart();
+-		if (_network_server ||
+-				(save_thread = OTTDCreateThread(&SaveFileToDisk, NULL)) == NULL) {
+-			DEBUG(misc, 1) ("cannot create savegame thread, reverting to single-threaded mode...");
+-			SaveFileToDisk(NULL);
+-		}
+-
+ 	} else { /* LOAD game */
+ 		assert(mode == SL_LOAD);
+ 
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2833)
++++ settings.c	(working copy)
+@@ -769,6 +769,7 @@
+ 	{"screenshot_format", SDT_STRINGBUF | (lengthof(_screenshot_format_name)<<16),			NULL,			_screenshot_format_name,NULL},
+ 	{"savegame_format",		SDT_STRINGBUF | (lengthof(_savegame_format)<<16),							NULL,			_savegame_format,				NULL},
+ 	{"rightclick_emulate",SDT_BOOL,			(void*)false, &_rightclick_emulate, NULL},
++	{"savegame_split_chunks",		SDT_BOOL,							(void*)false,			&_savegame_split,				NULL},
+ 	{NULL,								0,						NULL,					NULL,									NULL}
+ };
+ 
+Index: network_server.c
+===================================================================
+--- network_server.c	(revision 2833)
++++ network_server.c	(working copy)
+@@ -898,6 +898,22 @@
+ 		return;
+ 	}
+ 
++	if (errorno == NETWORK_ERROR_DESYNC) { // We had a desync :(
++		char* file = (char*) malloc(25);
++		char old_format[8];
++		bool old_split = _savegame_split;
++				
++		sprintf(old_format, _savegame_format);
++		sprintf(_savegame_format, "none");
++		_savegame_split = true;
++		sprintf(file, "%d-desync-%d.sav", cs->index, _frame_counter);
++		SaveOrLoad(file, SL_SAVE);
++		free(file);
++				
++		sprintf(_savegame_format, old_format);
++		_savegame_split = old_split;
++	}
++
+ 	NetworkGetClientName(client_name, sizeof(client_name), cs);
+ 
+ 	GetString(str, STR_NETWORK_ERR_CLIENT_GENERAL + errorno);

@@ -1,0 +1,21 @@
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2437)
++++ disaster_cmd.c	(working copy)
+@@ -13,6 +13,7 @@
+ #include "player.h"
+ #include "airport_movement.h"
+ #include "sound.h"
++#include "waypoint.h"
+ 
+ static void DisasterClearSquare(TileIndex tile)
+ {
+@@ -21,7 +22,7 @@
+ 
+ 	switch (GetTileType(tile)) {
+ 		case MP_RAILWAY:
+-			if (IS_HUMAN_PLAYER(GetTileOwner(tile))) DoClearSquare(tile);
++			if (IS_HUMAN_PLAYER(GetTileOwner(tile)) && !IsRailWaypoint(_map5[tile])) DoClearSquare(tile);
+ 			break;
+ 
+ 		case MP_HOUSE: {

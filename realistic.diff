@@ -1,0 +1,16 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(révision 2454)
++++ train_cmd.c	(copie de travail)
+@@ -312,7 +312,10 @@
+ 		}
+ 	} else {
+ 		//"kickoff" acceleration
+-		force = resistance * 10;
++		//  1 => train slowly start moving
++		// 10 => train quickly start moving
++		int kickoff_acceleration = 10;
++		force = ((mass * 4) * kickoff_acceleration) + resistance;
+ 	}
+
+ 	if (force <= 0) force = 10000;

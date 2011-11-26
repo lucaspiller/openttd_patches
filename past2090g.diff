@@ -1,0 +1,1407 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2327)
++++ station_cmd.c	(working copy)
+@@ -3025,7 +3025,8 @@
+ 
+ 	SLE_CONDVAR(Station,class_id,				SLE_UINT8, 3, 255),
+ 	SLE_CONDVAR(Station,stat_id,				SLE_UINT8, 3, 255),
+-	SLE_CONDVAR(Station,build_date,			SLE_UINT16, 3, 255),
++	SLE_CONDVAR(Station,build_date,			SLE_FILE_U16 | SLE_VAR_U32, 3, 13),
++	SLE_CONDVAR(Station,build_date,			SLE_UINT32, 14, 255),
+ 
+ 	SLE_CONDREF(Station,bus_stops,					REF_ROADSTOPS, 6, 255),
+ 	SLE_CONDREF(Station,truck_stops,				REF_ROADSTOPS, 6, 255),
+Index: graph_gui.c
+===================================================================
+--- graph_gui.c	(revision 2327)
++++ graph_gui.c	(working copy)
+@@ -24,7 +24,7 @@
+ 	byte num_dataset;
+ 	byte num_on_x_axis;
+ 	byte month;
+-	byte year;
++	uint32 year;
+ 	bool include_neg;
+ 	byte num_vert_lines;
+ 	uint16 unk61A;
+@@ -289,7 +289,8 @@
+ 	Player *p;
+ 	uint excludebits = _legend_excludebits;
+ 	int nums;
+-	int mo,yr;
++	int mo;
++	uint32 yr;
+ 
+ 	// Exclude the players which aren't valid
+ 	FOR_ALL_PLAYERS(p) {
+Index: engine.c
+===================================================================
+--- engine.c	(revision 2327)
++++ engine.c	(working copy)
+@@ -124,11 +124,10 @@
+ 
+ static void AdjustAvailAircraft(void)
+ {
+-	uint16 date = _date;
+ 	byte avail = 0;
+-	if (date >= 12784) avail |= 2; // big airport
+-	if (date < 14610 || _patches.always_small_airport) avail |= 1;  // small airport
+-	if (date >= 15706) avail |= 4; // enable heliport
++	if (_cur_year >= 1955) avail |= 2; // big airport
++	if (_cur_year < 1960 || _patches.always_small_airport) avail |= 1;  // small airport
++	if (_cur_year >= 1963) avail |= 4; // enable heliport
+ 
+ 	if (avail != _avail_aircraft) {
+ 		_avail_aircraft = avail;
+@@ -196,7 +195,7 @@
+ 		e->player_avail = 0;
+ 
+ 		r = Random();
+-		e->intro_date = (uint16)((r & 0x1FF) + ei->base_intro);
++		e->intro_date = (uint32)((r & 0x1FF) + ei->base_intro);
+ 		if (e->intro_date <= _date) {
+ 			e->age = (_date - e->intro_date) >> 5;
+ 			e->player_avail = (byte)-1;
+@@ -733,7 +732,7 @@
+ 	Engine *e;
+ 	int i;
+ 
+-	if (_cur_year >= 130) return;
++	if (_cur_year >= 2050) return;
+ 
+ 	for (e = _engines, i = 0; i != TOTAL_NUM_ENGINES; e++, i++) {
+ 		if (e->flags & ENGINE_INTRODUCING) {
+@@ -854,7 +853,7 @@
+ {
+ 	Engine *e;
+ 
+-	if (_cur_year < 130) {
++	if (_cur_year < 130 + 1920) {
+ 		for(e=_engines; e != endof(_engines); e++) {
+ 			// Age the vehicle
+ 			if (e->flags&ENGINE_AVAILABLE && e->age != 0xFFFF) {
+@@ -862,7 +861,7 @@
+ 				CalcEngineReliability(e);
+ 			}
+ 
+-			if (!(e->flags & ENGINE_AVAILABLE) && (uint16)(_date - min(_date, 365)) >= e->intro_date) {
++			if (!(e->flags & ENGINE_AVAILABLE) && (_date - min(_date, 365)) >= e->intro_date) {
+ 				// Introduce it to all players
+ 				NewVehicleAvailable(e);
+ 			} else if (!(e->flags & (ENGINE_AVAILABLE|ENGINE_INTRODUCING)) && _date >= e->intro_date) {
+@@ -927,8 +926,10 @@
+ 
+ 
+ static const byte _engine_desc[] = {
+-	SLE_VAR(Engine,intro_date,						SLE_UINT16),
+-	SLE_VAR(Engine,age,										SLE_UINT16),
++	SLE_CONDVAR(Engine,intro_date,				SLE_FILE_U16 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Engine,intro_date,				SLE_UINT32, 14, 255),
++	SLE_CONDVAR(Engine,age,					SLE_FILE_U16 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Engine,age,					SLE_UINT32, 14, 255),
+ 	SLE_VAR(Engine,reliability,						SLE_UINT16),
+ 	SLE_VAR(Engine,reliability_spd_dec,		SLE_UINT16),
+ 	SLE_VAR(Engine,reliability_start,			SLE_UINT16),
+Index: engine.h
+===================================================================
+--- engine.h	(revision 2327)
++++ engine.h	(working copy)
+@@ -50,7 +50,7 @@
+ } RoadVehicleInfo;
+ 
+ typedef struct EngineInfo {
+-	uint16 base_intro;
++	uint32 base_intro;
+ 	byte unk2;
+ 	byte lifelength;
+ 	byte base_life;
+@@ -58,8 +58,8 @@
+ } EngineInfo;
+ 
+ typedef struct Engine {
+-	uint16 intro_date;
+-	uint16 age;
++	uint32 intro_date;
++	uint32 age;
+ 	uint16 reliability;
+ 	uint16 reliability_spd_dec;
+ 	uint16 reliability_start, reliability_max, reliability_final;
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2327)
++++ functions.h	(working copy)
+@@ -164,9 +164,9 @@
+ #define AllocateNameUnique(name, skip) RealAllocateName(name, skip, true)
+ #define AllocateName(name, skip) RealAllocateName(name, skip, false)
+ StringID RealAllocateName(const char *name, byte skip, bool check_double);
+-void ConvertDayToYMD(YearMonthDay *ymd, uint16 date);
+-uint ConvertYMDToDay(uint year, uint month, uint day);
+-uint ConvertIntDate(uint date);
++void ConvertDayToYMD(YearMonthDay *ymd, uint32 date);
++uint32 ConvertYMDToDay(uint year, uint month, uint day);
++uint32 ConvertIntDate(uint32 date);
+ 
+ /* misc functions */
+ void MarkTileDirty(int x, int y);
+Index: industry.h
+===================================================================
+--- industry.h	(revision 2327)
++++ industry.h	(working copy)
+@@ -23,7 +23,7 @@
+ 	byte type;
+ 	byte owner;
+ 	byte color_map;
+-	byte last_prod_year;
++	uint32 last_prod_year;
+ 	byte was_cargo_delivered;
+ 
+ 	uint16 index;
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 2327)
++++ openttd.c	(working copy)
+@@ -504,7 +504,7 @@
+ 	const char *optformat;
+ 	char musicdriver[16], sounddriver[16], videodriver[16];
+ 	int resolution[2] = {0,0};
+-	uint startdate = -1;
++	uint32 startdate = -1;
+ 	bool dedicated;
+ 
+ 	musicdriver[0] = sounddriver[0] = videodriver[0] = 0;
+@@ -1304,6 +1304,10 @@
+ 		END_TILE_LOOP(tile_cur, w, h, tile)
+ 	}
+ 
++	// From version 14.0, time starts at 0 instead of 1920. Account for this in older games by adding the offset on.
++	if (version <= 0xE00)
++		_date += 701279;
++
+ 	// convert road side to my format.
+ 	if (_opt.road_side) _opt.road_side = 1;
+ 
+@@ -1312,7 +1316,7 @@
+ 
+ 	// Update current year
+ 	SetDate(_date);
+-
++		
+ 	// reinit the landscape variables (landscape might have changed)
+ 	InitializeLandscapeVariables(true);
+ 
+@@ -1411,5 +1415,27 @@
+ 		}
+ 	}
+ 
++	if (version < 0xE00) {
++		// Need to add 1920 offset to engine info (and others!)
++#define START_OFFSET 701279
++		int j;
++		
++		Station *st;
++		Player *player;
++		Industry *i;
++		
++		FOR_ALL_STATIONS(st)
++			st->build_date += START_OFFSET;
++
++		FOR_ALL_PLAYERS(player)
++			player->inaugurated_year += 1920;
++
++		FOR_ALL_INDUSTRIES(i)
++			i->last_prod_year += 1920;
++
++		for(j = 0; j < TOTAL_NUM_ENGINES; j++)
++			_engines[j].intro_date += START_OFFSET;
++	}
++
+ 	return true;
+ }
+Index: network.h
+===================================================================
+--- network.h	(revision 2327)
++++ network.h	(working copy)
+@@ -66,8 +66,8 @@
+ 	byte clients_max;																// Max clients allowed on server
+ 	byte clients_on;																// Current count of clients on server
+ 	byte spectators_on;															// How many spectators do we have?
+-	uint16 game_date;																// Current date
+-	uint16 start_date;															// When the game started
++	uint32 game_date;																// Current date
++	uint32 start_date;															// When the game started
+ 	char map_name[NETWORK_NAME_LENGTH];							// Map which is played ["random" for a randomized map]
+ 	uint16 map_width;																// Map width
+ 	uint16 map_height;															// Map height
+@@ -97,7 +97,7 @@
+ 	byte client_lang;                             /// The language of the client
+ 	byte client_playas;                           /// As which player is this client playing (PlayerID)
+ 	uint32 client_ip;                             /// IP-address of the client (so he can be banned)
+-	uint16 join_date;                             /// Gamedate the player has joined
++	uint32 join_date;                             /// Gamedate the player has joined
+ 	char unique_id[NETWORK_NAME_LENGTH];          /// Every play sends an unique id so we can indentify him
+ } NetworkClientInfo;
+ 
+@@ -189,14 +189,14 @@
+ VARDEF byte _network_lan_internet;
+ 
+ VARDEF bool _network_advertise;
+-VARDEF uint16 _network_last_advertise_date;
++VARDEF uint32 _network_last_advertise_date;
+ VARDEF uint8 _network_advertise_retries;
+ 
+ VARDEF bool _network_autoclean_companies;
+ VARDEF uint8 _network_autoclean_unprotected; // Remove a company after X months
+ VARDEF uint8 _network_autoclean_protected;   // Unprotect a company after X months
+ 
+-VARDEF uint16 _network_restart_game_date;    // If this year is reached, the server automaticly restarts
++VARDEF uint32 _network_restart_game_date;    // If this year is reached, the server automaticly restarts
+ 
+ NetworkGameList *NetworkQueryServer(const char* host, unsigned short port, bool game_info);
+ void CSleep(int milliseconds);
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2327)
++++ misc_gui.c	(working copy)
+@@ -1596,7 +1596,7 @@
+ 	YearMonthDay ymd;
+ 	ConvertDayToYMD(&ymd, _date);
+ 
+-	if((ymd.year==0 && p2==-1) || (ymd.year==170 && p2==1)) return _cur_year;
++	if((ymd.year==0 && p2==-1) || (ymd.year==11758978 && p2==1)) return _cur_year;
+ 
+ 	SetDate(ConvertYMDToDay(_cur_year + p2, ymd.month, ymd.day));
+ 	EnginesMonthlyLoop();
+@@ -1612,6 +1612,7 @@
+ 	CE_INT16 = 2,
+ 	CE_UINT16 = 3,
+ 	CE_INT32 = 4,
++	CE_UINT32 = 7,
+ 	CE_BYTE = 5,
+ 	CE_CLICK = 6,
+ } ce_type;
+@@ -1635,6 +1636,7 @@
+ 	case CE_INT16:  return *(int16*)ce->variable;
+ 	case CE_UINT16: return *(uint16*)ce->variable;
+ 	case CE_INT32:  return *(int32*)ce->variable;
++	case CE_UINT32: return *(uint32*)ce->variable;
+ 	case CE_BYTE:   return *(byte*)ce->variable;
+ 	case CE_CLICK:  return 0;
+ 	default:
+@@ -1654,6 +1656,7 @@
+ 	case CE_INT16: *(int16*)ce->variable = (int16)val; break;
+ 	case CE_UINT16: *(uint16*)ce->variable = (uint16)val; break;
+ 	case CE_INT32: *(int32*)ce->variable = val; break;
++	case CE_UINT32: *(uint32*)ce->variable = (uint32)val; break;
+ 	case CE_CLICK: break;
+ 	default:
+ 		NOT_REACHED();
+@@ -1670,7 +1673,7 @@
+ 	{CE_BOOL, 0, STR_CHEAT_NO_JETCRASH,			&_cheats.no_jetcrash.value,			&_cheats.no_jetcrash.been_used,			NULL,											0, 0, 0},
+ 	{CE_BOOL, 0, STR_CHEAT_SETUP_PROD,			&_cheats.setup_prod.value,			&_cheats.setup_prod.been_used,			NULL,											0, 0, 0},
+ 	{CE_UINT8, 0, STR_CHEAT_SWITCH_CLIMATE, &_opt.landscape, 								&_cheats.switch_climate.been_used,	&ClickChangeClimateCheat,-1, 4, 1},
+-	{CE_UINT8, 0, STR_CHEAT_CHANGE_DATE,		&_cur_year,											&_cheats.change_date.been_used,			&ClickChangeDateCheat,	 -1, 1, 1},
++	{CE_UINT32, 0, STR_CHEAT_CHANGE_DATE,		&_cur_year,											&_cheats.change_date.been_used,			&ClickChangeDateCheat,	 -1, 1, 1},
+ };
+ 
+ 
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2327)
++++ openttd.h	(working copy)
+@@ -35,7 +35,8 @@
+ } SortStruct;
+ 
+ typedef struct YearMonthDay {
+-	int year, month, day;
++	uint32 year;
++	int month, day;
+ } YearMonthDay;
+ 
+ /* --- 1 Day is 74 ticks ---
+@@ -47,9 +48,9 @@
+ * * 1 day is thus about 2 seconds (74*27 = 1998) on a machine that can run OpenTTD normally
+ */
+ #define DAY_TICKS 74
+-#define MAX_YEAR_BEGIN_REAL 1920
+-#define MAX_YEAR_END_REAL 2090
+-#define MAX_YEAR_END 170
++#define MAX_YEAR_BEGIN_REAL 0
++#define MAX_YEAR_END_REAL 11760898
++#define MAX_YEAR_END 11758978
+ 
+ #include "macros.h"
+ 
+@@ -271,7 +272,7 @@
+ typedef struct TileDesc {
+ 	StringID str;
+ 	byte owner;
+-	uint16 build_date;
++	uint32 build_date;
+ 	uint32 dparam[2];
+ } TileDesc;
+ 
+Index: network_udp.c
+===================================================================
+--- network_udp.c	(revision 2327)
++++ network_udp.c	(working copy)
+@@ -65,8 +65,8 @@
+ 	NetworkSend_uint8 (packet, _network_game_info.clients_max);
+ 	NetworkSend_uint8 (packet, _network_game_info.clients_on);
+ 	NetworkSend_uint8 (packet, _network_game_info.spectators_on);
+-	NetworkSend_uint16(packet, _network_game_info.game_date);
+-	NetworkSend_uint16(packet, _network_game_info.start_date);
++	NetworkSend_uint32(packet, _network_game_info.game_date);
++	NetworkSend_uint32(packet, _network_game_info.start_date);
+ 	NetworkSend_string(packet, _network_game_info.map_name);
+ 	NetworkSend_uint16(packet, _network_game_info.map_width);
+ 	NetworkSend_uint16(packet, _network_game_info.map_height);
+@@ -108,8 +108,8 @@
+ 		item->info.clients_max   = NetworkRecv_uint8(&_udp_cs, p);
+ 		item->info.clients_on    = NetworkRecv_uint8(&_udp_cs, p);
+ 		item->info.spectators_on = NetworkRecv_uint8(&_udp_cs, p);
+-		item->info.game_date     = NetworkRecv_uint16(&_udp_cs, p);
+-		item->info.start_date    = NetworkRecv_uint16(&_udp_cs, p);
++		item->info.game_date     = NetworkRecv_uint32(&_udp_cs, p);
++		item->info.start_date    = NetworkRecv_uint32(&_udp_cs, p);
+ 		NetworkRecv_string(&_udp_cs, p, item->info.map_name, sizeof(item->info.map_name));
+ 		item->info.map_width     = NetworkRecv_uint16(&_udp_cs, p);
+ 		item->info.map_height    = NetworkRecv_uint16(&_udp_cs, p);
+Index: pool.c
+===================================================================
+--- pool.c	(revision 2327)
++++ pool.c	(working copy)
+@@ -10,7 +10,7 @@
+ {
+ 	uint i;
+ 
+-	DEBUG(misc, 4)("[Pool] (%s) Cleaing pool..", pool->name);
++	DEBUG(misc, 4)("[Pool] (%s) Cleaning pool..", pool->name);
+ 
+ 	/* Free all blocks */
+ 	for (i = 0; i < pool->current_blocks; i++)
+Index: openttd.vcproj
+===================================================================
+--- openttd.vcproj	(revision 2327)
++++ openttd.vcproj	(working copy)
+@@ -28,7 +28,8 @@
+ 				FavorSizeOrSpeed="2"
+ 				OmitFramePointers="TRUE"
+ 				OptimizeForProcessor="1"
+-				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;WIN32_EXCEPTION_TRACKER;WIN32_ENABLE_DIRECTMUSIC_SUPPORT;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK"
++				AdditionalIncludeDirectories="K:\ottd\useful"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;WIN32_EXCEPTION_TRACKER;WIN32_ENABLE_DIRECTMUSIC_SUPPORT;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK;WITH_REV_HACK=\&quot;r2265M\&quot;"
+ 				StringPooling="TRUE"
+ 				ExceptionHandling="FALSE"
+ 				RuntimeLibrary="4"
+@@ -54,9 +55,10 @@
+ 			<Tool
+ 				Name="VCLinkerTool"
+ 				AdditionalDependencies="winmm.lib ws2_32.lib libpng.lib zlibstat.lib"
+-				OutputFile=".\Release/openttd.exe"
++				OutputFile=".\openttd.exe"
+ 				LinkIncremental="1"
+ 				SuppressStartupBanner="TRUE"
++				AdditionalLibraryDirectories="K:\ottd\useful"
+ 				ProgramDatabaseFile=".\Release/ttd.pdb"
+ 				GenerateMapFile="TRUE"
+ 				MapFileName=".\Release/ttd.map"
+@@ -100,7 +102,8 @@
+ 			<Tool
+ 				Name="VCCLCompilerTool"
+ 				Optimization="0"
+-				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK"
++				AdditionalIncludeDirectories="K:\ottd\useful"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK;WITH_REV_HACK=\&quot;r2265M\&quot;"
+ 				BasicRuntimeChecks="3"
+ 				RuntimeLibrary="5"
+ 				UsePrecompiledHeader="2"
+@@ -121,9 +124,10 @@
+ 			<Tool
+ 				Name="VCLinkerTool"
+ 				AdditionalDependencies="winmm.lib ws2_32.lib libpng.lib zlibstat.lib"
+-				OutputFile=".\Debug/openttd.exe"
++				OutputFile=".\openttd-debug.exe"
+ 				LinkIncremental="0"
+ 				SuppressStartupBanner="TRUE"
++				AdditionalLibraryDirectories="K:\ottd\useful"
+ 				GenerateDebugInformation="TRUE"
+ 				ProgramDatabaseFile=".\Debug/ttd.pdb"
+ 				SubSystem="2"
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2327)
++++ variables.h	(working copy)
+@@ -48,7 +48,7 @@
+ typedef struct {
+ 	uint16 rate;
+ 	char separator;
+-	uint16 to_euro;
++	uint32 to_euro;
+ 	char prefix[16];
+ 	char suffix[16];
+ } CurrencySpec;
+@@ -56,7 +56,7 @@
+ VARDEF CurrencySpec _currency_specs[24];
+ 
+ // Current date
+-VARDEF uint16 _date;
++VARDEF uint32 _date;
+ VARDEF uint16 _date_fract;
+ 
+ // Amount of game ticks
+@@ -153,7 +153,7 @@
+ 	uint16 servint_ships;		// service interval for ships
+ 
+ 	bool autorenew;
+-	int16 autorenew_months;
++	uint32 autorenew_months;
+ 	int32 autorenew_money;
+ 
+ 	bool new_pathfinding;		// use optimized pathfinding algoritm for trains
+@@ -265,7 +265,7 @@
+ 
+ 
+ // NOSAVE: can be determined from _date
+-VARDEF byte _cur_year;
++VARDEF uint32 _cur_year;
+ VARDEF byte _cur_month;
+ 
+ // NOSAVE: can be determined from player structs
+Index: players.c
+===================================================================
+--- players.c	(revision 2327)
++++ players.c	(working copy)
+@@ -976,7 +976,8 @@
+ 	SLE_CONDVAR(Player, location_of_house,     SLE_UINT32, 6, 255),
+ 	SLE_CONDVAR(Player, last_build_coordinate, SLE_FILE_U16 | SLE_VAR_U32, 0, 5),
+ 	SLE_CONDVAR(Player, last_build_coordinate, SLE_UINT32, 6, 255),
+-	SLE_VAR(Player,inaugurated_year,SLE_UINT8),
++	SLE_CONDVAR(Player, inaugurated_year,		SLE_FILE_U8 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Player, inaugurated_year,		SLE_UINT32, 14, 255),
+ 
+ 	SLE_ARR(Player,share_owners,		SLE_UINT8, 4),
+ 
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 2327)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -13,8 +13,8 @@
+ 
+ extern void DrawCanalWater(uint tile);
+ 
+-static const byte _bridge_available_year[MAX_BRIDGES] = {
+-	0, 0, 10, 0, 10, 10, 10, 10, 10, 10, 75, 85, 90
++static const uint32 _bridge_available_year[MAX_BRIDGES] = {
++	0, 0, 1930, 0, 1930, 1930, 1930, 1930, 1930, 1930, 1995, 2005, 2010
+ };
+ 
+ static const byte _bridge_minlen[MAX_BRIDGES] = {
+Index: strings.c
+===================================================================
+--- strings.c	(revision 2327)
++++ strings.c	(working copy)
+@@ -302,7 +302,7 @@
+ }
+ 
+ 
+-static char *FormatYmdString(char *buff, uint16 number)
++static char *FormatYmdString(char *buff, uint32 number)
+ {
+ 	const char *src;
+ 	YearMonthDay ymd;
+@@ -318,7 +318,7 @@
+ 	return FormatNoCommaNumber(buff+4, ymd.year + MAX_YEAR_BEGIN_REAL);
+ }
+ 
+-static char *FormatMonthAndYear(char *buff, uint16 number)
++static char *FormatMonthAndYear(char *buff, uint32 number)
+ {
+ 	const char *src;
+ 	YearMonthDay ymd;
+@@ -331,7 +331,7 @@
+ 	return FormatNoCommaNumber(buff, ymd.year + MAX_YEAR_BEGIN_REAL);
+ }
+ 
+-static char *FormatTinyDate(char *buff, uint16 number)
++static char *FormatTinyDate(char *buff, uint32 number)
+ {
+ 	YearMonthDay ymd;
+ 
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2327)
++++ saveload.c	(working copy)
+@@ -8,7 +8,7 @@
+ #include "saveload.h"
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 13,
++	SAVEGAME_MAJOR_VERSION = 14,
+ 	SAVEGAME_MINOR_VERSION = 0x1,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 2327)
++++ aircraft_gui.c	(working copy)
+@@ -32,7 +32,7 @@
+ 	SetDParam(6, e->lifelength);
+ 	SetDParam(7, e->reliability * 100 >> 16);
+ 	ConvertDayToYMD(&ymd, e->intro_date);
+-	SetDParam(5, ymd.year + 1920);
++	SetDParam(5, ymd.year);
+ 
+ }
+ 
+@@ -298,7 +298,7 @@
+ 
+ 		/* Draw running cost */
+ 		{
+-			int year = v->age / 366;
++			uint32 year = v->age / 366;
+ 			StringID str;
+ 
+ 			SetDParam(1, year);
+@@ -351,7 +351,7 @@
+ 			do {
+ 				if (v->subtype <= 2) {
+ 					SetDParam(0, GetCustomEngineName(v->engine_type));
+-					SetDParam(1, 1920 + v->build_year);
++					SetDParam(1, v->build_year);
+ 					SetDParam(2, v->value);
+ 					DrawString(60, y, STR_A011_BUILT_VALUE, 0);
+ 					y += 10;
+Index: player.h
+===================================================================
+--- player.h	(revision 2327)
++++ player.h	(working copy)
+@@ -113,7 +113,7 @@
+ 	byte action;
+ 
+ 	int last_id; // here is stored the last id of the searched city/industry
+-	uint last_vehiclecheck_date; // Used in CheckVehicle
++	uint32 last_vehiclecheck_date; // Used in CheckVehicle
+ 	Ai_SpecialVehicle special_vehicles[AI_MAX_SPECIAL_VEHICLES]; // Some vehicles have some special flags
+ 
+ 	TileIndex from_tile;
+@@ -168,7 +168,7 @@
+ 
+ 	byte share_owners[4];
+ 
+-	byte inaugurated_year;
++	uint32 inaugurated_year;
+ 	byte num_valid_stat_ent;
+ 
+ 	byte quarters_of_bankrupcy;
+Index: industry_cmd.c
+===================================================================
+--- industry_cmd.c	(revision 2327)
++++ industry_cmd.c	(working copy)
+@@ -1690,7 +1690,7 @@
+ 			return;
+ 
+ 		case INDUSTRY_CLOSABLE:
+-			if ((byte)(_cur_year - i->last_prod_year) < 5 || !CHANCE16(1, 180))
++			if ((_cur_year - i->last_prod_year) < 5 || !CHANCE16(1, 180))
+ 				closeit = false;
+ 			break;
+ 
+@@ -1802,10 +1802,10 @@
+ 	Industry *i;
+ 
+ 	type = _new_industry_rand[_opt.landscape][(r >> 16) & 0x1F];
+-	if (type == IT_OIL_WELL && _date > 10958)
++	if (type == IT_OIL_WELL && _cur_year > 1950)
+ 		return;
+ 
+-	if (type == IT_OIL_RIG && _date < 14610)
++	if (type == IT_OIL_RIG && _cur_year < 1960)
+ 		return;
+ 
+ 	j = 2000;
+@@ -1876,7 +1876,7 @@
+ 
+ 		case INDUSTRY_CLOSABLE:
+ 			/* maybe close */
+-			if ( (byte)(_cur_year - i->last_prod_year) >= 5 && CHANCE16(1,2)) {
++			if ( (_cur_year - i->last_prod_year) >= 5 && CHANCE16(1,2)) {
+ 				i->prod_level = 0;
+ 				str = _industry_close_strings[type];
+ 			}
+@@ -1967,7 +1967,8 @@
+ 	SLE_VAR(Industry,type,						SLE_UINT8),
+ 	SLE_VAR(Industry,owner,						SLE_UINT8),
+ 	SLE_VAR(Industry,color_map,				SLE_UINT8),
+-	SLE_VAR(Industry,last_prod_year,	SLE_UINT8),
++	SLE_CONDVAR(Industry, last_prod_year,	SLE_FILE_U8 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Industry, last_prod_year,	SLE_UINT32, 14, 255),
+ 	SLE_VAR(Industry,was_cargo_delivered,SLE_UINT8),
+ 
+ 	// reserve extra space in savegame here. (currently 32 bytes)
+Index: texteff.c
+===================================================================
+--- texteff.c	(revision 2327)
++++ texteff.c	(working copy)
+@@ -25,7 +25,7 @@
+ typedef struct TextMessage {
+ 	char message[MAX_TEXTMESSAGE_LENGTH];
+ 	uint16 color;
+-	uint16 end_date;
++	uint32 end_date;
+ } TextMessage;
+ 
+ #define MAX_CHAT_MESSAGES 10
+Index: table/town_land.h
+===================================================================
+--- table/town_land.h	(revision 2327)
++++ table/town_land.h	(working copy)
+@@ -2003,120 +2003,122 @@
+ 
+ 
+ typedef struct {
+-	byte min,max;
++	uint32 min,max;
+ } HousetypeYear;
+ 
++#define START_OFFSET 1920
++
+ static const HousetypeYear _housetype_years[] = {
+-	{43, 255},
+-	{37, 255},
+-	{48, 255},
+-	{0,  255},
+-	{55, 255},
+-	{55, 255},
+-	{0,  255},
+-	{39, 255},
+-	{39, 255},
+-	{25, 255},
+-	{25, 255},
+-	{0, 255},
+-	{15, 255},
+-	{31, 255},
+-	{10, 40},
+-	{10, 40},
+-	{10, 40},
+-	{57, 255},
+-	{63, 255},
+-	{65, 255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  31},
+-	{0,  32},
+-	{11, 255},
+-	{15, 255},
+-	{43, 255},
+-	{0,  35},
+-	{53, 255},
+-	{0,  255},
+-	{38, 255},
+-	{38, 255},
+-	{38, 255},
+-	{38, 255},
+-	{80, 255},
+-	{0,  40},
+-	{0,  40},
+-	{25, 255},
+-	{63, 255},
+-	{63, 255},
+-	{63, 255},
+-	{63, 255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  43},
+-	{0,  43},
+-	{46, 255},
+-	{46, 255},
+-	{50, 255},
+-	{50, 255},
+-	{54, 255},
+-	{54, 255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  40},
+-	{0,  40},
+-	{52, 255},
+-	{52, 255},
+-	{52, 255},
+-	{52, 255},
+-	{43, 255},
+-	{43, 255},
+-	{58, 255},
+-	{58, 255},
+-	{47, 255},
+-	{47, 255},
+-	{47, 255},
+-	{47, 255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{53, 255},
+-	{42, 255},
+-	{64, 255},
+-	{64, 255},
+-	{0,  255},
+-	{73, 255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
+-	{0,  255},
++	{START_OFFSET + 43, MAX_YEAR_END},
++	{START_OFFSET + 37, MAX_YEAR_END},
++	{START_OFFSET + 48, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{START_OFFSET + 55, MAX_YEAR_END},
++	{START_OFFSET + 55, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{START_OFFSET + 39, MAX_YEAR_END},
++	{START_OFFSET + 39, MAX_YEAR_END},
++	{START_OFFSET + 25, MAX_YEAR_END},
++	{START_OFFSET + 25, MAX_YEAR_END},
++	{0, MAX_YEAR_END},
++	{START_OFFSET + 15, MAX_YEAR_END},
++	{START_OFFSET + 31, MAX_YEAR_END},
++	{START_OFFSET + 10, START_OFFSET + 40},
++	{START_OFFSET + 10, START_OFFSET + 40},
++	{START_OFFSET + 10, START_OFFSET + 40},
++	{START_OFFSET + 57, MAX_YEAR_END},
++	{START_OFFSET + 63, MAX_YEAR_END},
++	{START_OFFSET + 65, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  START_OFFSET + 31},
++	{0,  START_OFFSET + 32},
++	{START_OFFSET + 11, MAX_YEAR_END},
++	{START_OFFSET + 15, MAX_YEAR_END},
++	{START_OFFSET + 43, MAX_YEAR_END},
++	{0,  START_OFFSET + 35},
++	{START_OFFSET + 53, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{START_OFFSET + 38, MAX_YEAR_END},
++	{START_OFFSET + 38, MAX_YEAR_END},
++	{START_OFFSET + 38, MAX_YEAR_END},
++	{START_OFFSET + 38, MAX_YEAR_END},
++	{START_OFFSET + 80, MAX_YEAR_END},
++	{0,  START_OFFSET + 40},
++	{0,  START_OFFSET + 40},
++	{START_OFFSET + 25, MAX_YEAR_END},
++	{START_OFFSET + 63, MAX_YEAR_END},
++	{START_OFFSET + 63, MAX_YEAR_END},
++	{START_OFFSET + 63, MAX_YEAR_END},
++	{START_OFFSET + 63, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  START_OFFSET + 43},
++	{0,  START_OFFSET + 43},
++	{START_OFFSET + 46, MAX_YEAR_END},
++	{START_OFFSET + 46, MAX_YEAR_END},
++	{START_OFFSET + 50, MAX_YEAR_END},
++	{START_OFFSET + 50, MAX_YEAR_END},
++	{START_OFFSET + 54, MAX_YEAR_END},
++	{START_OFFSET + 54, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  START_OFFSET + 40},
++	{0,  START_OFFSET + 40},
++	{START_OFFSET + 52, MAX_YEAR_END},
++	{START_OFFSET + 52, MAX_YEAR_END},
++	{START_OFFSET + 52, MAX_YEAR_END},
++	{START_OFFSET + 52, MAX_YEAR_END},
++	{START_OFFSET + 43, MAX_YEAR_END},
++	{START_OFFSET + 43, MAX_YEAR_END},
++	{START_OFFSET + 58, MAX_YEAR_END},
++	{START_OFFSET + 58, MAX_YEAR_END},
++	{START_OFFSET + 47, MAX_YEAR_END},
++	{START_OFFSET + 47, MAX_YEAR_END},
++	{START_OFFSET + 47, MAX_YEAR_END},
++	{START_OFFSET + 47, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{START_OFFSET + 53, MAX_YEAR_END},
++	{START_OFFSET + 42, MAX_YEAR_END},
++	{START_OFFSET + 64, MAX_YEAR_END},
++	{START_OFFSET + 64, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{START_OFFSET + 73, MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
++	{0,  MAX_YEAR_END},
+ };
+ assert_compile(lengthof(_housetype_years) == HOUSE_MAX);
+ 
+Index: table/engines.h
+===================================================================
+--- table/engines.h	(revision 2327)
++++ table/engines.h	(working copy)
+@@ -3,8 +3,9 @@
+ 
+ #include "../sound.h"
+ 
+-#define MK(a,b,c,d,e,f) {a,b,c,d,((e)<<4)|(f)}
+-#define MW(a,b,c,d,e,f) {a,b|0x80,c,d,((e)<<4)|(f)}
++/* 1920 * 365.25 = 701280 */
++#define MK(a,b,c,d,e,f) {701280 + a,b,c,d,((e)<<4)|(f)}
++#define MW(a,b,c,d,e,f) {701280 + a,b|0x80,c,d,((e)<<4)|(f)}
+ 
+ EngineInfo _engine_info[TOTAL_NUM_ENGINES] = {
+ 	MK(  1827,  20,  15,  30,   0,   1), /*   0 */
+@@ -423,7 +424,7 @@
+ 	{  6, 18, 240, 3, SND_09_JET,                     40,  74, 30, 200 }, /*  5 */
+ 	{  2, 17, 150, 1, SND_09_JET,                     35,  74, 15, 100 }, /*  6 */
+ 	{  2, 18, 245, 3, SND_09_JET,                     40,  74, 30, 150 }, /*  7 */
+-	{	 3, 19, 192, 3, SND_09_JET,                     40,  74, 40, 220 }, /*  8 */
++	{  3, 19, 192, 3, SND_09_JET,                     40,  74, 40, 220 }, /*  8 */
+ 	{  3, 20, 190, 3, SND_09_JET,                     40,  74, 25, 230 }, /*  9 */
+ 	{  2, 16, 135, 3, SND_09_JET,                     35,  74, 10,  95 }, /* 10 */
+ 	{  2, 18, 240, 3, SND_09_JET,                     40,  74, 35, 170 }, /* 11 */
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2327)
++++ vehicle.c	(working copy)
+@@ -1880,9 +1880,12 @@
+ 
+ 	SLE_REF(Vehicle,orders,						REF_ORDER),
+ 
+-	SLE_VAR(Vehicle,age,							SLE_UINT16),
+-	SLE_VAR(Vehicle,max_age,					SLE_UINT16),
+-	SLE_VAR(Vehicle,date_of_last_service,SLE_UINT16),
++	SLE_CONDVAR(Vehicle,age,			SLE_FILE_U16 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Vehicle,age,			SLE_UINT32, 14, 255),
++	SLE_CONDVAR(Vehicle,max_age,			SLE_FILE_U16 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Vehicle,max_age,			SLE_UINT32, 14, 255),
++	SLE_CONDVAR(Vehicle,date_of_last_service,	SLE_FILE_U16 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Vehicle,date_of_last_service,	SLE_UINT32, 14, 255),
+ 	SLE_VAR(Vehicle,service_interval,	SLE_UINT16),
+ 	SLE_VAR(Vehicle,reliability,			SLE_UINT16),
+ 	SLE_VAR(Vehicle,reliability_spd_dec,SLE_UINT16),
+@@ -1890,7 +1893,8 @@
+ 	SLE_VAR(Vehicle,breakdown_delay,	SLE_UINT8),
+ 	SLE_VAR(Vehicle,breakdowns_since_last_service,	SLE_UINT8),
+ 	SLE_VAR(Vehicle,breakdown_chance,	SLE_UINT8),
+-	SLE_VAR(Vehicle,build_year,				SLE_UINT8),
++	SLE_CONDVAR(Vehicle,build_year,		SLE_FILE_U8 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Vehicle,build_year,		SLE_UINT32, 14, 255),
+ 
+ 	SLE_VAR(Vehicle,load_unload_time_rem,	SLE_UINT16),
+ 
+@@ -2040,7 +2044,8 @@
+ 	SLE_CONDVARX(offsetof(Vehicle, current_order) + offsetof(Order, station), SLE_UINT16, 5, 255),
+ 
+ 	SLE_VAR(Vehicle,cur_image,				SLE_UINT16),
+-	SLE_VAR(Vehicle,age,							SLE_UINT16),
++	SLE_CONDVAR(Vehicle,age,			SLE_FILE_U16 | SLE_VAR_U32, 0, 13),
++	SLE_CONDVAR(Vehicle,age,			SLE_UINT32, 14, 255),
+ 
+ 	SLE_VAR(Vehicle,tick_counter,			SLE_UINT8),
+ 
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2327)
++++ vehicle.h	(working copy)
+@@ -207,9 +207,9 @@
+ 	uint16 next_hash;
+ 
+ 	// Related to age and service time
+-	uint16 age;				// Age in days
+-	uint16 max_age;		// Maximum age
+-	uint16 date_of_last_service;
++	uint32 age;				// Age in days
++	uint32 max_age;		// Maximum age
++	uint32 date_of_last_service;
+ 	uint16 service_interval;
+ 	uint16 reliability;
+ 	uint16 reliability_spd_dec;
+@@ -217,7 +217,7 @@
+ 	byte breakdown_delay;
+ 	byte breakdowns_since_last_service;
+ 	byte breakdown_chance;
+-	byte build_year;
++	uint32 build_year;
+ 
+ 	uint16 load_unload_time_rem;
+ 
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2327)
++++ misc.c	(working copy)
+@@ -101,7 +101,7 @@
+ 	}
+ }
+ 
+-void SetDate(uint date)
++void SetDate(uint32 date)
+ {
+ 	YearMonthDay ymd;
+ 	ConvertDayToYMD(&ymd, _date = date);
+@@ -218,8 +218,8 @@
+ 	_vehicle_id_ctr_day = 0;
+ 
+ 	{
+-		uint starting = ConvertIntDate(_patches.starting_date);
+-		if ( starting == (uint)-1) starting = 10958;
++		uint32 starting = ConvertIntDate(_patches.starting_date);
++		if ( starting == (uint)-1) starting = 712238; //10958;
+ 		SetDate(starting);
+ 	}
+ 
+@@ -397,9 +397,9 @@
+ };
+ 
+ 
+-void ConvertDayToYMD(YearMonthDay *ymd, uint16 date)
++void ConvertDayToYMD(YearMonthDay *ymd, uint32 date)
+ {
+-	uint yr = date / (365+365+365+366);
++	uint32 yr = date / (365+365+365+366);
+ 	uint rem = date % (365+365+365+366);
+ 	uint x;
+ 
+@@ -424,7 +424,7 @@
+ // year is a number between 0..?
+ // month is a number between 0..11
+ // day is a number between 1..31
+-uint ConvertYMDToDay(uint year, uint month, uint day)
++uint32 ConvertYMDToDay(uint32 year, uint month, uint day)
+ {
+ 	uint rem;
+ 
+@@ -444,26 +444,25 @@
+ // 19200101 - 20901231
+ // or if > 2090 and below 65536, treat it as a daycount
+ // returns -1 if no conversion was possible
+-uint ConvertIntDate(uint date)
++uint32 ConvertIntDate(uint32 date)
+ {
+ 	uint year, month = 0, day = 1;
++	//printf("Converting %d\n", date);
+ 
+-	if (IS_INT_INSIDE(date, 1920, MAX_YEAR_END_REAL + 1)) {
+-		year = date - 1920;
+-	} else if (IS_INT_INSIDE(date, 192001, 209012+1)) {
++	if (IS_INT_INSIDE(date, 0, 9999)) {
++		year = date;
++	} else if (IS_INT_INSIDE(date, 10001, 999912+1)) {
+ 		month = date % 100 - 1;
+-		year = date / 100 - 1920;
+-	} else if (IS_INT_INSIDE(date, 19200101, 20901231+1)) {
++		year = date / 100;
++	} else if (IS_INT_INSIDE(date, 1000101, 99991231+1)) {
+ 		day = date % 100; date /= 100;
+ 		month = date % 100 - 1;
+-		year = date / 100 - 1920;
+-	} else if (IS_INT_INSIDE(date, 2091, 65536))
+-		return date;
+-	else
+-		return (uint)-1;
++		year = date / 100;
++	} else
++		return (uint32)-1;
+ 
+ 	// invalid ranges?
+-	if (month >= 12 || !IS_INT_INSIDE(day, 1, 31+1)) return (uint)-1;
++	if (month >= 12 || !IS_INT_INSIDE(day, 1, 31+1)) return (uint32)-1;
+ 
+ 	return ConvertYMDToDay(year, month, day);
+ }
+@@ -661,7 +660,7 @@
+ 	}
+ 
+ 	/* check if we entered a new year? */
+-	if ((byte)ymd.year == _cur_year)
++	if (ymd.year == _cur_year)
+ 		return;
+ 	_cur_year = ymd.year;
+ 
+@@ -678,26 +677,11 @@
+ #endif /* ENABLE_NETWORK */
+ 
+ 	/* check if we reached end of the game (31 dec 2050) */
+-	if (_cur_year == _patches.ending_date - MAX_YEAR_BEGIN_REAL) {
+-			ShowEndGameChart();
+-	/* check if we reached 2090 (MAX_YEAR_END_REAL), that's the maximum year. */
+-	} else if (_cur_year == (MAX_YEAR_END + 1)) {
+-		Vehicle *v;
+-		_cur_year = MAX_YEAR_END;
+-		_date = 62093;
+-		FOR_ALL_VEHICLES(v) {
+-			v->date_of_last_service -= 365; // 1 year is 365 days long
+-		}
++	if (_cur_year == _patches.ending_date - MAX_YEAR_BEGIN_REAL)
++		ShowEndGameChart();
+ 
+-		/* Because the _date wraps here, and text-messages expire by game-days, we have to clean out
+-		 *  all of them if the date is set back, else those messages will hang for ever */
+-		InitTextMessage();
+-	}
+-
+ 	if (_patches.auto_euro)
+ 		CheckSwitchToEuro();
+-
+-	/* XXX: check if year 2050 was reached */
+ }
+ 
+ int FindFirstBit(uint32 value)
+@@ -789,7 +773,8 @@
+ 
+ 
+ static const SaveLoadGlobVarList _date_desc[] = {
+-	{&_date, 										SLE_UINT16, 0, 255},
++	{&_date, 			SLE_FILE_U16 | SLE_VAR_U32, 0, 13},
++	{&_date,			SLE_UINT32,	14, 255},
+ 	{&_date_fract, 							SLE_UINT16, 0, 255},
+ 	{&_tick_counter, 						SLE_UINT16, 0, 255},
+ 	{&_vehicle_id_ctr_day, 			SLE_UINT16, 0, 255},
+Index: player_gui.c
+===================================================================
+--- player_gui.c	(revision 2327)
++++ player_gui.c	(working copy)
+@@ -22,7 +22,8 @@
+ 
+ static void DrawPlayerEconomyStats(Player *p, byte mode)
+ {
+-	int x,y,i,j,year;
++	int x,y,i,j;
++	uint32 year;
+ 	int64 (*tbl)[13], sum,cost;
+ 	StringID str;
+ 
+@@ -40,7 +41,7 @@
+ 		tbl = p->yearly_expenses + 2;
+ 		do {
+ 			if (year >= p->inaugurated_year) {
+-				SetDParam(0, year + 1920);
++				SetDParam(0, year);
+ 				DrawStringCenterUnderline(x-17, 15, STR_7010, 0);
+ 				sum = 0;
+ 				for(i=0; i!=13; i++) {
+@@ -534,7 +535,7 @@
+ 		w->disabled_state = dis;
+ 		DrawWindowWidgets(w);
+ 
+-		SetDParam(0, p->inaugurated_year + 1920);
++		SetDParam(0, p->inaugurated_year);
+ 		DrawString(110, 25, STR_7038_INAUGURATED, 0);
+ 
+ 		DrawPlayerVehiclesAmount(w->window_number);
+Index: economy.c
+===================================================================
+--- economy.c	(revision 2327)
++++ economy.c	(working copy)
+@@ -25,7 +25,7 @@
+ 	int i;
+ 	uint mask = 0;
+ 	for (i = 0; i != lengthof(_currency_specs); i++) {
+-		uint16 to_euro = _currency_specs[i].to_euro;
++		uint32 to_euro = _currency_specs[i].to_euro;
+ 		if (i == 23) mask |= (1 << 23); // always allow custom currency
+ 		if (to_euro != CF_NOEURO && to_euro != CF_ISEURO && _cur_year >= (to_euro-MAX_YEAR_BEGIN_REAL)) continue;
+ 		if (_cur_year < (2000-MAX_YEAR_BEGIN_REAL) && (to_euro == CF_ISEURO)) continue;
+Index: town_cmd.c
+===================================================================
+--- town_cmd.c	(revision 2327)
++++ town_cmd.c	(working copy)
+@@ -727,7 +727,7 @@
+ 
+ 		// Try to grow the town from this point
+ 		GrowTownInTile(&tile,mask,block,t);
+-
++		
+ 		// Exclude the source position from the bitmask
+ 		// and return if no more road blocks available
+ 		CLRBIT(mask, (block ^ 2));
+@@ -969,7 +969,7 @@
+ 
+ 	t->townnametype = SPECSTR_TOWNNAME_START + _opt.town_name;
+ 	t->townnameparts = townnameparts;
+-
++	
+ 	UpdateTownVirtCoord(t);
+ 	_town_sort_dirty = true;
+ 
+@@ -981,6 +981,7 @@
+ 	UpdateTownRadius(t);
+ 
+ 	i = x * 4;
++
+ 	do {
+ 		GrowTown(t);
+ 	} while (--i);
+@@ -1095,6 +1096,7 @@
+ 			break;
+ 
+ 		DoCreateTown(t, tile, townnameparts);
++		
+ 		return t;
+ 	} while (--attempts);
+ 	return NULL;
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2327)
++++ main_gui.c	(working copy)
+@@ -30,7 +30,7 @@
+ 
+ /* Min/Max date for scenario editor */
+ static const uint MinDate = 0;     // 1920-01-01 (MAX_YEAR_BEGIN_REAL)
+-static const uint MaxDate = 29220; // 2000-01-01
++static const uint MaxDate = 11758979; // 2000-01-01
+ 
+ extern void DoTestSave(void);
+ extern void DoTestLoad(void);
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 2327)
++++ roadveh_gui.c	(working copy)
+@@ -30,7 +30,7 @@
+ 	SetDParam(6, e->lifelength);
+ 	SetDParam(7, e->reliability * 100 >> 16);
+ 	ConvertDayToYMD(&ymd, e->intro_date);
+-	SetDParam(5, ymd.year + 1920);
++	SetDParam(5, ymd.year);
+ }
+ 
+ static void DrawRoadVehImage(const Vehicle *v, int x, int y, VehicleID selection)
+@@ -109,7 +109,7 @@
+ 		DrawRoadVehImage(v, 3, 57, INVALID_VEHICLE);
+ 
+ 		SetDParam(0, GetCustomEngineName(v->engine_type));
+-		SetDParam(1, 1920 + v->build_year);
++		SetDParam(1, v->build_year);
+ 		SetDParam(2, v->value);
+ 		DrawString(34, 57, STR_9011_BUILT_VALUE, 0);
+ 
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2327)
++++ settings.c	(working copy)
+@@ -834,7 +834,7 @@
+ 	{"window_snap_radius",  SDT_UINT8,  (void*)10,    &_patches.window_snap_radius,   NULL},
+ 
+ 	{"autorenew",						SDT_BOOL,		(void*)false,	&_patches.autorenew,						NULL},
+-	{"autorenew_months",		SDT_INT16,	(void*)-6,		&_patches.autorenew_months,			NULL},
++	{"autorenew_months",		SDT_INT32,	(void*)-6,		&_patches.autorenew_months,			NULL},
+ 	{"autorenew_money",			SDT_INT32,	(void*)100000,&_patches.autorenew_money,			NULL},
+ 
+ 	{"population_in_label",	SDT_BOOL,		(void*)true,	&_patches.population_in_label,	NULL},
+@@ -982,7 +982,7 @@
+ static const SettingDesc currency_settings[] = {
+ 	{"rate",			SDT_UINT16,										(void*)1,		&_currency_specs[23].rate,			NULL},
+ 	{"separator", SDT_STRINGQUOT | (2) << 16,		".", 				&_currency_specs[23].separator,	NULL},
+-	{"to_euro",		SDT_UINT16,										(void*)0,		&_currency_specs[23].to_euro,		NULL},
++	{"to_euro",		SDT_UINT32,										(void*)0,		&_currency_specs[23].to_euro,		NULL},
+ 	{"prefix",		SDT_STRINGQUOT | (16) << 16,	NULL,				&_currency_specs[23].prefix,		NULL},
+ 	{"suffix",		SDT_STRINGQUOT | (16) << 16,	" credits",	&_currency_specs[23].suffix,		NULL},
+ 	{NULL,				0,														NULL,				NULL,														NULL}
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2327)
++++ disaster_cmd.c	(working copy)
+@@ -942,10 +942,10 @@
+ };
+ 
+ typedef struct {
+-	byte min,max;
++	uint32 min,max;
+ } DisasterYears;
+ 
+-#define MK(a,b) {a-20,b-20}
++#define MK(a,b) {a+1900,b+1900}
+ static const DisasterYears _dis_years[8] = {
+ 	MK(30,55),
+ 	MK(40,70),
+@@ -961,7 +961,7 @@
+ static void DoDisaster(void)
+ {
+ 	byte buf[8];
+-	byte year = _cur_year;
++	uint32 year = _cur_year;
+ 	int i,j;
+ 
+ 	for(i=j=0; i!=lengthof(_dis_years); i++) {
+Index: waypoint.c
+===================================================================
+--- waypoint.c	(revision 2327)
++++ waypoint.c	(working copy)
+@@ -437,7 +437,8 @@
+ 	SLE_VAR(Waypoint,string,		SLE_UINT16),
+ 	SLE_VAR(Waypoint,deleted,						SLE_UINT8),
+ 
+-	SLE_CONDVAR(Waypoint, build_date, SLE_UINT16, 3, 255),
++	SLE_CONDVAR(Waypoint, build_date, SLE_FILE_U16 | SLE_VAR_U32, 3, 13),
++	SLE_CONDVAR(Waypoint, build_date, SLE_UINT32, 14, 255),
+ 	SLE_CONDVAR(Waypoint, stat_id, SLE_UINT8, 3, 255),
+ 
+ 	SLE_END()
+Index: waypoint.h
+===================================================================
+--- waypoint.h	(revision 2327)
++++ waypoint.h	(working copy)
+@@ -12,7 +12,7 @@
+ 	StringID string;       // If this is zero, town + town_cn is used for naming
+ 
+ 	ViewportSign sign;
+-	uint16 build_date;
++	uint32 build_date;
+ 	byte stat_id;
+ 	byte deleted;          // this is a delete counter. when it reaches 0, the waypoint struct is deleted.
+ };
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2327)
++++ train_gui.c	(working copy)
+@@ -42,7 +42,7 @@
+ 	SetDParam(8, e->lifelength);
+ 	SetDParam(9, e->reliability * 100 >> 16);
+ 	ConvertDayToYMD(&ymd, e->intro_date);
+-	SetDParam(7, ymd.year + 1920);
++	SetDParam(7, ymd.year);
+ }
+ 
+ void Set_DPARAM_Train_Car_Build_Window(Window *w, uint16 engine_number)
+@@ -947,7 +947,7 @@
+ 
+ 	if (!(rvi->flags & RVI_WAGON)) {
+ 		SetDParam(0, GetCustomEngineName(v->engine_type));
+-		SetDParam(1, v->build_year + 1920);
++		SetDParam(1, v->build_year);
+ 		SetDParam(2, v->value);
+ 		DrawString(x, y, STR_882C_BUILT_VALUE, 0x10);
+ 	} else {
+Index: news.h
+===================================================================
+--- news.h	(revision 2327)
++++ news.h	(working copy)
+@@ -4,7 +4,7 @@
+ struct NewsItem {
+ 	StringID string_id;
+ 	uint16 duration;
+-	uint16 date;
++	uint32 date;
+ 	byte flags;
+ 	byte display_mode;
+ 	byte type;
+Index: station.h
+===================================================================
+--- station.h	(revision 2327)
++++ station.h	(working copy)
+@@ -68,7 +68,7 @@
+ 
+ 	byte class_id; // custom graphics station class
+ 	byte stat_id; // custom graphics station id in the @class_id class
+-	uint16 build_date;
++	uint32 build_date;
+ 
+ 	//uint16 airport_flags;
+ 	uint32 airport_flags;
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 2327)
++++ ship_gui.c	(working copy)
+@@ -31,7 +31,7 @@
+ 	SetDParam(7, e->lifelength);
+ 	SetDParam(8, e->reliability * 100 >> 16);
+ 	ConvertDayToYMD(&ymd, e->intro_date);
+-	SetDParam(6, ymd.year + 1920);
++	SetDParam(6, ymd.year);
+ }
+ 
+ static void DrawShipImage(const Vehicle *v, int x, int y, VehicleID selection)
+@@ -186,7 +186,7 @@
+ 
+ 		DrawShipImage(v, 3, 57, INVALID_VEHICLE);
+ 
+-		SetDParam(1, 1920 + v->build_year);
++		SetDParam(1, v->build_year);
+ 		SetDParam(0, GetCustomEngineName(v->engine_type));
+ 		SetDParam(2, v->value);
+ 		DrawString(74, 57, STR_9816_BUILT_VALUE, 0);
+Index: airport.h
+===================================================================
+--- airport.h	(revision 2327)
++++ airport.h	(working copy)
+@@ -57,10 +57,8 @@
+ {
+ 	uint32 bytemask = _avail_aircraft; /// sets the first 3 bytes, 0 - 2, @see AdjustAvailAircraft()
+ 
+-	// 1980-1-1 is --> 21915
+-	// 1990-1-1 is --> 25568
+-	if (_date >= 21915) {SETBIT(bytemask, 3);}	// metropilitan airport 1980
+-	if (_date >= 25568) {SETBIT(bytemask, 4);}	// international airport 1990
++	if (_cur_year >= 1980) {SETBIT(bytemask, 3);}	// metropilitan airport 1980
++	if (_cur_year >= 1990) {SETBIT(bytemask, 4);}	// international airport 1990
+ 	return bytemask;
+ }
+ 
+Index: newgrf.c
+===================================================================
+--- newgrf.c	(revision 2327)
++++ newgrf.c	(working copy)
+@@ -995,7 +995,7 @@
+ 			FOR_EACH_OBJECT {
+ 				uint16 date = grf_load_word(&buf);
+ 
+-				ei[i].base_intro = date;
++				ei[i].base_intro = date + 701280;
+ 			}
+ 		}	break;
+ 		case 0x02: { /* Decay speed */

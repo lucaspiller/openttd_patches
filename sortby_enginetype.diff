@@ -1,0 +1,60 @@
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 3078)
++++ vehicle_gui.c	(working copy)
+@@ -39,6 +39,7 @@
+ static VehicleSortListingTypeFunction VehicleCargoSorter;
+ static VehicleSortListingTypeFunction VehicleReliabilitySorter;
+ static VehicleSortListingTypeFunction VehicleMaxSpeedSorter;
++static VehicleSortListingTypeFunction VehicleEngineTypeSorter;
+ 
+ static VehicleSortListingTypeFunction* const _vehicle_sorter[] = {
+ 	&VehicleUnsortedSorter,
+@@ -49,7 +50,8 @@
+ 	&VehicleProfitLastYearSorter,
+ 	&VehicleCargoSorter,
+ 	&VehicleReliabilitySorter,
+-	&VehicleMaxSpeedSorter
++	&VehicleMaxSpeedSorter,
++	&VehicleEngineTypeSorter
+ };
+ 
+ const StringID _vehicle_sort_listing[] = {
+@@ -62,6 +64,7 @@
+ 	STR_SORT_BY_TOTAL_CAPACITY_PER_CARGOTYPE,
+ 	STR_SORT_BY_RELIABILITY,
+ 	STR_SORT_BY_MAX_SPEED,
++	STR_SORT_BY_ENGINE_TYPE,
+ 	INVALID_STRING_ID
+ };
+ 
+@@ -403,6 +406,17 @@
+ 	return (_internal_sort_order & 1) ? -r : r;
+ }
+ 
++static int CDECL VehicleEngineTypeSorter(const void *a, const void *b)
++{
++	const Vehicle *va = GetVehicle((*(const SortStruct*)a).index);
++	const Vehicle *vb = GetVehicle((*(const SortStruct*)b).index);
++	int r = va->engine_type - vb->engine_type;
++
++	VEHICLEUNITNUMBERSORTER(r, va, vb);
++
++	return (_internal_sort_order & 1) ? -r : r;
++}
++
+ // this define is to match engine.c, but engine.c keeps it to itself
+ // ENGINE_AVAILABLE is used in ReplaceVehicleWndProc
+ #define ENGINE_AVAILABLE ((e->flags & 1 && HASBIT(info->climates, _opt.landscape)) || HASBIT(e->player_avail, _local_player))
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3078)
++++ lang/english.txt	(working copy)
+@@ -345,6 +345,7 @@
+ STR_SORT_BY_RELIABILITY                                         :Reliability
+ STR_SORT_BY_TOTAL_CAPACITY_PER_CARGOTYPE                        :Total capacity per cargo type
+ STR_SORT_BY_MAX_SPEED                                           :Maximum speed
++STR_SORT_BY_ENGINE_TYPE                                           :Engine type
+ 
+ ############ range for months starts
+ STR_0162_JAN                                                    :Jan

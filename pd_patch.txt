@@ -1,0 +1,1618 @@
+diff -Nru trunk/aircraft_gui.c openttd-latest/trunk.patch/aircraft_gui.c
+--- trunk/aircraft_gui.c	2004-11-05 17:00:06.000000000 -0600
++++ openttd-latest/trunk.patch/aircraft_gui.c	2004-11-13 21:24:13.000000000 -0600
+@@ -389,7 +389,11 @@
+ 					/* Cargo names (fix pluralness) */
+ 					SET_DPARAM8(0, v->cargo_type);
+ 					SET_DPARAM16(1, v->cargo_count);
+-					SET_DPARAM16(2, v->cargo_source);
++					//SET_DPARAM16(2, v->cargo_source);
++
++					// SDP: IMPLEMENTME.
++					SET_DPARAM16(2, v->cargo[0].source);
++
+ 					DrawString(60, y, STR_8813_FROM, 0);
+ 
+ 					y += 10;
+diff -Nru trunk/economy.c openttd-latest/trunk.patch/economy.c
+--- trunk/economy.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/economy.c	2004-11-15 22:08:25.000000000 -0600
+@@ -1209,6 +1319,12 @@
+ 	int t;
+ 	uint count, cap;
+ 	byte old_player;
++	bool board;
++
++	// SDP: For passenger route-finding
++	int via = 0xFF;
++	byte cost[MAX_STATIONS];
++	byte pred[MAX_STATIONS];
+ 
+ 	assert((v->next_order&0x1F) == OT_LOADING);
+ 
+@@ -1218,39 +1334,77 @@
+ 
+ 	st = DEREF_STATION(last_visited = v->last_station_visited);
+ 
++ 	if (RouteGraphIncludesVehicle(v))	
++ 	{
++ 		RouteGraphShortestPaths(last_visited, cost, pred);
++ 		via = FindNextStation(v, last_visited);
++ 	}
++
+ 	for(;;) {
+ 		if (v->cargo_cap == 0)
+ 			goto next_vehicle;
+ 
+-		ge = &st->goods[v->cargo_type];
++
++		FOR_ALL_CARGO(c, v)
++		{
++			if (_patches.passenger_destinations && v->cargo_type == CT_PASSENGERS)
++				ge = &st->goods[v->cargo_type][c->destination];
++			else 
++				ge = &st->goods[v->cargo_type][0];
++
+ 
+ 		/* unload? */
+-		if (v->cargo_count != 0) {
+-			if (v->cargo_source != (byte)last_visited && ge->waiting_acceptance & 0x8000) {
+-				// deliver goods to the station
+-				unloading_time += v->cargo_count; /* TTDBUG: bug in original TTD */
+-				profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days);
+-				result |= 1;
+-				v->cargo_count = 0;
+-			} else if (u->next_order & OF_UNLOAD) {
++			if (c->count != 0) 
++			{
++				bool deliver;
++
++				if (_patches.passenger_destinations && v->cargo_type == CT_PASSENGERS)
++					deliver = (c->source != (byte)last_visited) && (!PassengersShouldBoard(v, last_visited, via, c->destination, pred));
++				else 
++					deliver = (c->source != (byte)last_visited) && (st->goods[v->cargo_type][0].waiting_acceptance & 0x8000);
++
++				if (deliver)
++				{
++					// deliver goods to the station
++					unloading_time += c->count; /* TTDBUG: bug in original TTD */
++					profit += DeliverGoods(c->count, v->cargo_type, c->source, last_visited, c->days);
++					if (_patches.passenger_destinations && 
++						v->cargo_type == CT_PASSENGERS && 
++						c->destination != last_visited &&
++						DEREF_STATION(c->destination)->xy)
++					{
++						// SDP: Transfer passengers.
++						ge->waiting_acceptance = (ge->waiting_acceptance &~0xFFF) | 
++							min(c->count + (ge->waiting_acceptance & 0xFFF), 0xFFF);
++						ge->enroute_from = last_visited;	// CHKME
++					}
++					result |= 1;
++					v->cargo_count -= c->count;
++					c->count = 0;	
++				}
++			} else if (u->next_order & OF_UNLOAD) 
++			{
+ 				/* unload goods and let it wait at the station */
+ 				st->time_since_unload = 0;
+ 
+ 				if ((t=ge->waiting_acceptance & 0xFFF) == 0) {
+ 					// No goods waiting at station
+-					ge->enroute_time = v->cargo_days;
+-					ge->enroute_from = v->cargo_source;
++					ge->enroute_time = c->days;
++					ge->enroute_from = c->source;
++
+ 				} else {
+ 					// Goods already waiting at station. Set counters to the worst value.
+-					if (v->cargo_days >= ge->enroute_time)
+-						ge->enroute_time = v->cargo_days;
++					if (c->days >= ge->enroute_time)
++						ge->enroute_time = c->days;
++
+ 					if ((byte)last_visited != ge->enroute_from)
+-						ge->enroute_from = v->cargo_source;
++						ge->enroute_from = c->source;
+ 				}
+ 				// Update amount of waiting cargo
+-				ge->waiting_acceptance = (ge->waiting_acceptance &~0xFFF) | min(v->cargo_count + t, 0xFFF);
++				ge->waiting_acceptance = (ge->waiting_acceptance &~0xFFF) | min(c->count + t, 0xFFF);
+ 				result |= 2;
+-				v->cargo_count = 0;
++				v->cargo_count -= c->count;
++				c->count = 0;				       
+ 			}
+ 		}
+ 
+@@ -1258,31 +1412,85 @@
+ 		if (u->next_order & OF_UNLOAD)
+ 			goto next_vehicle;
+ 
++		FOR_ALL_GOODS_OF_TYPE(ge, st, v->cargo_type, goods_dest)
++		{
++			board = !(
++				_patches.passenger_destinations && 
++				v->cargo_type == CT_PASSENGERS && 
++				(goods_dest == last_visited ||
++				!PassengersShouldBoard(v, last_visited, via, goods_dest, pred))
++				);
++
+ 		/* update stats */
+-		ge->days_since_pickup = 0;
+-		t = u->max_speed;
+-		if (u->type == VEH_Road) t >>=1;
++			if (board) // SDP: CHKME. Is this behaviour correct?
++			  {			    
++			    ge->days_since_pickup = 0;
++			    t = u->max_speed;
++			    if (u->type == VEH_Road) t >>=1;
++			  }
+ 
+ 		// if last speed is 0, we treat that as if no vehicle has ever visited the station.
+-		ge->last_speed = t < 255 ? t : 255;
+-		ge->last_age = _cur_year - v->build_year;
++			if (board)
++			  {
++			    ge->last_speed = t < 255 ? t : 255;
++			    ge->last_age = _cur_year - v->build_year;
++			  }
+ 
+ 		// If there's goods waiting at the station, and the vehicle
+ 		//  has capacity for it, load it on the vehicle.
++			// SDP: For passengers, if they can reach their destination by this vehicle.
+ 		if ((count=ge->waiting_acceptance & 0xFFF) != 0 &&
+-				(cap = v->cargo_cap - v->cargo_count) != 0) {
+-			if (cap > count) cap = count;
+-			v->cargo_count += cap;
+-			ge->waiting_acceptance -= cap;
+-			unloading_time += cap;
+-			st->time_since_load = 0;
+-
+-			// And record the source of the cargo, and the days in travel.
+-			v->cargo_source = ge->enroute_from;
+-			v->cargo_days = ge->enroute_time;
+-			result |= 2;
+-			st->last_vehicle = v->index;
++				(cap = v->cargo_cap - v->cargo_count) > 0 &&
++				board
++				) 
++			{
++				CargoSlot *slot = 0;
++
++				/* Find an available cargo slot */
++				if (_patches.passenger_destinations && v->cargo_type == CT_PASSENGERS)				
++				{		
++					/* First look for same source-destination (Full Load / Return to station) */
++					FOR_ALL_CARGO(c, v)
++						if (c->source == last_visited && c->destination == goods_dest)
++						{
++							slot = c;
++							break;
++						}		
++
++					/* Just look for a free one */
++					if (!slot)
++						FOR_ALL_CARGO(c, v)
++							if (c->count == 0)
++							{
++								slot = c;
++								break;
++							}				
++				}
++				else 
++					slot = v->cargo;
++
++				if (slot)
++				{
++				  if (cap > count) cap = count;
++				  v->cargo_count += cap;
++				  slot->count += cap;
++				  ge->waiting_acceptance -= cap;
++				  unloading_time += cap;
++				  st->time_since_load = 0;
++				  
++				  // And record the source of the cargo, and the days in travel.
++				  slot->source = ge->enroute_from;
++				  slot->destination = goods_dest;
++				  slot->days = ge->enroute_time;
++				  
++				  
++				  result |= 2;
++				  st->last_vehicle = v->index;
++				}
++				/* else: no free cargo slots, treat as if vehicle full. */
++			}
+ 		}
++		FOR_ALL_GOODS_OF_TYPE_END
+ 
+ next_vehicle:;
+ 		if (!(v = v->next))
+diff -Nru trunk/oldloader.c openttd-latest/trunk.patch/oldloader.c
+--- trunk/oldloader.c	2004-11-05 17:00:03.000000000 -0600
++++ openttd-latest/trunk.patch/oldloader.c	2004-11-13 14:16:49.000000000 -0600
+@@ -665,19 +665,20 @@
+ 	} while (i++,o++,--num);
+ }
+ 
+-static void FixGoodsEntry(GoodsEntry *g, OldGoodsEntry *o, int num)
++static void FixGoodsEntry(GoodsEntry **g, OldGoodsEntry *o, int num)
+ {
+ 	do {
+-		g->waiting_acceptance = o->waiting_acceptance;
+-		g->days_since_pickup = o->days_since_pickup;
+-		g->rating = o->rating;
+-		g->enroute_from = o->enroute_from;
+-		g->enroute_time = o->enroute_time;
+-		g->last_speed = o->last_speed;
+-		g->last_age = o->last_age;
++		(*g)->waiting_acceptance = o->waiting_acceptance;
++		(*g)->days_since_pickup = o->days_since_pickup;
++		(*g)->rating = o->rating;
++		(*g)->enroute_from = o->enroute_from;
++		(*g)->enroute_time = o->enroute_time;
++		(*g)->last_speed = o->last_speed;
++		(*g)->last_age = o->last_age;
+ 	} while (g++,o++,--num);
+ }
+ 
++
+ static void FixStation(Station *s, OldStation *o, int num)
+ {
+ 	do {
+@@ -767,8 +768,8 @@
+ 		n->cargo_type = o->cargo_type;
+ 		n->cargo_cap = o->capacity;
+ 		n->cargo_count = o->number_of_pieces;
+-		n->cargo_source = o->source_of_pieces;
+-		n->cargo_days = o->days_in_transit;
++		n->cargo[0].source = o->source_of_pieces;
++		n->cargo[0].days = o->days_in_transit;
+ 		n->age = o->age_in_days;
+ 		n->max_age = o->max_age_in_days;
+ 		n->build_year = o->build_year;
+diff -Nru trunk/order_cmd.c openttd-latest/trunk.patch/order_cmd.c
+--- trunk/order_cmd.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/order_cmd.c	2004-11-13 21:32:42.000000000 -0600
+@@ -5,7 +5,7 @@
+ #include "station.h"
+ #include "player.h"
+ #include "news.h"
+-
++#include "routegraph.h"
+ /* p1 & 0xFFFF = vehicle
+  * p1 >> 16 = index in order list
+  * p2 = order command to insert
+@@ -15,6 +15,8 @@
+ 	Vehicle *v = &_vehicles[p1 & 0xFFFF];
+ 	int sel = p1 >> 16;
+ 	int t;
++	int prev_st, next_st;	
++	bool update_routegraph;
+ 
+ 	if (sel > v->num_orders) return_cmd_error(STR_EMPTY);
+ 	if (_ptr_to_next_order == endof(_order_array)) return_cmd_error(STR_8831_NO_MORE_SPACE_FOR_ORDERS);
+@@ -32,6 +34,7 @@
+ 	if (flags & DC_EXEC) {
+ 		uint16 *s1, *s2;
+ 		Vehicle *u;
++		int num_vehicles;
+ 
+ 		s1 = &v->schedule_ptr[sel];
+ 		s2 = _ptr_to_next_order++;
+@@ -40,12 +43,14 @@
+ 
+ 		s1 = v->schedule_ptr;
+ 
++		num_vehicles = 0;
+ 		FOR_ALL_VEHICLES(u) {
+ 			if (u->type != 0 && u->schedule_ptr != NULL) {
+ 				if (s1 < u->schedule_ptr) {
+ 					u->schedule_ptr++;
+ 				} else if (s1 == u->schedule_ptr) { // handle shared orders
+ 					u->num_orders++;
++					num_vehicles++;
+ 
+ 					if ((byte)sel <= u->cur_order_index) {
+ 						sel++;
+@@ -57,7 +62,20 @@
+ 				}
+ 			}
+ 		}
++
++		update_routegraph = RouteGraphUpdateInfo(v, p2, p1 >> 16, &prev_st, &next_st);
++
++		if (update_routegraph)
++		{
++			if (prev_st != 0xFF && next_st != 0xFF)
++				RouteGraphRemoveEdge(prev_st, next_st, num_vehicles);
++			if (prev_st != 0xFF)
++				RouteGraphAddEdge(prev_st, (p2 >> 8), num_vehicles);
++			if (next_st != 0xFF)
++				RouteGraphAddEdge((p2 >> 8), next_st, num_vehicles);
++		}	
+ 	}
++	
+ 
+ 	return 0;
+ }
+@@ -83,8 +101,11 @@
+  */
+ int32 CmdDeleteOrder(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
++	bool update_routegraph;
++	int prev_st, next_st;
+ 	Vehicle *v = &_vehicles[p1], *u;
+ 	uint sel = (uint)p2;
++	uint32 order;
+ 
+ 	_error_message = STR_EMPTY;
+ 	if (sel >= v->num_orders)
+@@ -92,8 +113,12 @@
+ 
+ 	if (flags & DC_EXEC) {
+ 		uint16 *s1;
++		int num_vehicles;
+ 
+ 		s1 = &v->schedule_ptr[sel];
++		order = *s1;
++
++		update_routegraph = RouteGraphUpdateInfo(v, order, sel, &prev_st, &next_st);
+ 
+ 		// copy all orders to get rid of the hole
+ 		do s1[0] = s1[1]; while (++s1 != _ptr_to_next_order);
+@@ -101,12 +126,15 @@
+ 
+ 		s1 = v->schedule_ptr;
+ 
++		num_vehicles = 0;
+ 		FOR_ALL_VEHICLES(u) {
+ 			if (u->type != 0 && u->schedule_ptr != NULL) {
+ 				if (s1 < u->schedule_ptr) {
+ 					u->schedule_ptr--;
+ 				} else if (s1 == u->schedule_ptr) {// handle shared orders
+ 					u->num_orders--;
++					num_vehicles++;
++
+ 					if ((byte)sel < u->cur_order_index)
+ 						u->cur_order_index--;
+ 
+@@ -118,6 +146,15 @@
+ 				}
+ 			}
+ 		}
++		if (update_routegraph)
++		{
++			if (prev_st != 0xFF && next_st != 0xFF)
++				RouteGraphAddEdge(prev_st, next_st, num_vehicles);
++			if (prev_st != 0xFF)
++				RouteGraphRemoveEdge(prev_st, (order >> 8), num_vehicles);
++			if (next_st != 0xFF)
++				RouteGraphRemoveEdge((order >> 8), next_st, num_vehicles);
++		}
+ 	}
+ 
+ 	return 0;
+@@ -229,6 +266,8 @@
+ 			dst->schedule_ptr = src->schedule_ptr;
+ 			dst->num_orders = src->num_orders;
+ 
++			RouteGraphAddVehicle(dst);
++
+ 			InvalidateWindow(WC_VEHICLE_ORDERS, src->index);
+ 			InvalidateWindow(WC_VEHICLE_ORDERS, dst->index);
+ 		}
+@@ -273,6 +312,8 @@
+ 			_ptr_to_next_order += src->num_orders + 1;
+ 			memcpy(dst->schedule_ptr, src->schedule_ptr, (src->num_orders + 1) * sizeof(uint16));
+ 
++			RouteGraphAddVehicle(dst);
++
+ 			InvalidateWindow(WC_VEHICLE_ORDERS, dst->index);
+ 		}
+ 		break;
+diff -Nru trunk/roadveh_cmd.c openttd-latest/trunk.patch/roadveh_cmd.c
+--- trunk/roadveh_cmd.c	2004-11-05 17:00:06.000000000 -0600
++++ openttd-latest/trunk.patch/roadveh_cmd.c	2004-11-13 14:38:14.000000000 -0600
+@@ -8,6 +8,7 @@
+ #include "gfx.h"
+ #include "pathfind.h"
+ #include "player.h"
++#include "routegraph.h"
+ 
+ void ShowRoadVehViewWindow(Vehicle *v);
+ 
+@@ -1488,11 +1489,17 @@
+ 
+ static void AgeRoadVehCargo(Vehicle *v)
+ {
++  CargoSlot *c;
++
+ 	if (_age_cargo_skip_counter != 0)
+ 		return;
+-	if (v->cargo_days != 255)
+-		v->cargo_days++;
+-}
++	//	if (v->cargo_days != 255)
++	//	v->cargo_days++;
++	//}
++	FOR_ALL_CARGO(c, v)
++	  if (c->days != 255)
++	    c->days++;}
++
+ 
+ void RoadVeh_Tick(Vehicle *v)
+ {
+diff -Nru trunk/roadveh_gui.c openttd-latest/trunk.patch/roadveh_gui.c
+--- trunk/roadveh_gui.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/roadveh_gui.c	2004-11-13 14:49:24.000000000 -0600
+@@ -88,7 +88,7 @@
+ 		{
+ 			SET_DPARAM16(0, v->service_interval);
+ 			SET_DPARAM16(1, v->date_of_last_service);
+-			DrawString(13, 90, _patches.servint_ispercent?STR_SERVICING_INTERVAL_PERCENT:STR_883C_SERVICING_INTERVAL_DAYS, 0);
++			DrawString(13, 159, _patches.servint_ispercent?STR_SERVICING_INTERVAL_PERCENT:STR_883C_SERVICING_INTERVAL_DAYS, 0);
+ 		}
+ 
+ 		DrawRoadVehImage(v, 3, 57, INVALID_VEHICLE);
+@@ -102,14 +102,44 @@
+ 		SET_DPARAM16(1, v->cargo_cap);
+ 		DrawString(34, 67, STR_9012_CAPACITY, 0);
+ 
+-		str = STR_8812_EMPTY;
++		//		str = STR_8812_EMPTY;
+ 		if (v->cargo_count != 0) {
+-			SET_DPARAM8(0, v->cargo_type);
+-			SET_DPARAM16(1, v->cargo_count);
+-			SET_DPARAM16(2, v->cargo_source);
+-			str = STR_8813_FROM;
+-		}
+-		DrawString(34, 78, str, 0);
++		  //SET_DPARAM8(0, v->cargo_type);
++		  //SET_DPARAM16(1, v->cargo_count);
++		  //SET_DPARAM16(2, v->cargo_source);
++		  //str = STR_8813_FROM;
++		  //}
++		  //DrawString(34, 78, str, 0);
++			if (_patches.passenger_destinations && v->cargo_type == CT_PASSENGERS)
++			{
++				CargoSlot *c;
++				int y;
++				
++				y = 78;
++				FOR_ALL_CARGO(c, v)
++				{
++					if (c->count != 0 && DEREF_STATION(c->destination)->xy)
++					{
++						SET_DPARAM8(0, v->cargo_type);
++						SET_DPARAM16(1, c->count);			
++						SET_DPARAM16(2, c->source);						
++						SET_DPARAM16(3, c->destination);
++						DrawString(34, y, STR_8813_FROM_TO, 0);
++						y += 10;
++					}
++				}
++			}
++			else
++			{
++				SET_DPARAM8(0, v->cargo_type);
++				SET_DPARAM16(1, v->cargo_count);			
++				SET_DPARAM16(2, v->cargo[0].source);				
++				DrawString(34, 78, STR_8813_FROM, 0);
++			}
++		}		
++		else 
++			DrawString(34, 78, STR_8812_EMPTY, 0);
++		
+ 		break;
+ 
+ 	case WE_CLICK:
+diff -Nru trunk/routegraph.c openttd-latest/trunk.patch/routegraph.c
+--- trunk/routegraph.c	1969-12-31 18:00:00.000000000 -0600
++++ openttd-latest/trunk.patch/routegraph.c	2004-11-13 20:52:07.000000000 -0600
+@@ -0,0 +1,379 @@
++#include "stdafx.h"
++#include "ttd.h"
++#include "routegraph.h"
++#include "engine.h"
++#include "gfx.h"
++#include "town.h"
++#include "table/train_cmd.h"
++
++void RouteGraphInitialize()
++{
++	int i;
++
++	for (i = 0; i < MAX_STATIONS; i ++)
++		_route_graph[i] = NULL;
++}
++
++void RouteGraphDestroy()
++{
++	int i;
++
++	for (i = 0; i < MAX_STATIONS; i ++)
++	{
++		if (_route_graph[i] != NULL)
++            free(_route_graph[i]);
++		
++		_route_graph[i] = NULL;
++	}
++}
++
++void RouteGraphAddEdge(byte from, byte to, byte num)
++{
++	int i;
++	Station *from_st, *to_st;
++	char from_name[64], to_name[64];	
++
++	if (from == to)
++		return;	
++
++	from_st = DEREF_STATION(from);
++	to_st = DEREF_STATION(to);
++
++	SET_DPARAM16(0, from_st->town->townnametype);
++	SET_DPARAM32(1, from_st->town->townnameparts);
++	GetString(from_name, from_st->string_id);
++	SET_DPARAM16(0, to_st->town->townnametype);
++	SET_DPARAM32(1, to_st->town->townnameparts);	
++	GetString(to_name, to_st->string_id);
++	printf("add %d from %s (%d) to %s (%d)\n", num, from_name, from, to_name, to);	
++
++	if (_route_graph[from] == NULL)
++	{
++		_route_graph[from] = malloc(sizeof(RouteGraphEdge) * (MAX_STATIONS + 1));
++		for (i = 0; i < MAX_STATIONS + 1; i ++)
++		{
++			_route_graph[from][i].to = 0xFF;
++			_route_graph[from][i].num_vehicles = 0;
++		}
++	}
++
++	i = 0; 
++	while (_route_graph[from][i].to != 0xFF && _route_graph[from][i].to != to)
++		i ++;
++	
++	_route_graph[from][i].to = to;	
++	_route_graph[from][i].num_vehicles += num;	
++}
++
++void RouteGraphRemoveEdge(byte from, byte to, byte num)
++{
++	int i;
++	Station *from_st, *to_st;
++	char from_name[64], to_name[64];	
++
++	if (from == to)
++		return;	
++
++	from_st = DEREF_STATION(from);
++	to_st = DEREF_STATION(to);
++
++	SET_DPARAM16(0, from_st->town->townnametype);
++	SET_DPARAM32(1, from_st->town->townnameparts);
++	GetString(from_name, from_st->string_id);
++	SET_DPARAM16(0, to_st->town->townnametype);
++	SET_DPARAM32(1, to_st->town->townnameparts);	
++	GetString(to_name, to_st->string_id);
++	printf("remove %d from %s to %s\n", num, from_name, to_name);
++
++	assert(_route_graph[from] != NULL);
++
++	i = 0;
++	while (_route_graph[from][i].to != to)
++	{
++		//assert(_route_graph[from][i].to != 0xFF && i < MAX_STATIONS)
++		i ++;
++	}
++			
++	_route_graph[from][i].num_vehicles -= num;
++	if (_route_graph[from][i].num_vehicles == 0)
++	{
++		for ( ; _route_graph[from][i].to != 0xFF; i ++)		
++			_route_graph[from][i] = _route_graph[from][i + 1];
++		
++		/*for ( ; _route_graph[from][i + 1].to != 0xFF; i ++)		
++			_route_graph[from][i] = _route_graph[from][i + 1];
++		
++		_route_graph[from][i].to = 0xFF;
++		_route_graph[from][i].num_vehicles = 0;*/
++	}
++
++	if (_route_graph[from][0].to == 0xFF)
++	{
++		free(_route_graph[from]);
++		_route_graph[from] = NULL;
++	}
++}
++
++void RouteGraphRemoveNode(int node)
++{
++	int i;
++
++	if (!_patches.passenger_destinations)
++		return;
++
++	if (_route_graph[node] != NULL)
++	{
++		free(_route_graph[node]);
++		_route_graph[node] = NULL;
++	}
++
++	for (i = 0; i < MAX_STATIONS; i ++)
++		if (_route_graph[i] != NULL)
++		{
++			int j;
++			
++			j = 0;
++			while (_route_graph[i][j].to != 0xFF && _route_graph[i][j].to != node)
++				j ++;
++			
++			for ( ; _route_graph[i][j].to != 0xFF; j ++)		
++				_route_graph[i][j] = _route_graph[i][j + 1];
++		}
++}
++
++//relax( Node u, Node v, double w[][] )
++//    if d[v] > d[u] + w[u,v] then
++//       d[v] := d[u] + w[u,v]
++//       pi[v] := u
++//shortest_paths( Graph g, Node s )
++//    initialise_single_source( g, s )
++//    S := { 0 }        /* Make S empty */
++//    Q := Vertices( g ) /* Put the vertices in a PQ */
++//    while not Empty(Q) 
++//        u := ExtractCheapest( Q );
++//        AddNode( S, u ); /* Add u to S */
++//        for each vertex v in Adjacent( u )
++//            relax( u, v, w )
++
++// Computes shortest-paths to all stations from given station using Dijkstra's algorithm
++void RouteGraphShortestPaths(byte from, byte cost[MAX_STATIONS], byte pred[MAX_STATIONS])
++{
++	int i,j;
++	byte cheapest_cost, cheapest_index;
++	bool visited[MAX_STATIONS];		
++
++	for (i = 0; i < MAX_STATIONS; i ++)
++	{
++		cost[i] = pred[i] = 0xFF;
++		visited[i] = false;
++	}
++
++	cost[from] = 0;
++
++	for (;;)
++	{
++		cheapest_cost = cheapest_index = 0xFF;
++		for (i = 0; i < MAX_STATIONS; i ++)
++			if (_route_graph[i] != 0 && !visited[i] && cost[i] < cheapest_cost)
++			{
++				cheapest_index = i;
++				cheapest_cost = cost[i];
++			}
++
++		if (cheapest_index == 0xFF)
++			break;
++
++		visited[cheapest_index] = true;
++
++		for (j = 0; _route_graph[cheapest_index][j].to != 0xFF; j ++)	
++		{
++			byte v = _route_graph[cheapest_index][j].to;
++
++			if (cost[v] > cost[cheapest_index] + 1)
++			{
++				cost[v] = cost[cheapest_index] + 1;
++				pred[v] = cheapest_index;
++			}		
++		}
++	}
++}
++
++// from train_cmd.c
++#define is_firsthead_sprite(spritenum) \
++	(is_custom_sprite(spritenum) \
++		? is_custom_firsthead_sprite(spritenum) \
++		: _engine_sprite_add[spritenum] == 0)
++
++bool RouteGraphIncludesVehicle(Vehicle *v)
++{
++	if (!_patches.passenger_destinations) 
++		return false;
++
++	// See if this should really be added. (CHKME Aircraft)
++	if ((v->type == VEH_Road || v->type == VEH_Ship || v->type == VEH_Aircraft) && v->cargo_type == CT_PASSENGERS)	
++		return true;
++		
++	if (v->type == VEH_Train)
++	{
++		// Is this a loco?
++		if ((_rail_vehicle_info[v->engine_type].flags & RVI_WAGON) ||
++				!is_firsthead_sprite(v->spritenum))
++			return false;
++
++		// Is it a passenger train?
++		{
++			Vehicle *vv;
++			
++			for (vv = v; vv != NULL; vv = vv->next)
++				if (vv->cargo_type == CT_PASSENGERS && vv->cargo_cap > 0)
++					return true;
++		}
++	}	
++
++	return false;
++}
++
++bool RouteGraphUpdateInfo(Vehicle *v, uint32 order, int order_pos, int* prev_st, int* next_st)
++{	
++	bool update_routegraph;
++
++	update_routegraph = (RouteGraphIncludesVehicle(v) && (order & OT_MASK) == OT_GOTO_STATION);
++
++	if (update_routegraph)
++	{
++		int i, end;
++
++		// SDP: Find previous and next stations
++		*prev_st = 0xFF;
++		*next_st = 0xFF;
++		
++		i = order_pos + 1;
++		if (i >= v->num_orders)
++			i = 0;	
++		end = order_pos;
++		
++		while (i != end)
++		{
++			uint32 o;
++
++			o = v->schedule_ptr[i];
++	
++			if ((o & OT_MASK) == OT_GOTO_STATION)
++				*prev_st = o >> 8;
++			if ((o & OT_MASK) == OT_GOTO_STATION && *next_st == 0xFF)
++				*next_st = o >> 8;
++
++			i ++;
++			if (i >= v->num_orders)
++				i = 0;		
++		}			
++	}
++
++	return update_routegraph;
++}
++
++void RouteGraphAddVehicle(Vehicle *v)
++{
++	int i;
++	int last_st;
++
++	if (!RouteGraphIncludesVehicle(v))
++		return;		
++
++	last_st = 0xFF;
++
++	// Go through the orders
++	for (i = 0; i < v->num_orders; i ++)
++	{
++		uint32 order;
++		
++		order = v->schedule_ptr[i];
++	
++		if ((order & OT_MASK) == OT_GOTO_STATION)
++		{
++			int new_st = (order >> 8);
++			
++			if (new_st != last_st)
++			{
++				if (last_st != 0xFF)
++					RouteGraphAddEdge(last_st, new_st, 1);
++				last_st = new_st;
++			}
++		}
++	}
++
++	if (last_st != 0xFF)
++	{
++		// Complete the cycle
++		for (i = 0; i < v->num_orders; i ++)
++		{
++			uint32 order;
++		
++			order = v->schedule_ptr[i];
++	
++			if ((order & OT_MASK) == OT_GOTO_STATION)
++			{
++				int new_st = (order >> 8);
++			
++				if (new_st != last_st)
++				{
++					RouteGraphAddEdge(last_st, new_st, 1);
++					break;
++				}
++			}
++		}	
++	}
++}
++
++void RouteGraphRemoveVehicle(Vehicle *v)
++{
++	int i;
++	int last_st;
++
++	if (!RouteGraphIncludesVehicle(v))
++		return;
++
++	last_st = 0xFF;
++
++	// Go through the orders
++	for (i = 0; i < v->num_orders; i ++)
++	{
++		uint32 order;
++		
++		order = v->schedule_ptr[i];
++	
++		if ((order & OT_MASK) == OT_GOTO_STATION)
++		{
++			int new_st = (order >> 8);
++			
++			if (new_st != last_st)
++			{
++				if (last_st != 0xFF)
++					RouteGraphRemoveEdge(last_st, new_st, 1);
++				last_st = new_st;
++			}
++		}
++	}
++
++	if (last_st != 0xFF)
++	{
++		// Try to complete the cycle
++		for (i = 0; i < v->num_orders; i ++)
++		{
++			uint32 order;
++		
++			order = v->schedule_ptr[i];
++	
++			if ((order & OT_MASK) == OT_GOTO_STATION)
++			{
++				int new_st = (order >> 8);
++			
++				if (new_st != last_st)
++				{
++					RouteGraphRemoveEdge(last_st, new_st, 1);
++					break;
++				}
++			}
++		}
++	}	
++}
+diff -Nru trunk/routegraph.h openttd-latest/trunk.patch/routegraph.h
+--- trunk/routegraph.h	1969-12-31 18:00:00.000000000 -0600
++++ openttd-latest/trunk.patch/routegraph.h	2004-11-14 13:14:29.000000000 -0600
+@@ -0,0 +1,33 @@
++#ifndef ROUTEGRAPH_H
++#define ROUTEGRAPH_H
++
++#include "station.h"
++
++/* Experimental feature: Specific destinations for passengers (SDP). 
++ *
++ * We maintain a directed graph of available passenger routes between stations for passenger route-finding.
++ */
++
++typedef struct _RouteGraphEdge
++{
++	byte to;				// Target of the edge
++	byte num_vehicles;		// Number of vehicles serving this route.
++} RouteGraphEdge;
++
++/* Use the supplied routines to modify this graph.
++ */
++static RouteGraphEdge* _route_graph[MAX_STATIONS];
++
++extern void RouteGraphInitialize();
++extern void RouteGraphDestroy();
++extern void RouteGraphAddEdge(byte from, byte to, byte num);
++extern void RouteGraphRemoveEdge(byte from, byte to, byte num);
++extern void RouteGraphRemoveNode(int node);
++extern void RouteGraphShortestPaths(byte from, byte cost[MAX_STATIONS], byte pred[MAX_STATIONS]);
++extern bool RouteGraphUpdateInfo(Vehicle *v, uint32 order, int order_pos, int* prev_st, int* next_st);
++extern bool RouteGraphIncludesVehicle(Vehicle *v);
++extern void RouteGraphAddVehicle(Vehicle *v);
++extern void RouteGraphRemoveVehicle(Vehicle *v);
++
++#endif
++
+diff -Nru trunk/settings_gui.c openttd-latest/trunk.patch/settings_gui.c
+--- trunk/settings_gui.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/settings_gui.c	2004-11-13 14:53:39.000000000 -0600
+@@ -631,6 +631,7 @@
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_MULTIPINDTOWN,		&_patches.multiple_industry_per_town,0, 0,  0, NULL},
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_SAMEINDCLOSE,			&_patches.same_industry_close,			0,  0,  0, NULL},
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_BRIBE,						&_patches.bribe,										0,  0,  0, NULL},
++{PE_BOOL, 0, STR_CONFIG_PATCHES_PASSCHOOSEDEST, &_patches.passenger_destinations_newgame, 0, 0, 0, NULL},
+ 	{PE_UINT8,	0, STR_CONFIG_PATCHES_SNOWLINE_HEIGHT,	&_patches.snow_line_height,					2, 13,  1, NULL},
+ 
+ 	{PE_INT32,	PF_NOCOMMA, STR_CONFIG_PATCHES_COLORED_NEWS_DATE, &_patches.colored_news_date, 1900, 2200, 5, NULL},
+diff -Nru trunk/ship_cmd.c openttd-latest/trunk.patch/ship_cmd.c
+--- trunk/ship_cmd.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/ship_cmd.c	2004-11-13 14:57:32.000000000 -0600
+@@ -747,10 +747,15 @@
+ 
+ static void AgeShipCargo(Vehicle *v)
+ {
++  CargoSlot *c;
++
+ 	if (_age_cargo_skip_counter != 0)
+ 		return;
+-	if (v->cargo_days != 255)
+-		v->cargo_days++;
++	//	if (v->cargo_days != 255)
++	//	v->cargo_days++;
++	FOR_ALL_CARGO(c, v)
++	  if (c->days != 255)
++	    c->days++;
+ }
+ 
+ void Ship_Tick(Vehicle *v)
+diff -Nru trunk/ship_gui.c openttd-latest/trunk.patch/ship_gui.c
+--- trunk/ship_gui.c	2004-11-05 17:00:08.000000000 -0600
++++ openttd-latest/trunk.patch/ship_gui.c	2004-11-13 14:59:03.000000000 -0600
+@@ -221,7 +221,9 @@
+ 		if (v->cargo_count != 0) {
+ 			SET_DPARAM8(0, v->cargo_type);
+ 			SET_DPARAM16(1, v->cargo_count);
+-			SET_DPARAM16(2, v->cargo_source);
++			//			SET_DPARAM16(2, v->cargo_source);
++			// SDP: CHKME.
++			SET_DPARAM16(2, v->cargo[0].source);
+ 			str = STR_8813_FROM;
+ 		}
+ 		DrawString(74, 78, str, 0);
+diff -Nru trunk/station_cmd.c openttd-latest/trunk.patch/station_cmd.c
+--- trunk/station_cmd.c	2004-11-05 17:00:03.000000000 -0600
++++ openttd-latest/trunk.patch/station_cmd.c	2004-11-15 21:04:47.000000000 -0600
+@@ -129,6 +130,18 @@
+ 	i = a_free->index;
+ 	memset(a_free, 0, sizeof(Station));
+ 	a_free->index = i;
++	for(i = 0; i != NUM_CARGO; i ++) 	
++		if (i == CT_PASSENGERS && _patches.passenger_destinations)
++		{
++			a_free->goods[i] = (GoodsEntry*) malloc(sizeof(GoodsEntry) * MAX_STATIONS);        
++			memset(a_free->goods[i], 0, sizeof(GoodsEntry) * MAX_STATIONS);       
++		}
++		else 
++		{
++			a_free->goods[i] = (GoodsEntry*) malloc(sizeof(GoodsEntry));
++			memset(a_free->goods[i], 0, sizeof(GoodsEntry));
++		}
++
+ 	return a_free;
+ }
+diff -Nru trunk/station_gui.c openttd-latest/trunk.patch/station_gui.c
+--- trunk/station_gui.c	2004-11-05 17:00:06.000000000 -0600
++++ openttd-latest/trunk.patch/station_gui.c	2004-11-15 21:15:05.000000000 -0600
+@@ -7,6 +7,7 @@
+ #include "player.h"
+ #include "town.h"
+ #include "command.h"
++#include "routegraph.h"
+ 
+ static void StationsWndShowStationRating(int x, int y, int type, uint acceptance, int rating)
+ {
+@@ -159,7 +160,7 @@
+ 			Station *st;
+ 			int x,xb = 2;
+ 			int y = 16;	// offset from top of widget
+-			int j;
++			int j,index;
+ 
+ 			if (w->vscroll.count == 0) {	// player has no stations
+ 				DrawString(xb, y, STR_304A_NONE, 0);
+@@ -178,13 +179,14 @@
+ 				SET_DPARAM8(1, st->facilities);
+ 				x = DrawString(xb, y, STR_3049_0, 0) + 5;
+ 
++				// SDP: IMPLEMENTME.
+ 				// show cargo waiting and station ratings
+ 				for(j=0; j!=NUM_CARGO; j++) {
+-					int acc = (st->goods[j].waiting_acceptance & 0xFFF);
+-					if (acc != 0) {
+-						StationsWndShowStationRating(x, y, j, acc, st->goods[j].rating);
+-						x += 10;
+-					}
++				  int acc = (st->goods[j][0].waiting_acceptance & 0xFFF);
++				  if (acc != 0) {
++				    StationsWndShowStationRating(x, y, j, acc, st->goods[j][0].rating);
++				    x += 10;
++				  }
+ 				}
+ 				y += 10;
+ 				i++;	// next station
+@@ -285,7 +287,8 @@
+ static void DrawStationViewWindow(Window *w)
+ {
+ 	Station *st;
+-	int i;
++	GoodsEntry *ge;
++	int i, goods_type, goods_dest;
+ 	int num;
+ 	int x,y;
+ 	int pos;
+@@ -299,13 +302,16 @@
+ 	st = DEREF_STATION(w->window_number);
+ 
+ 	num = 1;
+-	for(i=0; i!=NUM_CARGO; i++) {
+-		if ((st->goods[i].waiting_acceptance & 0xFFF) != 0) {
++	FOR_ALL_GOODS_BEGIN(ge, st, goods_type, goods_dest)
++	{
++		if ((ge->waiting_acceptance & 0xFFF) != 0) {
+ 			num++;
+-			if (st->goods[i].enroute_from != station_id)
++			if (ge->enroute_from != station_id)
+ 				num++;
+ 		}
+ 	}
++	FOR_ALL_GOODS_END
++
+ 	SetVScrollCount(w, num);
+ 
+ 	w->disabled_state = st->owner == _local_player ? 0 : (1 << 8);
+@@ -319,17 +325,23 @@
+ 
+ 	if (--pos < 0) {
+ 		str = STR_00D0_NOTHING;
+-		for(i=0; i!=NUM_CARGO; i++)
+-			if (st->goods[i].waiting_acceptance & 0xFFF)
++		FOR_ALL_GOODS_BEGIN(ge, st, goods_type, goods_dest)
++			if (ge->waiting_acceptance & 0xFFF)
+ 				str = STR_EMPTY;
++		FOR_ALL_GOODS_END
++
+ 		SET_DPARAM16(0, str);
+ 		DrawString(x, y, STR_0008_WAITING, 0);
+ 		y += 10;
+ 	}
+ 
+-	i = 0;
+-	do {
+-		uint waiting = (st->goods[i].waiting_acceptance & 0xFFF);
++	FOR_ALL_GOODS_BEGIN(ge, st, goods_type, goods_dest)
++	{		
++		uint waiting = (ge->waiting_acceptance & 0xFFF);
++
++		if (pos <= -5)
++			break;
++
+ 		if (waiting == 0)
+ 			continue;
+ 
+@@ -338,34 +350,43 @@
+ 			int cur_x = x;
+ 			num = min(num, 23);
+ 			do {
+-				DrawSprite(_cargoc.sprites[i], cur_x, y);
++			  DrawSprite(_cargoc.sprites[goods_type], cur_x, y);
+ 				cur_x += 10;
+ 			} while (--num);
+ 		}
+ 
+-		if ( st->goods[i].enroute_from == station_id) {
++		if ( ge->enroute_from == station_id) {
+ 			if (--pos < 0) {
+ 				SET_DPARAM16(1, waiting);
+-				SET_DPARAM16(0, _cargoc.names_long_s[i] + (waiting==1 ? 0 : 32));
+-				DrawStringRightAligned(x + 234, y, STR_0009, 0);
++ 				SET_DPARAM16(0, _cargoc.names_long_s[goods_type] + (waiting==1 ? 0 : 32));
++ 				if (_patches.passenger_destinations && goods_type == CT_PASSENGERS)
++				  {
++				    SET_DPARAM16(2, goods_dest);
++				    DrawStringRightAligned(x + 234, y, STR_0009_TO, 0);
++				  }
++ 				else {
++				  DrawStringRightAligned(x + 234, y, STR_0009, 0); 
++				}
+ 				y += 10;
+ 			}
+ 		} else {
+ 			/* enroute */
+ 			if (--pos < 0) {
+ 				SET_DPARAM16(1, waiting);
+-				SET_DPARAM16(0, _cargoc.names_long_s[i] + (waiting==1 ? 0 : 32));
++				SET_DPARAM16(0, _cargoc.names_long_s[goods_type] + (waiting==1 ? 0 : 32));
+ 				DrawStringRightAligned(x + 234, y, STR_000A_EN_ROUTE_FROM, 0);
+ 				y += 10;
+ 			}
+ 
+ 			if (pos > -5 && --pos < 0) {
+-				SET_DPARAM16(0, st->goods[i].enroute_from);
+-				DrawStringRightAligned(x + 234, y, STR_000B, 0);
+-				y += 10;
++			  SET_DPARAM16(0, ge->enroute_from);
++			  DrawStringRightAligned(x + 234, y, STR_000B, 0);
++
++			  y += 10;
+ 			}
+ 		}
+-	} while (pos > -5 && ++i != 12);
++	}
++	FOR_ALL_GOODS_END
+ 
+ 	if (w->widget == _station_view_widgets) {
+ 		b = _userstring;
+@@ -374,8 +395,9 @@
+ 		b[2] = STR_000C_ACCEPTS >> 8;
+ 		b += 3;
+ 
++		// SDP: CHKME.
+ 		for(i=0; i!=NUM_CARGO; i++) {
+-			if (st->goods[i].waiting_acceptance & 0x8000) {
++			if (st->goods[i][0].waiting_acceptance & 0x8000) {
+ 				b[0] = 0x81;
+ 				WRITE_LE_UINT16(b+1, _cargoc.names_s[i]);
+ 				WRITE_LE_UINT16(b+3, 0x202C);
+@@ -398,15 +420,28 @@
+ 		DrawString(2, 67, STR_3034_LOCAL_RATING_OF_TRANSPORT, 0);
+ 
+ 		y = 77;
+-		for(i=0; i!=NUM_CARGO; i++) {
+-			if (st->goods[i].enroute_from != 0xFF) {
+-				SET_DPARAM16(0, _cargoc.names_s[i]);
+-				SET_DPARAM8(2, st->goods[i].rating * 101 >> 8);
+-				SET_DPARAM16(1, STR_3035_APPALLING + (st->goods[i].rating >> 5));
+-				DrawString(8, y, STR_303D, 0);
++		FOR_ALL_GOODS_BEGIN(ge, st, goods_type, goods_dest)
++		{
++            if (ge->enroute_from != 0xFF) {
++				if (_patches.passenger_destinations && goods_type == CT_PASSENGERS)
++				{
++					SET_DPARAM16(0, _cargoc.names_s[goods_type]);
++					SET_DPARAM16(1, goods_dest);
++					SET_DPARAM8(3, ge->rating * 101 >> 8);
++					SET_DPARAM16(2, STR_3035_APPALLING + (ge->rating >> 5));
++					DrawString(8, y, STR_303D_PASSENGERS_TO, 0);
++				}			
++				else
++				{
++					SET_DPARAM16(0, _cargoc.names_s[goods_type]);
++					SET_DPARAM8(2, ge->rating * 101 >> 8);
++					SET_DPARAM16(1, STR_3035_APPALLING + (ge->rating >> 5));
++					DrawString(8, y, STR_303D, 0);
++				}
+ 				y += 10;
+ 			}
+ 		}
++		FOR_ALL_GOODS_END
+ 	}
+ }
+ 
+diff -Nru trunk/table/strings.h openttd-latest/trunk.patch/table/strings.h
+--- trunk/table/strings.h	2004-11-15 23:02:14.000000000 -0600
++++ openttd-latest/trunk.patch/table/strings.h	2004-11-14 16:10:39.000000000 -0600
+@@ -9,6 +9,7 @@
+ STR_0007_FLAT_LAND_REQUIRED,
+ STR_0008_WAITING,
+ STR_0009,
++STR_0009_TO,
+ STR_000A_EN_ROUTE_FROM,
+ STR_000B,
+ STR_000C_ACCEPTS,
+@@ -315,6 +316,7 @@
+ STR_013F_CAPACITY,
+ STR_013F_TOTAL_CAPACITY_TEXT,
+ STR_013F_TOTAL_CAPACITY,
++STR_013F_TOTAL_CAPACITY_TO,
+ STR_0140_NEW_GAME,
+ STR_0141_LOAD_GAME,
+ STR_0142_TUTORIAL_DEMONSTRATION,
+@@ -921,6 +923,7 @@
+ STR_CONFIG_PATCHES_ROADVEH_QUEUE,
+ STR_CONFIG_PATCHES_AUTOSCROLL,
+ STR_CONFIG_PATCHES_BRIBE,
++STR_CONFIG_PATCHES_PASSCHOOSEDEST,
+ STR_CONFIG_PATCHES_NEW_DEPOT_FINDING,
+ STR_CONFIG_PATCHES_NONUNIFORM_STATIONS,
+ STR_CONFIG_PATCHES_NEW_TRAIN_PATHFIND,
+@@ -1377,6 +1380,7 @@
+ STR_303B_EXCELLENT,
+ STR_303C_OUTSTANDING,
+ STR_303D,
++STR_303D_PASSENGERS_TO,
+ STR_303E_NO_LONGER_ACCEPTS,
+ STR_303F_NO_LONGER_ACCEPTS_OR,
+ STR_3040_NOW_ACCEPTS,
+@@ -2116,6 +2120,7 @@
+ STR_UNKNOWN_DESTINATION,
+ STR_8812_EMPTY,
+ STR_8813_FROM,
++STR_8813_FROM_TO,
+ STR_8814_TRAIN_IS_WAITING_IN_DEPOT,
+ STR_8815_NEW_VEHICLES,
+ STR_8816,
+@@ -2459,5 +2464,5 @@
+ 
+ enum {
+ 	LANGUAGE_PACK_IDENT = 0x474E414C, // Big Endian value for 'LANG' (LE is 0x 4C 41 4E 47)
+-	LANGUAGE_PACK_VERSION = 0x47BC4104,
++	LANGUAGE_PACK_VERSION = 0x55562A8F,
+ };
+diff -Nru trunk/town.h openttd-latest/trunk.patch/town.h
+--- trunk/town.h	2004-11-05 17:00:05.000000000 -0600
++++ openttd-latest/trunk.patch/town.h	2004-11-13 21:26:14.000000000 -0600
+@@ -93,6 +93,7 @@
+ #define DEREF_TOWN(i) (&_towns[i])
+ #define FOR_ALL_TOWNS(c) for(c=_towns; c != endof(_towns); c++)
+ 
++#define MAX_TOWNS 70
+ VARDEF Town _towns[70];
+ VARDEF int _total_towns; // For the AI: the amount of towns active
+ 
+diff -Nru trunk/town_cmd.c openttd-latest/trunk.patch/town_cmd.c
+--- trunk/town_cmd.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/town_cmd.c	2004-11-15 21:26:04.000000000 -0600
+@@ -1492,7 +1492,7 @@
+ 	if (!RandomRange(15)) {
+ 		GoodsEntry *ge;
+ 		Station *st;
+-		int i, rating;
++		int goods_type, goods_dest, rating;
+ 
+ 		// set as unwanted for 6 months
+ 		t->unwanted[_current_player] = 6;
+@@ -1500,9 +1500,10 @@
+ 		// set all close by station ratings to 0
+ 		FOR_ALL_STATIONS(st) {
+ 			if (st->town == t && st->owner == _current_player) {
+-				for (i=0, ge = st->goods; i != NUM_CARGO; i++, ge++)
++			  FOR_ALL_GOODS_BEGIN(ge, st, goods_type, goods_dest)
+ 					ge->rating = 0;
+-			}
++			  FOR_ALL_GOODS_END
++			  }
+ 		}
+ 
+ 		// only show errormessage to the executing player. All errors are handled command.c
+@@ -1513,7 +1514,7 @@
+ 		/*	decrease by a lot!
+ 		 *	ChangeTownRating is only for stuff in demolishing. Bribe failure should
+ 		 *	be independent of any cheat settings
+-		 *	ChangeTownRating(c, -1000, -50);
++		 *	ChangeTownRating(t, -1000, -50);
+ 		 */
+ 		rating = t->ratings[_current_player];
+ 		if (rating > -50)
+diff -Nru trunk/train_cmd.c openttd-latest/trunk.patch/train_cmd.c
+--- trunk/train_cmd.c	2004-11-05 17:00:06.000000000 -0600
++++ openttd-latest/trunk.patch/train_cmd.c	2004-11-22 20:52:31.000000000 -0600
+@@ -9,7 +9,7 @@
+ #include "news.h"
+ #include "engine.h"
+ #include "player.h"
+-
++#include "routegraph.h"
+ 
+ #define is_firsthead_sprite(spritenum) \
+ 	(is_custom_sprite(spritenum) \
+@@ -661,6 +661,12 @@
+ 
+ 	/* do it? */
+ 	if (flags & DC_EXEC) {
++		// SDP: Keep it simple.
++		if (src_head != NULL)
++			RouteGraphRemoveVehicle(src_head);
++		if (dst_head != NULL)
++			RouteGraphRemoveVehicle(dst_head);
++
+ 		if (p2 & 1) {
+ 			// unlink ALL wagons
+ 			if (src != src_head) {
+@@ -726,6 +732,12 @@
+ 			InvalidateWindow(WC_VEHICLE_DETAILS, dst_head->index);
+ 		}
+ 
++		// SDP: Keep it simple.
++		if (src_head != NULL)
++			RouteGraphAddVehicle(src_head);
++		if (dst_head != NULL)
++			RouteGraphAddVehicle(dst_head);
++
+ 		InvalidateWindow(WC_VEHICLE_DEPOT, src_head->tile);
+ 		InvalidateWindow(WC_TRAINS_LIST, _current_player);
+ 	}
+@@ -854,6 +866,9 @@
+ 			UpdateTrainAcceleration(first);
+ 			InvalidateWindow(WC_VEHICLE_DETAILS, first->index);
+ 		}
++		if (first){
++		  RouteGraphAddVehicle(first);
++		}
+ 	} else {
+ 		cost = 0;
+ 		for(;;) {
+@@ -2502,8 +2517,11 @@
+ 
+ void Train_Tick(Vehicle *v)
+ {
+-	if (_age_cargo_skip_counter == 0 && v->cargo_days != 0xff)
+-		v->cargo_days++;
++  CargoSlot *c;
++	if (_age_cargo_skip_counter == 0)
++		FOR_ALL_CARGO(c, v)
++			if (c->days != 0xff)
++				c->days++;
+ 
+ 	v->tick_counter++;
+ 
+diff -Nru trunk/train_gui.c openttd-latest/trunk.patch/train_gui.c
+--- trunk/train_gui.c	2004-11-05 17:00:07.000000000 -0600
++++ openttd-latest/trunk.patch/train_gui.c	2004-11-15 21:38:34.000000000 -0600
+@@ -871,7 +871,9 @@
+ 		if (num != 0) {
+ 			SET_DPARAM8(0, v->cargo_type);
+ 			SET_DPARAM16(1, num);
+-			SET_DPARAM16(2, v->cargo_source);
++
++			// SDP: IMPLEMENTME.
++			SET_DPARAM16(2, v->cargo[0].source);
+ 			str = STR_8813_FROM;
+ 		}
+ 		DrawString(x, y, str, 0);
+@@ -917,7 +919,8 @@
+ {
+ 	Vehicle *v, *u;
+ 	uint16 tot_cargo[NUM_CARGO][2];	// count total cargo ([0]-actual cargo, [1]-total cargo)
+-	int i,num,x,y,sel;
++	int i,num,x,y,sel,j;
++	uint16 tot_pass[MAX_STATIONS];	// count total passengers per destination
+ 	StringID str;
+ 	byte det_tab = WP(w, traindetails_d).tab;
+ 
+@@ -926,8 +929,10 @@
+ 
+ 	// det_tab == 3 <-- Total Cargo tab
+ 	if (det_tab == 3)	// reset tot_cargo array to 0 values
++	  {
+ 		memset(tot_cargo, 0, sizeof(tot_cargo));
+-
++		memset(tot_pass, 0, sizeof(tot_pass));
++	  }
+ 	u = v = &_vehicles[w->window_number];
+ 	do {
+ 		if (det_tab != 3)
+@@ -935,6 +940,11 @@
+ 		else {
+ 			tot_cargo[u->cargo_type][0] += u->cargo_count;
+ 			tot_cargo[u->cargo_type][1] += u->cargo_cap;
++
++			if (u->cargo_type == CT_PASSENGERS && _patches.passenger_destinations){
++			  for (j = 0; j < MAX_VEHICLE_CARGO; j ++)
++			    tot_pass[u->cargo[j].destination] += u->cargo[j].count;				
++			}
+ 		}
+ 	} while ( (u = u->next) != NULL);
+ 
+@@ -946,6 +956,11 @@
+ 			if (tot_cargo[i][1] > 0)	// only count carriages that the train has
+ 				num++;
+ 		}
++		if (_patches.passenger_destinations)			
++		  for (i = 0; i != MAX_STATIONS; i++) {
++		    if (tot_pass[i] > 0)	// also add different destinations for passengers
++		      num++;
++		  }						
+ 		num++;	// needs one more because first line is description string
+ 	}
+ 
+@@ -1024,6 +1039,20 @@
+ 				SET_DPARAM16(3, tot_cargo[i][1]);	// {SHORTCARGO} #2
+ 				DrawString(x, y, STR_013F_TOTAL_CAPACITY, 0);
+ 			}
++
++			if (_patches.passenger_destinations && i == CT_PASSENGERS)
++			{
++				for (j = 0; j < MAX_STATIONS; j ++)				
++					if (tot_pass[j] > 0 && DEREF_STATION(j)->xy && --sel < 0 && sel >= -5) 
++					{									
++						y += 14;
++						// STR_013F_TOTAL_CAPACITY_TO			:{LTBLUE}  - {COMMA16} to {STATION}						
++						SET_DPARAM16(0, tot_pass[j]);			// {COMMA16}
++						SET_DPARAM16(1, j);						// {STATION}
++						DrawString(x, y, STR_013F_TOTAL_CAPACITY_TO, 0);
++					}				
++			}
++
+ 		} while (++i != NUM_CARGO);
+ 	}
+ }
+diff -Nru trunk/ttd.c openttd-latest/trunk.patch/ttd.c
+--- trunk/ttd.c	2004-11-05 17:00:03.000000000 -0600
++++ openttd-latest/trunk.patch/ttd.c	2004-11-15 21:42:05.000000000 -0600
+@@ -22,6 +22,7 @@
+ #include "saveload.h"
+ #include "ai.h"
+ #include "console.h"
++#include "routegraph.h"
+ 
+ #include <stdarg.h>
+ 
+@@ -570,6 +571,9 @@
+ 	// initialize airport state machines
+ 	InitializeAirports();
+ 
++	// SDP: Right place?
++	RouteGraphInitialize();
++
+ 	// Sample catalogue
+ 	DEBUG(misc, 1) ("Loading sound effects...");
+ 	_os_version = GetOSVersion();
+@@ -646,6 +650,9 @@
+ 	_game_mode = GM_MENU;
+ 	_display_opt |= DO_TRANS_BUILDINGS; // don't make buildings transparent in intro
+ 
++	// SDP: Is there a better way for this?
++	_patches.passenger_destinations = false;
++
+ 	_opt_mod_ptr = &_new_opt;
+ 	GfxLoadSprites();
+ 	LoadStringWidthTable();
+@@ -677,6 +684,11 @@
+ 	_opt_mod_ptr = &_opt;
+ 	memcpy(&_opt, &_new_opt, sizeof(_opt));
+ 
++	// SDP: Is there a better way for this?
++	_patches.passenger_destinations = _patches.passenger_destinations_newgame;
++	if(_patches.passenger_destinations)
++        RouteGraphDestroy();
++
+ 	GfxLoadSprites();
+ 
+ 	// Reinitialize windows
+@@ -774,6 +786,12 @@
+ 	int r;
+ 
+ 	_game_mode = newgm;
++	
++	// SDP: A better way to do this?
++	_patches.passenger_destinations = _patches.passenger_destinations_newgame;
++	if(_patches.passenger_destinations)
++        RouteGraphDestroy();
++
+ 	r = SaveOrLoad(filename, mode);
+ 	if (r == SL_REINIT) {
+ 		if (ogm == GM_MENU)
+diff -Nru trunk/variables.h openttd-latest/trunk.patch/variables.h
+--- trunk/variables.h	2004-11-05 17:00:05.000000000 -0600
++++ openttd-latest/trunk.patch/variables.h	2004-11-13 20:38:59.000000000 -0600
+@@ -158,6 +158,9 @@
+ 	byte wait_oneway_signal;	//waitingtime in days before a oneway signal
+ 	byte wait_twoway_signal;	//waitingtime in days before a twoway signal
+ 
++	bool passenger_destinations_newgame;	// SDP: Specific destinations for passengers, requires new game.
++	bool passenger_destinations;		
++
+ 	byte drag_signals_density; // many signals density
+ 	bool ainew_active;  // Is the new AI active?
+ } Patches;
+diff -Nru trunk/vehicle.c openttd-latest/trunk.patch/vehicle.c
+--- trunk/vehicle.c	2004-11-05 17:00:06.000000000 -0600
++++ openttd-latest/trunk.patch/vehicle.c	2004-11-15 21:52:03.000000000 -0600
+@@ -9,6 +9,7 @@
+ #include "saveload.h"
+ #include "player.h"
+ #include "engine.h"
++#include "routegraph.h"
+ 
+ #define INVALID_COORD (-0x8000)
+ #define GEN_HASH(x,y) (((x & 0x1F80)>>7) + ((y & 0xFC0)))
+@@ -148,6 +149,14 @@
+ 
+ 	// update checkpoint signs
+ 	for(cp=_checkpoints; cp != endof(_checkpoints); cp++) if (cp->xy) UpdateCheckpointSign(cp);
++
++	// SDP: Reconstruct the passenger route graph
++	RouteGraphDestroy();	
++	if (_patches.passenger_destinations)
++	{		
++		FOR_ALL_VEHICLES(v) 
++			RouteGraphAddVehicle(v);
++	}
+ }
+ 
+ 
+@@ -406,6 +415,8 @@
+ 	int num;
+ 	Vehicle *u;
+ 
++	RouteGraphRemoveVehicle(v);
++
+ 	// if the schedule is shared, don't delete it.
+ 	if ((u = IsScheduleShared(v)) != NULL) {
+ 		v->schedule_ptr = NULL;
+@@ -490,13 +501,13 @@
+ 
+ void DeleteVehicle(Vehicle *v)
+ {
++	if (v->schedule_ptr != NULL)
++		DeleteVehicleSchedule(v);
++
+ 	DeleteName(v->string_id);
+ 	v->type = 0;
+ 	UpdateVehiclePosHash(v, INVALID_COORD, 0);
+ 	v->next_hash = 0xffff;
+-
+-	if (v->schedule_ptr != NULL)
+-		DeleteVehicleSchedule(v);
+ }
+ 
+ void DeleteVehicleChain(Vehicle *v)
+@@ -1613,6 +1624,14 @@
+ 	SLE_END()
+ };
+ 
++static const byte _cargo_slot_desc[] = {
++	SLE_VAR(CargoSlot,days,			SLE_UINT8),
++	SLE_VAR(CargoSlot,destination,	SLE_UINT8),
++	SLE_VAR(CargoSlot,source,		SLE_UINT8),
++	SLE_VAR(CargoSlot,count,		SLE_UINT16),
++	SLE_END()
++};
++
+ static const byte _roadveh_desc[] = {
+ 	SLE_WRITEBYTE(Vehicle,type,VEH_Road, 1), // Road type. VEH_Road in mem, 1 in file.
+ 	SLE_INCLUDEX(0, INC_VEHICLE_COMMON),
+@@ -1733,16 +1752,30 @@
+ 	_disaster_desc,
+ };
+ 
++// SDP: Doing the same as in SaveLoad_STNS
++static void Save_VEH(Vehicle *v)
++{		
++	CargoSlot *c;
++
++	SlObject(v, _veh_descs[v->type - 0x10]);
++	if (_patches.passenger_destinations)
++		FOR_ALL_CARGO(c, v)
++			SlObject(c, _cargo_slot_desc);
++}
++
+ // Will be called when the vehicles need to be saved.
+ static void Save_VEHS()
+ {
+ 	Vehicle *v;
+ 	// Write the vehicles
+-	FOR_ALL_VEHICLES(v) {
+-		if (v->type != 0) {
+-			SlSetArrayIndex(v->index);
++	FOR_ALL_VEHICLES(v) 
++	{
++		if (v->type != 0) 
++		{
++			SlSetArrayIndex(v->index);			
++
+ 			v->next_in_chain_old = v->next ? v->next->index : INVALID_VEHICLE;
+-			SlObject(v, _veh_descs[v->type - 0x10]);
++			SlAutolength((AutolengthProc*)Save_VEH, v);
+ 		}
+ 	}
+ }
+@@ -1752,11 +1785,15 @@
+ {
+ 	int index;
+ 	Vehicle *v;
++	CargoSlot *c;
+ 
+ 	while ((index = SlIterateArray()) != -1) {
+ 		Vehicle *v = &_vehicles[index];
+ 		v->next_in_chain_old = INVALID_VEHICLE;
+ 		SlObject(v, _veh_descs[SlReadByte()]);
++		if (_patches.passenger_destinations)
++			FOR_ALL_CARGO(c, v)
++				SlObject(c, _cargo_slot_desc);	
+ 		v->next = v->next_in_chain_old == INVALID_VEHICLE ? NULL : &_vehicles[v->next_in_chain_old];
+ 		if (v->type == VEH_Train)
+ 			v->u.rail.first_engine = 0xffff;

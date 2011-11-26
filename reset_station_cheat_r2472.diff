@@ -1,0 +1,417 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2472)
++++ station_cmd.c	(working copy)
+@@ -443,8 +443,8 @@
+ 	st->airport_tile = st->dock_tile = st->train_tile = 0;
+ 	st->bus_stops = st->truck_stops = NULL;
+ 	st->had_vehicle_of_type = 0;
+-	st->time_since_load = 255;
+-	st->time_since_unload = 255;
++	st->time_since_load = INVALID_TIME;
++	st->time_since_unload = INVALID_TIME;
+ 	st->delete_ctr = 0;
+ 	st->facilities = 0;
+ 
+@@ -454,9 +454,9 @@
+ 		ge->waiting_acceptance = 0;
+ 		ge->days_since_pickup = 0;
+ 		ge->enroute_from = INVALID_STATION;
+-		ge->rating = 175;
++		ge->rating = RATING_START_VALUE;
+ 		ge->last_speed = 0;
+-		ge->last_age = 0xFF;
++		ge->last_age = INVALID_AGE;
+ 		ge->feeder_profit = 0;
+ 	}
+ 
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2472)
++++ misc_gui.c	(working copy)
+@@ -1690,14 +1690,15 @@
+ 	{CE_BOOL, 0, STR_CHEAT_SETUP_PROD,			&_cheats.setup_prod.value,			&_cheats.setup_prod.been_used,			NULL,											0, 0, 0},
+ 	{CE_UINT8, 0, STR_CHEAT_SWITCH_CLIMATE, &_opt.landscape, 								&_cheats.switch_climate.been_used,	&ClickChangeClimateCheat,-1, 4, 1},
+ 	{CE_UINT8, 0, STR_CHEAT_CHANGE_DATE,		&_cur_year,											&_cheats.change_date.been_used,			&ClickChangeDateCheat,	 -1, 1, 1},
++	{CE_BOOL, 0, STR_CHEAT_RESET_STATION,			&_cheats.reset_station.value,			&_cheats.reset_station.been_used,			&ClickResetStationCheat,											0, 0, 0},
+ };
+ 
+ 
+ static const Widget _cheat_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   399,     0,    13, STR_CHEATS,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{      WWT_PANEL,   RESIZE_NONE,    14,     0,   399,    14,   159, 0x0,					STR_NULL},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   399,    14,   159, 0x0,					STR_CHEATS_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    14,     0,   399,    14,   173, 0x0,					STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   399,    14,   173, 0x0,					STR_CHEATS_TIP},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1832,7 +1833,7 @@
+ 	}
+ }
+ static const WindowDesc _cheats_desc = {
+-	240, 22, 400, 160,
++	240, 22, 400, 174,
+ 	WC_CHEATS,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
+ 	_cheat_widgets,
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2472)
++++ lang/english.txt	(working copy)
+@@ -1111,6 +1111,7 @@
+ STR_CHEAT_SWITCH_CLIMATE                                        :{LTBLUE}Switch climate: {ORANGE} {STRING}
+ STR_CHEAT_CHANGE_DATE                                           :{LTBLUE}Change date: {ORANGE} {DATE_SHORT}
+ STR_CHEAT_SETUP_PROD                                            :{LTBLUE}Enable modifying production values: {ORANGE}{STRING}
++STR_CHEAT_RESET_STATION                                         :{LTBLUE}Enable Resetting of Stations: {ORANGE}{STRING}
+ 
+ STR_HEADING_FOR_WAYPOINT                                        :{LTBLUE}Heading for {WAYPOINT}
+ STR_HEADING_FOR_WAYPOINT_VEL                                    :{LTBLUE}Heading for {WAYPOINT}, {VELOCITY}
+@@ -2740,6 +2741,9 @@
+ STR_BUILD_DATE                                                  :{BLACK}Built: {LTBLUE}{DATE_LONG}
+ STR_MULTIPLAYER_PAUSED                                          :{WHITE}Game is paused.{}Command cannot be executed
+ 
++STR_RESET_STATION                                               :{BLACK}* RESET *
++STR_RESET_STATION_TIP                                           :{BLACK}When pressing this button the Station is reset, as if it was newly built.
++
+ STR_PERFORMANCE_DETAIL                                          :{WHITE}Detailed performance rating
+ STR_PERFORMANCE_DETAIL_KEY                                      :{BLACK}Detail
+ STR_PERFORMANCE_DETAIL_AMOUNT_CURRENCY                          :{BLACK}({CURRCOMPACT}/{CURRCOMPACT})
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2472)
++++ variables.h	(working copy)
+@@ -243,6 +243,7 @@
+ 	Cheat switch_climate;
+ 	Cheat change_date;				//changes date ingame
+ 	Cheat setup_prod;				//setup raw-material production in game
++	Cheat reset_station;		// allow resetting of Stations
+ } Cheats;
+ 
+ VARDEF Cheats _cheats;
+Index: station_gui.c
+===================================================================
+--- station_gui.c	(revision 2472)
++++ station_gui.c	(working copy)
+@@ -289,6 +289,25 @@
+ {   WIDGETS_END},
+ };
+ 
++static const Widget _station_view_expanded_cheat_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,	STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   237,   248,     0,    13, 0x0,	STR_STICKY_BUTTON},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   236,    14,    65, 0x0,	STR_NULL},
++{  WWT_SCROLLBAR,   RESIZE_NONE,    14,   237,   248,    14,    65, 0x0,	STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{      WWT_EMPTY,   RESIZE_NONE,     0,     0,     0,     0,     0, 0x0,	STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   248,    66,   197, 0x0,	STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,   198,   209, STR_00E4_LOCATION,	STR_3053_CENTER_MAIN_VIEW_ON_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,   198,   209, STR_3033_ACCEPTS,	STR_3056_SHOW_LIST_OF_ACCEPTED_CARGO},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   192,   198,   209, STR_0130_RENAME,	STR_3055_CHANGE_NAME_OF_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   206,   198,   209, STR_TRAIN,	STR_SCHEDULED_TRAINS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,   198,   209, STR_LORRY,	STR_SCHEDULED_ROAD_VEHICLES_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,   198,   209, STR_PLANE,	STR_SCHEDULED_AIRCRAFT_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,   198,   209, STR_SHIP,	STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   248,   210,   221, STR_RESET_STATION,	STR_RESET_STATION_TIP },
++{   WIDGETS_END},
++};
++
+ static const Widget _station_view_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -307,6 +326,25 @@
+ {   WIDGETS_END},
+ };
+ 
++static const Widget _station_view_cheat_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,	STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   237,   248,     0,    13, 0x0,	STR_STICKY_BUTTON},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   236,    14,    65, 0x0,	STR_NULL},
++{  WWT_SCROLLBAR,   RESIZE_NONE,    14,   237,   248,    14,    65, 0x0,	STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   248,    66,    97, 0x0,	STR_NULL},
++{      WWT_EMPTY,   RESIZE_NONE,     0,     0,     0,     0,     0, 0x0,	STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,    98,   109, STR_00E4_LOCATION,	STR_3053_CENTER_MAIN_VIEW_ON_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,    98,   109, STR_3032_RATINGS,	STR_3054_SHOW_STATION_RATINGS},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   192,    98,   109, STR_0130_RENAME,	STR_3055_CHANGE_NAME_OF_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   206,    98,   109, STR_TRAIN,	STR_SCHEDULED_TRAINS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,    98,   109, STR_LORRY,	STR_SCHEDULED_ROAD_VEHICLES_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,    98,   109, STR_PLANE,	STR_SCHEDULED_AIRCRAFT_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,    98,   109, STR_SHIP,	STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   248,   110,   121, STR_RESET_STATION,	STR_NULL},
++{   WIDGETS_END},
++};
++
+ static void DrawStationViewWindow(Window *w)
+ {
+ 	Station *st;
+@@ -331,7 +369,7 @@
+ 	}
+ 	SetVScrollCount(w, num);
+ 
+-	w->disabled_state = st->owner == _local_player ? 0 : (1 << 9);
++	w->disabled_state = st->owner == _local_player ? 0 : (1 << 9) | (1 << 14);
+ 
+ 	if (!(st->facilities & FACIL_TRAIN)) SETBIT(w->disabled_state,  10);
+ 	if (!(st->facilities & FACIL_TRUCK_STOP) &&
+@@ -397,7 +435,8 @@
+ 		}
+ 	} while (pos > -5 && ++i != 12);
+ 
+-	if (IsWindowOfPrototype(w, _station_view_widgets)) {
++	if (IsWindowOfPrototype(w, _station_view_widgets) ||
++		IsWindowOfPrototype(w, _station_view_cheat_widgets) ) {
+ 		char *b = _userstring;
+ 
+ 		b = InlineString(b, STR_000C_ACCEPTS);
+@@ -436,7 +475,38 @@
+ 	}
+ }
+ 
++int32 ClickResetStationCheat(int32 p1, int32 p2)
++{
++	Window *w;
+ 
++	for (w = _windows; w != _last_window; ++w) {
++		if (w->window_class == WC_STATION_VIEW) {
++			/* toggle height/widget set */
++			SetWindowDirty(w);
++			if (IsWindowOfPrototype(w, _station_view_expanded_widgets)
++				|| IsWindowOfPrototype(w, _station_view_expanded_cheat_widgets)) {
++				if (p1) {
++					AssignWidgetToWindow(w, _station_view_expanded_cheat_widgets);
++					w->height = 222;
++				} else {
++					AssignWidgetToWindow(w, _station_view_expanded_widgets);
++					w->height = 210;
++				}
++			} else {
++				if (p1) {
++					AssignWidgetToWindow(w, _station_view_cheat_widgets);
++					w->height = 122;
++				} else {
++					AssignWidgetToWindow(w, _station_view_widgets);
++					w->height = 110;
++				}
++			}
++			SetWindowDirty(w);
++		}
++	}
++	return 0;
++}
++
+ static void StationViewWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -446,62 +516,91 @@
+ 
+ 	case WE_CLICK:
+ 		switch(e->click.widget) {
+-		case 7:
+-			ScrollMainWindowToTile(GetStation(w->window_number)->xy);
+-			break;
++			case 7: { 
++				ScrollMainWindowToTile(GetStation(w->window_number)->xy);
++				break;
++			}
++			case 8: {
++				SetWindowDirty(w);
++				/* toggle height/widget set */
++				if (IsWindowOfPrototype(w, _station_view_expanded_widgets)
++					|| IsWindowOfPrototype(w, _station_view_expanded_cheat_widgets)) {
++					if (_cheats.reset_station.value) {
++						AssignWidgetToWindow(w, _station_view_cheat_widgets);
++						w->height = 122;
++					} else {
++						AssignWidgetToWindow(w, _station_view_widgets);
++						w->height = 110;
++					}
++				} else {
++					if (_cheats.reset_station.value) {
++						AssignWidgetToWindow(w, _station_view_expanded_cheat_widgets);
++						w->height = 222;
++					} else {
++						AssignWidgetToWindow(w, _station_view_expanded_widgets);
++						w->height = 210;
++					}
++				}
+ 
+-		case 8:
+-			SetWindowDirty(w);
+-
+-			/* toggle height/widget set */
+-			if (IsWindowOfPrototype(w, _station_view_expanded_widgets)) {
+-				AssignWidgetToWindow(w, _station_view_widgets);
+-				w->height = 110;
+-			} else {
+-				AssignWidgetToWindow(w, _station_view_expanded_widgets);
+-				w->height = 210;
++				SetWindowDirty(w);
++				break;
+ 			}
++			case 9: {
++				Station *st = GetStation(w->window_number);
++				SetDParam(0, st->town->townnametype);
++				SetDParam(1, st->town->townnameparts);
++				ShowQueryString(st->string_id, STR_3030_RENAME_STATION_LOADING, 31, 180, w->window_class, w->window_number);
++			}	break;
++			case 10: { /* Show a list of scheduled trains to this station */
++				const Station *st = GetStation(w->window_number);
++				ShowPlayerTrains(st->owner, w->window_number);
++				break;
++			}
++			case 11: { /* Show a list of scheduled road-vehicles to this station */
++				const Station *st = GetStation(w->window_number);
++				ShowPlayerRoadVehicles(st->owner, w->window_number);
++				break;
++			}
++			case 12: { /* Show a list of scheduled aircraft to this station */
++				const Station *st = GetStation(w->window_number);
++				/* Since oilrigs have no owners, show the scheduled aircraft of current player */
++				PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
++				ShowPlayerAircraft(owner, w->window_number);
++				break;
++			}
++			case 13: { /* Show a list of scheduled ships to this station */
++				const Station *st = GetStation(w->window_number);
++				/* Since oilrigs/bouys have no owners, show the scheduled ships of current player */
++				PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
++				ShowPlayerShips(owner, w->window_number);
++				break;
++			}
++			case 14: { // Reset Station
++				if (_cheats.reset_station.value) {
++					Station *st = GetStation(w->window_number);
++					GoodsEntry *ge;
+ 
+-			SetWindowDirty(w);
+-			break;
++					for(ge = st->goods; ge != endof(st->goods); ge++) {
++						ge->last_speed = 0;
++						ge->waiting_acceptance = 0;
++						ge->days_since_pickup = 0;
++						ge->enroute_from = INVALID_STATION;
++						ge->enroute_time = 0;
++						ge->rating = RATING_START_VALUE;
++						ge->last_age = INVALID_AGE;
++						ge->feeder_profit = 0;
++					}
++					st->had_vehicle_of_type = 0;
++					st->time_since_load = INVALID_TIME;
++					st->time_since_unload = INVALID_TIME;
++					st->last_vehicle = INVALID_VEHICLE;
+ 
+-		case 9: {
+-			Station *st = GetStation(w->window_number);
+-			SetDParam(0, st->town->townnametype);
+-			SetDParam(1, st->town->townnameparts);
+-			ShowQueryString(st->string_id, STR_3030_RENAME_STATION_LOADING, 31, 180, w->window_class, w->window_number);
+-		}	break;
+-
+-		case 10: { /* Show a list of scheduled trains to this station */
+-			const Station *st = GetStation(w->window_number);
+-			ShowPlayerTrains(st->owner, w->window_number);
+-			break;
++					SetWindowDirty(w);
++				}
++				break;
++ 			}
+ 		}
+-
+-		case 11: { /* Show a list of scheduled road-vehicles to this station */
+-			const Station *st = GetStation(w->window_number);
+-			ShowPlayerRoadVehicles(st->owner, w->window_number);
+-			break;
+-		}
+-
+-		case 12: { /* Show a list of scheduled aircraft to this station */
+-			const Station *st = GetStation(w->window_number);
+-			/* Since oilrigs have no owners, show the scheduled aircraft of current player */
+-			PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
+-			ShowPlayerAircraft(owner, w->window_number);
+-			break;
+-		}
+-
+-		case 13: { /* Show a list of scheduled ships to this station */
+-			const Station *st = GetStation(w->window_number);
+-			/* Since oilrigs/bouys have no owners, show the scheduled ships of current player */
+-			PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
+-			ShowPlayerShips(owner, w->window_number);
+-			break;
+-		}
+-		}
+ 		break;
+-
+ 	case WE_ON_EDIT_TEXT: {
+ 		if (e->edittext.str[0] != '\0') {
+ 			Station* st = GetStation(w->window_number);
+@@ -525,7 +624,6 @@
+ 	}
+ }
+ 
+-
+ static const WindowDesc _station_view_desc = {
+ 	-1, -1, 249, 110,
+ 	WC_STATION_VIEW,0,
+@@ -534,12 +632,23 @@
+ 	StationViewWndProc
+ };
+ 
++static const WindowDesc _station_view_cheat_desc = {
++	-1, -1, 249, 122,
++	WC_STATION_VIEW,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_station_view_cheat_widgets,
++	StationViewWndProc
++};
++
+ void ShowStationViewWindow(int station)
+ {
+ 	Window *w;
+ 	byte color;
+ 
+-	w = AllocateWindowDescFront(&_station_view_desc, station);
++	if (_cheats.reset_station.value)
++		w = AllocateWindowDescFront(&_station_view_cheat_desc, station);
++	else
++		w = AllocateWindowDescFront(&_station_view_desc, station);
+ 	if (w) {
+ 		color = GetStation(w->window_number)->owner;
+ 		if (color != 0x10)
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2472)
++++ vehicle.h	(working copy)
+@@ -141,7 +141,7 @@
+ 
+ struct Vehicle {
+ 	byte type;	// type, ie roadven,train,ship,aircraft,special
+-	byte subtype;     // subtype (Filled with values from EffectVehicles or TrainSubTypes)(Filled with values from EffectVehicles or TrainSubTypes)
++	byte subtype;     // subtype (Filled with values from EffectVehicles or TrainSubTypes)
+ 
+ 	VehicleID index;	// NOSAVE: Index in vehicle array
+ 
+Index: station.h
+===================================================================
+--- station.h	(revision 2472)
++++ station.h	(working copy)
+@@ -25,8 +25,11 @@
+ enum {
+ 	INVALID_STATION = 0xFFFF,
+ 	INVALID_SLOT = 0xFFFF,
++	INVALID_AGE = 0xFF,
++	INVALID_TIME = 0xFF,
+ 	NUM_SLOTS = 2,
+ 	ROAD_STOP_LIMIT = 8,
++	RATING_START_VALUE = 175,
+ };
+ 
+ typedef uint16 StationID;
+@@ -319,4 +322,6 @@
+ 	return (_map5[tile] - 0x43) & 3;
+ }
+ 
++int32 ClickResetStationCheat(int32 p1, int32 p2);
++
+ #endif /* STATION_H */

@@ -1,0 +1,596 @@
+Index: ai_new.c
+===================================================================
+--- ai_new.c	(revision 2890)
++++ ai_new.c	(working copy)
+@@ -59,7 +59,8 @@
+ 	p->ainew.last_vehiclecheck_date = _date;
+ 
+ 	// We ALWAYS start with a bus route.. just some basic money ;)
+-	p->ainew.action = AI_ACTION_BUS_ROUTE;
++	//p->ainew.action = AI_ACTION_BUS_ROUTE;
++	p->ainew.action = AI_ACTION_TRAIN_PASSENGER_ROUTE;
+ 
+ 	// Let's popup the news, and after that, start building..
+ 	p->ainew.state = AI_STATE_WAKE_UP;
+@@ -75,12 +76,12 @@
+ static void AiNew_State_Nothing(Player *p) {
+     assert(p->ainew.state == AI_STATE_NOTHING);
+     // If we are done idling, start over again
+-	if (p->ainew.idle == 0) p->ainew.idle = RandomRange(DAY_TICKS * 2) + DAY_TICKS;
+-	if (--p->ainew.idle == 0) {
++	//if (p->ainew.idle == 0) p->ainew.idle = RandomRange(DAY_TICKS * 2) + DAY_TICKS;
++	//if (--p->ainew.idle == 0) {
+ 		// We are done idling.. what you say? Let's do something!
+ 		// I mean.. the next tick ;)
+ 		p->ainew.state = AI_STATE_WAKE_UP;
+-	}
++	//}
+ }
+ 
+ // This function picks out a task we are going to do.
+@@ -118,14 +119,18 @@
+ 		} else if (c < 100 && !_patches.ai_disable_veh_roadveh) {
+ 			// Do we have any spots for road-vehicles left open?
+ 			if (GetFreeUnitNumber(VEH_Road) <= _patches.max_roadveh) {
+-				if (c < 85) p->ainew.action = AI_ACTION_TRUCK_ROUTE;
+-				else p->ainew.action = AI_ACTION_BUS_ROUTE;
++				if (c < 50)
++					p->ainew.action = AI_ACTION_TRUCK_ROUTE;
++				else if (c < 75)
++					p->ainew.action = AI_ACTION_MAIL_ROUTE;
++				else
++					p->ainew.action = AI_ACTION_BUS_ROUTE;
+ 			}
+-		}/* else if (c < 200 && !_patches.ai_disable_veh_train) {
++		} else if (c < 200 && !_patches.ai_disable_veh_train) {
+ 			if (GetFreeUnitNumber(VEH_Train) <= _patches.max_trains) {
+-				p->ainew.action = AI_ACTION_TRAIN_ROUTE;
++				p->ainew.action = AI_ACTION_TRAIN_PASSENGER_ROUTE;
+ 			}
+-		}*/
++		}
+ 
+ 		p->ainew.counter = 0;
+ 	}
+@@ -135,17 +140,18 @@
+ 		return;
+ 	}
+ 
++	// do we really needs these checks to see if vehicles are disabled?
+ 	if (_patches.ai_disable_veh_roadveh && (
+-		p->ainew.action == AI_ACTION_BUS_ROUTE || p->ainew.action == AI_ACTION_TRUCK_ROUTE)) {
++		p->ainew.action == AI_ACTION_BUS_ROUTE || p->ainew.action == AI_ACTION_TRUCK_ROUTE || p->ainew.action == AI_ACTION_MAIL_ROUTE)) {
+ 		p->ainew.action = AI_ACTION_NONE;
+ 		return;
+ 	}
+-
+-	if (_patches.ai_disable_veh_roadveh && (
+-		p->ainew.action == AI_ACTION_BUS_ROUTE || p->ainew.action == AI_ACTION_TRUCK_ROUTE)) {
++	
++	if (_patches.ai_disable_veh_train && (
++		p->ainew.action == AI_ACTION_TRAIN_PASSENGER_ROUTE)) {
+ 		p->ainew.action = AI_ACTION_NONE;
+ 		return;
+-	}
++	}	
+ 
+ 	if (p->ainew.action == AI_ACTION_REPAY_LOAN && money > AI_MINIMUM_LOAN_REPAY_MONEY) {
+ 		// We start repaying some money..
+@@ -170,6 +176,7 @@
+ 		p->ainew.tbt = AI_BUS; // Bus-route
+ 		return;
+ 	}
++	
+ 	if (p->ainew.action == AI_ACTION_TRUCK_ROUTE && money > AI_MINIMUM_TRUCK_ROUTE_MONEY) {
+ 		if (GetFreeUnitNumber(VEH_Road) > _patches.max_roadveh) {
+ 			p->ainew.action = AI_ACTION_NONE;
+@@ -182,6 +189,28 @@
+ 		return;
+ 	}
+ 
++	if (p->ainew.action == AI_ACTION_MAIL_ROUTE && money > AI_MINIMUM_MAIL_ROUTE_MONEY) {
++		if (GetFreeUnitNumber(VEH_Road) > _patches.max_roadveh) {
++			p->ainew.action = AI_ACTION_NONE;
++			return;
++		}
++		p->ainew.cargo = AI_NEED_CARGO;
++		p->ainew.state = AI_STATE_LOCATE_ROUTE;
++		p->ainew.tbt = AI_MAIL; // Mail-route
++		return;
++	}
++	
++	if (p->ainew.action == AI_ACTION_TRAIN_PASSENGER_ROUTE && money > AI_MINIMUM_TRAIN_PASSENGER_ROUTE_MONEY) {
++		if (GetFreeUnitNumber(VEH_Train) > _patches.max_trains) {
++			p->ainew.action = AI_ACTION_NONE;
++			return;
++		}
++		p->ainew.cargo = AI_NEED_CARGO;
++		p->ainew.state = AI_STATE_LOCATE_ROUTE;
++		p->ainew.tbt = AI_TRAIN;
++		return;
++	}	
++
+ 	p->ainew.state = AI_STATE_NOTHING;
+ }
+ 
+@@ -218,6 +247,8 @@
+ 			if (st->owner == _current_player) {
+ 				// Are we talking busses?
+ 				if (p->ainew.tbt == AI_BUS && (FACIL_BUS_STOP & st->facilities) != FACIL_BUS_STOP) continue;
++				// How about mail?
++				if (p->ainew.tbt == AI_TRUCK && (FACIL_TRUCK_STOP & st->facilities) != FACIL_TRUCK_STOP) continue;
+ 				// Is it the same city as we are in now?
+ 				if (st->town != t) continue;
+ 				// When was this station build?
+@@ -333,17 +364,30 @@
+     	p->ainew.from_ic = -1;
+     	p->ainew.to_ic = -1;
+    	    if (p->ainew.tbt == AI_BUS) {
+-   	    	// For now we only have a passenger route
+-   	    	p->ainew.cargo = CT_PASSENGERS;
++			// For now we only have a passenger route
++			p->ainew.cargo = CT_PASSENGERS;
+ 
+-	    	// Find a route to cities
+-	    	p->ainew.from_type = AI_CITY;
+-	    	p->ainew.to_type = AI_CITY;
++			// Find a route to cities
++			p->ainew.from_type = AI_CITY;
++			p->ainew.to_type = AI_CITY;
+ 		} else if (p->ainew.tbt == AI_TRUCK) {
+-   	    	p->ainew.cargo = AI_NO_CARGO;
++			p->ainew.cargo = AI_NO_CARGO;
++			
++			// Find a route to industries
++			p->ainew.from_type = AI_INDUSTRY;
++			p->ainew.to_type = AI_INDUSTRY;
++		} else if (p->ainew.tbt == AI_MAIL) {
++			p->ainew.cargo = CT_MAIL;
+ 
+-	    	p->ainew.from_type = AI_INDUSTRY;
+-	    	p->ainew.to_type = AI_INDUSTRY;
++			// Find a route to cities
++			p->ainew.from_type = AI_CITY;
++			p->ainew.to_type = AI_CITY;
++		} else if (p->ainew.tbt == AI_TRAIN) {
++			p->ainew.cargo = CT_PASSENGERS;
++
++			// Find a route to cities
++			p->ainew.from_type = AI_CITY;
++			p->ainew.to_type = AI_CITY;	
+ 		}
+ 
+     	// Now we are doing initing, we wait one tick
+@@ -434,6 +478,29 @@
+ 
+    				return;
+    			}
++   		
++   		} else if (p->ainew.from_type == AI_CITY && p->ainew.tbt == AI_MAIL) {
++   			int max_cargo = GetTown(p->ainew.from_ic)->max_mail + GetTown(p->ainew.temp)->max_mail;
++   			max_cargo -= GetTown(p->ainew.from_ic)->act_mail + GetTown(p->ainew.temp)->act_mail;
++   			// max_cargo is now the amount of cargo we can move between the two cities
++   			// If it is more than the distance, we allow it
++   			if (DistanceManhattan(GetTown(p->ainew.from_ic)->xy, GetTown(p->ainew.temp)->xy) <= max_cargo * AI_LOCATEROUTE_MAIL_CARGO_DISTANCE) {
++   				// We found a good city/industry, save the data of it
++   				p->ainew.to_ic = p->ainew.temp;
++   				p->ainew.state = AI_STATE_FIND_STATION;
++
++   				DEBUG(ai,1)(
++						"[AiNew - LocateRoute] Found mail-route of %d tiles long (from %d to %d)",
++						DistanceManhattan(GetTown(p->ainew.from_ic)->xy, GetTown(p->ainew.temp)->xy),
++						p->ainew.from_ic,
++						p->ainew.temp
++					);
++
++   				p->ainew.from_tile = 0;
++   				p->ainew.to_tile = 0;
++
++   				return;
++   			}   			
+    		} else if (p->ainew.tbt == AI_TRUCK) {
+          	bool found = false;
+          	int max_cargo = 0;
+@@ -493,6 +560,29 @@
+ 	   				return;
+ 	   			}
+    			}
++   		} else if (p->ainew.tbt == AI_TRAIN) {
++    			int max_cargo = GetTown(p->ainew.from_ic)->max_pass + GetTown(p->ainew.temp)->max_pass;
++   			max_cargo -= GetTown(p->ainew.from_ic)->act_pass + GetTown(p->ainew.temp)->act_pass;
++   			// max_cargo is now the amount of cargo we can move between the two cities
++   			// If it is more than the distance, we allow it
++   			
++   			if (DistanceManhattan(GetTown(p->ainew.from_ic)->xy, GetTown(p->ainew.temp)->xy) <= max_cargo * AI_LOCATEROUTE_TRAIN_PASSENGER_CARGO_DISTANCE) {
++   				// We found a good city/industry, save the data of it
++   				p->ainew.to_ic = p->ainew.temp;
++   				p->ainew.state = AI_STATE_FIND_STATION;
++
++   				DEBUG(ai,1)(
++						"[AiNew - LocateRoute] Found passenger-route of %d tiles long (from %d to %d)",
++						DistanceManhattan(GetTown(p->ainew.from_ic)->xy, GetTown(p->ainew.temp)->xy),
++						p->ainew.from_ic,
++						p->ainew.temp
++					);
++
++   				p->ainew.from_tile = 0;
++   				p->ainew.to_tile = 0;
++
++   				return;
++   			}
+    		}
+    	}
+ 
+@@ -583,7 +673,10 @@
+ 	FOR_ALL_STATIONS(st) {
+ 		if (st->xy != 0) {
+ 			if (st->owner == _current_player) {
+-				if (p->ainew.tbt == AI_BUS && (FACIL_BUS_STOP & st->facilities) == FACIL_BUS_STOP) {
++				// First we look at road vehicles
++				if (	(p->ainew.tbt == AI_BUS && (FACIL_BUS_STOP & st->facilities) == FACIL_BUS_STOP)
++					|| (p->ainew.tbt == AI_MAIL && (FACIL_TRUCK_STOP & st->facilities) == FACIL_TRUCK_STOP)
++					) {
+ 					if (st->town == town) {
+ 						// Check how much cargo there is left in the station
+ 						if ((st->goods[p->ainew.cargo].waiting_acceptance & 0xFFF) > RoadVehInfo(i)->capacity * AI_STATION_REUSE_MULTIPLER) {
+@@ -599,6 +692,23 @@
+ 						count++;
+ 					}
+ 				}
++				// Then trains
++				if (p->ainew.tbt == AI_TRAIN && (FACIL_TRAIN & st->facilities) == FACIL_TRAIN) {
++					if (st->town == town) {
++						// Check how much cargo there is left in the station
++						if ((st->goods[p->ainew.cargo].waiting_acceptance & 0xFFF) > RailVehInfo(i)->capacity * AI_STATION_REUSE_MULTIPLER) {
++							if (AiNew_CheckVehicleStation(p, st)) {
++								// We did found a station that was good enough!
++								new_tile = st->xy;
++								// Cheap way to get the direction of the station...
++								//  Bus stations save it as 0x47 .. 0x4A, so decrease it with 0x47, and tada!
++								direction = _m[st->xy].m5 - 0x47;
++								break;
++							}
++						}
++						count++;
++					}
++				}				
+ 			}
+ 		}
+ 	}
+@@ -611,7 +721,7 @@
+ 		return;
+ 	}
+ 
+-    if (new_tile == 0 && p->ainew.tbt == AI_BUS) {
++    if (new_tile == 0 && (p->ainew.tbt == AI_BUS || p->ainew.tbt == AI_MAIL)) {
+ 	    uint x, y, i = 0;
+ 	    int r;
+ 	    uint best;
+@@ -671,6 +781,64 @@
+ 		//  so the pathfinder routine can work it out!
+ 		new_tile = AI_STATION_RANGE;
+ 		direction = AI_PATHFINDER_NO_DIRECTION;
++	} else if (new_tile == 0 && p->ainew.tbt == AI_TRAIN) {
++		// We need to do the same as the bus stop finder, but we need a
++		// bigger station so we try and destroy some stuff
++
++	    uint x, y, xn, yn, i = 0;
++	    int r;
++	    uint best;
++	    uint accepts[NUM_CARGO];
++	    TileIndex found_spot[AI_FINDSTATION_TILE_RANGE*AI_FINDSTATION_TILE_RANGE*4];
++	    uint found_best[AI_FINDSTATION_TILE_RANGE*AI_FINDSTATION_TILE_RANGE*4];
++	    // To find a good spot we scan a range from the center, a get the point
++	    //  where we get the most cargo and where it is buildable.
++	    // TODO: also check for station of myself and make sure we are not
++	    //   taking eachothers passangers away (bad result when it does not)
++	    for (x = TileX(tile) - AI_FINDSTATION_TILE_RANGE; x <= TileX(tile) + AI_FINDSTATION_TILE_RANGE; x++) {
++	    	for (y = TileY(tile) - AI_FINDSTATION_TILE_RANGE; y <= TileY(tile) + AI_FINDSTATION_TILE_RANGE; y++) {
++	    		new_tile = TileXY(x, y);
++	    		if ((IsTileType(new_tile, MP_CLEAR) || IsTileType(new_tile, MP_TREES))) {
++	    			// This tile we can build on!
++	    			// Check acceptance
++						// XXX - Get the catchment area
++	    			GetAcceptanceAroundTiles(accepts, new_tile, 6, 2, 4);
++	    			// >> 3 == 0 means no cargo
++	    			if (accepts[p->ainew.cargo] >> 3 == 0) continue;
++	    			// See if we can build the station
++   	    			r = AiNew_Build_Station(p, p->ainew.tbt, new_tile, 6, 2, 0, DC_QUERY_COST);
++   	    			if (r == CMD_ERROR) continue;
++	    			// We can build it, so add it to found_spot
++	    			found_spot[i] = new_tile;
++	    			found_best[i++] = accepts[p->ainew.cargo];
++	    		}
++	    	}
++	    }
++
++	    // If i is still zero, we did not found anything :(
++	    if (i == 0) {
++	    	p->ainew.state = AI_STATE_NOTHING;
++	    	return;
++	    }
++
++	    // Go through all the found_best and check which has the highest value
++	    best = 0;
++	    new_tile = 0;
++
++	    for (x=0;x<i;x++) {
++	    	if (found_best[x] > best ||
++	     		(found_best[x] == best && DistanceManhattan(tile, new_tile) > DistanceManhattan(tile, found_spot[x]))) {
++	     		new_tile = found_spot[x];
++	     		best = found_best[x];
++	    	}
++	    }
++
++		// See how much it is going to cost us...
++		r = AiNew_Build_Station(p, p->ainew.tbt, new_tile, 6, 2, 0, DC_QUERY_COST);
++		
++		p->ainew.new_cost += r;
++
++		direction = 0;
+ 	}
+ 
+ 	if (p->ainew.from_tile == 0) {
+@@ -738,6 +906,7 @@
+ 		return;
+ 	}
+ 	if (r == AYSTAR_FOUND_END_NODE) {
++		DEBUG(ai,0)("We have a route!");	
+ 		// We found the end-point
+ 		p->ainew.temp = -1;
+ 		p->ainew.state = AI_STATE_FIND_DEPOT;
+@@ -828,6 +997,7 @@
+ 
+ 	// Failed to find a depot?
+ 	p->ainew.state = AI_STATE_NOTHING;
++	DEBUG(ai,0)("Couldn't find a place to build a depot :(");
+ }
+ 
+ 
+@@ -837,44 +1007,55 @@
+ //  and hussle that, and you know how many vehicles there are needed.
+ // It returns the cost for the vehicles
+ static int AiNew_HowManyVehicles(Player *p) {
+-	if (p->ainew.tbt == AI_BUS) {
+-     	// For bus-routes we look at the time before we are back in the station
++	if (p->ainew.tbt == AI_BUS || p->ainew.tbt == AI_MAIL) {
++		// For bus-routes we look at the time before we are back in the station
+ 		int i, length, tiles_a_day;
+ 		int amount;
++		
+ 		i = AiNew_PickVehicle(p);
+ 		if (i == -1) return 0;
+-    	// Passenger run.. how long is the route?
+-    	length = p->ainew.path_info.route_length;
+-    	// Calculating tiles a day a vehicle moves is not easy.. this is how it must be done!
+-    	tiles_a_day = RoadVehInfo(i)->max_speed * DAY_TICKS / 256 / 16;
+-    	// We want a vehicle in a station once a month at least, so, calculate it!
+-    	// (the * 2 is because we have 2 stations ;))
+-			amount = length * 2 * 2 / tiles_a_day / 30;
+-    	if (amount == 0) amount = 1;
+-   		return amount;
++		
++		// Passenger run.. how long is the route?
++		length = p->ainew.path_info.route_length;
++		
++		// Calculating tiles a day a vehicle moves is not easy.. this is how it must be done!
++		tiles_a_day = RoadVehInfo(i)->max_speed * DAY_TICKS / 256 / 16;
++		
++		// We want a vehicle in a station once a month at least, so, calculate it!
++		// (the * 2 is because we have 2 stations ;))
++		amount = length * 2 * 2 / tiles_a_day / 30;
++		if (amount == 0) amount = 1;
++			return amount;
+ 	} else if (p->ainew.tbt == AI_TRUCK) {
+-     	// For truck-routes we look at the cargo
++		// For truck-routes we look at the cargo
+ 		int i, length, amount, tiles_a_day;
+ 		int max_cargo;
++		
+ 		i = AiNew_PickVehicle(p);
+ 		if (i == -1) return 0;
+-    	// Passenger run.. how long is the route?
+-    	length = p->ainew.path_info.route_length;
+-    	// Calculating tiles a day a vehicle moves is not easy.. this is how it must be done!
+-    	tiles_a_day = RoadVehInfo(i)->max_speed * DAY_TICKS / 256 / 16;
+-    	if (p->ainew.from_deliver)
+-    		max_cargo = GetIndustry(p->ainew.from_ic)->total_production[0];
+-    	else
+-    		max_cargo = GetIndustry(p->ainew.to_ic)->total_production[0];
++		
++		// Cargo run.. how long is the route?
++		length = p->ainew.path_info.route_length;
++		
++		// Calculating tiles a day a vehicle moves is not easy.. this is how it must be done!
++		tiles_a_day = RoadVehInfo(i)->max_speed * DAY_TICKS / 256 / 16;
++		
++		if (p->ainew.from_deliver)
++			max_cargo = GetIndustry(p->ainew.from_ic)->total_production[0];
++		else
++			max_cargo = GetIndustry(p->ainew.to_ic)->total_production[0];
+ 
+-    	// This is because moving 60% is more than we can dream of!
+-    	max_cargo *= 0.6;
+-    	// We want all the cargo to be gone in a month.. so, we know the cargo it delivers
+-    	//  we know what the vehicle takes with him, and we know the time it takes him
+-    	//  to get back here.. now let's do some math!
+-			amount = 2 * length * max_cargo / tiles_a_day / 30 / RoadVehInfo(i)->capacity;
+-    	amount += 1;
+-    	return amount;
++		// This is because moving 60% is more than we can dream of!
++		max_cargo *= 0.6;
++		
++		// We want all the cargo to be gone in a month.. so, we know the cargo it delivers
++		//  we know what the vehicle takes with him, and we know the time it takes him
++		//  to get back here.. now let's do some math!
++		amount = 2 * length * max_cargo / tiles_a_day / 30 / RoadVehInfo(i)->capacity;
++    		amount += 1;
++    		return amount;
++    	} else if (p->ainew.tbt == AI_TRAIN) {
++    		return 1;
+ 	} else {
+ 		// Currently not supported
+ 		return 0;
+@@ -894,6 +1075,8 @@
+     //  new_cost already contains the cost of the stations
+     p->ainew.path_info.position = -1;
+ 
++	DEBUG(ai,0)("Verifying route...");
++
+     do {
+ 	    p->ainew.path_info.position++;
+ 	    p->ainew.new_cost += AiNew_Build_RoutePart(p, &p->ainew.path_info, DC_QUERY_COST);
+@@ -905,6 +1088,7 @@
+ 	// If res == 0, no vehicle was found, or an other problem did occour
+ 	if (res == 0) {
+ 		p->ainew.state = AI_STATE_NOTHING;
++		DEBUG(ai,0)("No vehicles :(");
+ 		return;
+ 	}
+ 	p->ainew.amount_veh = res;
+@@ -947,20 +1131,27 @@
+ 	int res = 0;
+     assert(p->ainew.state == AI_STATE_BUILD_STATION);
+     if (p->ainew.temp == 0) {
+-    	if (!IsTileType(p->ainew.from_tile, MP_STATION))
+-    		res = AiNew_Build_Station(p, p->ainew.tbt, p->ainew.from_tile, 0, 0, p->ainew.from_direction, DC_EXEC);
++    	if (!IsTileType(p->ainew.from_tile, MP_STATION)) {
++    		if (p->ainew.tbt == AI_TRAIN)
++    			res = AiNew_Build_Station(p, p->ainew.tbt, p->ainew.from_tile, 6, 2, p->ainew.from_direction, DC_EXEC);
++    		else
++    			res = AiNew_Build_Station(p, p->ainew.tbt, p->ainew.from_tile, 0, 0, p->ainew.from_direction, DC_EXEC);
+    	}
+-    else {
+-       	if (!IsTileType(p->ainew.to_tile, MP_STATION))
+-       	   	res = AiNew_Build_Station(p, p->ainew.tbt, p->ainew.to_tile, 0, 0, p->ainew.to_direction, DC_EXEC);
++    } else {
++       	if (!IsTileType(p->ainew.to_tile, MP_STATION)) {
++    		if (p->ainew.tbt == AI_TRAIN)
++    			res = AiNew_Build_Station(p, p->ainew.tbt, p->ainew.to_tile, 6, 2, p->ainew.to_direction, DC_EXEC);
++    		else
++    			res = AiNew_Build_Station(p, p->ainew.tbt, p->ainew.to_tile, 0, 0, p->ainew.to_direction, DC_EXEC);
++       	}
+     	p->ainew.state = AI_STATE_BUILD_PATH;
+     }
+     if (res == CMD_ERROR) {
+ 		DEBUG(ai,0)("[AiNew - BuildStation] Strange but true... station can not be build!");
+ 		p->ainew.state = AI_STATE_NOTHING;
+ 		// If the first station _was_ build, destroy it
+-		if (p->ainew.temp != 0)
+-			DoCommandByTile(p->ainew.from_tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++		//if (p->ainew.temp != 0)
++		//	DoCommandByTile(p->ainew.from_tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
+ 		return;
+     }
+     p->ainew.temp++;
+@@ -1215,7 +1406,6 @@
+ 				// TODO: make this piece of code
+ 			}
+ 
+-
+ 			// We are already sending him back
+ 			if (AiNew_GetSpecialVehicleFlag(p, v) & AI_VEHICLEFLAG_SELL) {
+ 				if (v->type == VEH_Road && IsTileDepotType(v->tile, TRANSPORT_ROAD) &&
+Index: ai_new.h
+===================================================================
+--- ai_new.h	(revision 2890)
++++ ai_new.h	(working copy)
+@@ -98,7 +98,11 @@
+ //  of the cargo in the other station, both stations can be 96 units away from eachother, if the
+ //  next number is 0.4.
+ #define AI_LOCATEROUTE_BUS_CARGO_DISTANCE 0.4
++#define AI_LOCATEROUTE_MAIL_CARGO_DISTANCE 0.4
+ #define AI_LOCATEROUTE_TRUCK_CARGO_DISTANCE 0.7
++
++#define AI_LOCATEROUTE_TRAIN_PASSENGER_CARGO_DISTANCE 0.4
++
+ // In whole tiles, the minimum distance for a truck route
+ #define AI_LOCATEROUTE_TRUCK_MIN_DISTANCE 30
+ 
+@@ -121,7 +125,9 @@
+ // If the most cheap route is build, how much is it going to cost..
+ // This is to prevent the AI from trying to build a route which can not be paid for
+ #define AI_MINIMUM_BUS_ROUTE_MONEY 25000
++#define AI_MINIMUM_MAIL_ROUTE_MONEY 35000
+ #define AI_MINIMUM_TRUCK_ROUTE_MONEY 35000
++#define AI_MINIMUM_TRAIN_PASSENGER_ROUTE_MONEY 10000
+ 
+ // The minimum amount of money before we are going to repay any money
+ #define AI_MINIMUM_LOAN_REPAY_MONEY 40000
+@@ -144,7 +150,7 @@
+ // How many days must there between vehicle checks
+ //  The more often, the less non-money-making lines there will be
+ //   but the unfair it may seem to a human player
+-#define AI_DAYS_BETWEEN_VEHICLE_CHECKS 30
++#define AI_DAYS_BETWEEN_VEHICLE_CHECKS 1
+ 
+ // How money profit does a vehicle needs to make to stay in order
+ //  This is the profit of this year + profit of last year
+@@ -200,6 +206,7 @@
+ 	AI_TRAIN = 0,
+ 	AI_BUS,
+ 	AI_TRUCK,
++	AI_MAIL,
+ };
+ 
+ enum {
+@@ -208,6 +215,8 @@
+ 	AI_ACTION_TRUCK_ROUTE,
+ 	AI_ACTION_REPAY_LOAN,
+ 	AI_ACTION_CHECK_ALL_VEHICLES,
++	AI_ACTION_MAIL_ROUTE,
++	AI_ACTION_TRAIN_PASSENGER_ROUTE,
+ };
+ 
+ // Used for from_type/to_type
+Index: ai_build.c
+===================================================================
+--- ai_build.c	(revision 2890)
++++ ai_build.c	(working copy)
+@@ -68,7 +68,8 @@
+ 
+ 	// Now, simply, build the bridge!
+ 	if (p->ainew.tbt == AI_TRAIN)
+-		return DoCommandByTile(tile_a, tile_b, (0<<8) + type2, flag | DC_AUTO, CMD_BUILD_BRIDGE);
++		//return DoCommandByTile(tile_a, tile_b, (0<<8) + type2, flag | DC_AUTO, CMD_BUILD_BRIDGE);
++		return DoCommandByTile(tile_a, tile_b, (0x80 << 8) + type2, flag | DC_AUTO, CMD_BUILD_BRIDGE);
+ 
+ 	return DoCommandByTile(tile_a, tile_b, (0x80 << 8) + type2, flag | DC_AUTO, CMD_BUILD_BRIDGE);
+ }
+@@ -100,6 +101,7 @@
+ 
+ 
+ 	if (PathFinderInfo->rail_or_road) {
++		// Build a railway
+ 		// Tunnel code
+      	if ((AI_PATHFINDER_FLAG_TUNNEL & route_extra[part]) != 0) {
+      		cost += DoCommandByTile(route[part], 0, 0, flag, CMD_BUILD_TUNNEL);
+@@ -217,8 +219,26 @@
+ // It returns vehicle_id or -1 if not found
+ int AiNew_PickVehicle(Player *p) {
+     if (p->ainew.tbt == AI_TRAIN) {
+-        // Not supported yet
+-        return -1;
++    	// Taken from the old AI --- eek!
++	int ret = CMD_ERROR;
++	int i;
++    
++	for (i = NUM_TRAIN_ENGINES - 1; i > 0; i--) {
++		const RailVehicleInfo *rvi = RailVehInfo(i);
++		const Engine* e = GetEngine(i);
++
++		if (!HASBIT(e->player_avail, _current_player) || rvi->flags & RVI_WAGON
++		    || e->railtype != 0 || e->reliability * 100 < AI_VEHICLE_MIN_RELIABILTY << 16)
++			continue;
++
++		// Can we build it?
++		ret = DoCommandByTile(0, i, 0, DC_QUERY_COST, CMD_BUILD_RAIL_VEHICLE);
++		if (!CmdFailed(ret)) break;
++	}
++       	// We did not find a vehicle :(
++       	if (CmdFailed(ret)) { return -1; }
++       	return i;		
++    
+     } else {
+         int start, count, i, ret = CMD_ERROR;
+         start = _cargoc.ai_roadveh_start[p->ainew.cargo];

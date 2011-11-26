@@ -1,0 +1,209 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2920)
++++ lang/english.txt	(working copy)
+@@ -2666,6 +2666,7 @@
+ STR_B004_UFO_LANDS_NEAR                                         :{BLACK}{BIGFONT}'UFO' lands near {TOWN}!
+ STR_B005_COAL_MINE_SUBSIDENCE_LEAVES                            :{BLACK}{BIGFONT}Coal mine subsidence leaves trail of destruction near {TOWN}!
+ STR_B006_FLOOD_VEHICLE_DESTROYED                                :{BLACK}{BIGFONT}Floods!{}At least {COMMA} missing, presumed dead after significant flooding!
++STR_B007_VOLCANO                                :{BLACK}{BIGFONT}Volcano!{}Riots begin as fire falls from the sky!
+ 
+ STR_BRIBE_FAILED                                                :{WHITE}Your attempted bribe has been
+ STR_BRIBE_FAILED_2                                              :{WHITE}discovered by a regional investigator
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 2920)
++++ viewport.c	(working copy)
+@@ -1806,6 +1806,14 @@
+ 	return ScrollMainWindowTo(TileX(tile) * 16 + 8, TileY(tile) * 16 + 8);
+ }
+ 
++void ShakeMainWindow(void)
++{
++	Window *w = FindWindowById(WC_MAIN_WINDOW, 0);
++
++	WP(w, vp_d).scrollpos_x += (Random() % 50) - 25;
++	WP(w, vp_d).scrollpos_y += (Random() % 50) - 25;
++}
++
+ void SetRedErrorSquare(TileIndex tile)
+ {
+ 	TileIndex old;
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2920)
++++ disaster_cmd.c	(working copy)
+@@ -45,6 +45,39 @@
+ 	}
+ }
+ 
++static bool DisasterClearSquare_More(TileIndex tile)
++{
++	if (!EnsureNoVehicle(tile))
++		return false;
++
++	switch (GetTileType(tile)) {
++		case MP_RAILWAY:
++			if (IS_HUMAN_PLAYER(GetTileOwner(tile))) DoClearSquare(tile);
++			return true;
++
++		case MP_HOUSE: {
++			byte p = _current_player;
++			_current_player = OWNER_NONE;
++			DoCommandByTile(tile, 0, 0, DC_EXEC, CMD_LANDSCAPE_CLEAR);
++			_current_player = p;
++			return true;
++		}
++
++		case MP_TREES:
++		case MP_CLEAR:
++		case MP_STREET:
++		case MP_TUNNELBRIDGE:
++		case MP_WATER:
++			DoClearSquare(tile);
++			return true;
++
++		default:
++			break;
++	}
++	
++	return false;
++}
++
+ static const SpriteID _disaster_images_1[] = {0xF41,0xF41,0xF41,0xF41,0xF41,0xF41,0xF41,0xF41};
+ static const SpriteID _disaster_images_2[] = {0xF44,0xF44,0xF44,0xF44,0xF44,0xF44,0xF44,0xF44};
+ static const SpriteID _disaster_images_3[] = {0xF4E,0xF4E,0xF4E,0xF4E,0xF4E,0xF4E,0xF4E,0xF4E};
+@@ -54,6 +87,7 @@
+ static const SpriteID _disaster_images_7[] = {0xF51,0xF51,0xF51,0xF51,0xF51,0xF51,0xF51,0xF51};
+ static const SpriteID _disaster_images_8[] = {0xF52,0xF52,0xF52,0xF52,0xF52,0xF52,0xF52,0xF52};
+ static const SpriteID _disaster_images_9[] = {0xF3E,0xF3E,0xF3E,0xF3E,0xF3E,0xF3E,0xF3E,0xF3E};
++static const SpriteID _disaster_images_10[] = {0,0,0,0,0,0,0,0};
+ 
+ static const SpriteID * const _disaster_images[] = {
+ 	_disaster_images_1,_disaster_images_1,
+@@ -63,6 +97,7 @@
+ 	_disaster_images_6,_disaster_images_6,
+ 	_disaster_images_7,_disaster_images_7,
+ 	_disaster_images_4,_disaster_images_5,
++	_disaster_images_10,
+ };
+ 
+ static void DisasterVehicleUpdateImage(Vehicle *v)
+@@ -669,7 +704,65 @@
+ 	v->direction = (v->direction + ((Random()&1)?2:-2))&7;
+ }
+ 
++void ShakeMainWindow(void);
+ 
++#include "debug.h"
++
++// This creates a volcano, and destroys random tiles
++static void DisasterTick_Volcano(Vehicle *v)
++{
++	TileIndex tile;
++	PlayerID old_player = _current_player;
++
++	_current_player = OWNER_NONE;
++
++	++v->tick_counter;
++
++	if (v->day_counter < 2)
++		ShakeMainWindow();
++	
++	if ((v->tick_counter > 100) && (v->tick_counter < 120) && (v->day_counter == 0)) {
++		BEGIN_TILE_LOOP(tile, 8, 8, v->dest_tile + TileDiffXY(Random() % 4, Random() % 4))
++				tile = TILE_MASK(tile);
++				DoCommandByTile(tile, 255, 1, DC_EXEC, CMD_TERRAFORM_LAND);
++		END_TILE_LOOP(tile, 8, 8, v->dest_tile)
++	} else if ((v->tick_counter == 149) && (v->day_counter == 0)) {
++			AddNewsItem(STR_B007_VOLCANO,
++					NEWS_FLAGS(NM_THIN, NF_VIEWPORT|NF_TILE, NT_ACCIDENT, 0),
++					v->dest_tile,
++					0);
++	} else if ((v->tick_counter > 150) ||  (v->day_counter > 0)) {
++		tile = RandomTile();
++		if (DisasterClearSquare_More(tile)) {
++			CreateEffectVehicleAbove(TileX(tile) * 16, TileY(tile) * 16, 0, EV_EXPLOSION_SMALL);
++			SndPlayTileFx(SND_13_BIG_CRASH, tile);
++		}
++		SndPlayTileFx(SND_3D_ANOTHER_JET_OVERHEAD,v->dest_tile);
++	}
++	
++	if (v->tick_counter == 255) {
++		v->day_counter++;
++		v->tick_counter = 0;
++	}
++	
++	if (v->day_counter >= 10) {
++		BEGIN_TILE_LOOP(tile, 8, 8, v->dest_tile)
++			if (GetTileSlope(tile,NULL) == 0) {
++				SetTileType(tile, MP_UNMOVABLE);
++				_m[tile].m5 = 0;
++				SetTileOwner(tile, OWNER_NONE);
++				DeleteDisasterVeh(v);
++				_current_player = old_player;
++				return;
++			}
++		END_TILE_LOOP(tile, 8, 8, v->dest_tile)
++		
++		DeleteDisasterVeh(v);
++	}
++	
++	_current_player = old_player;
++}
++
+ static void DisasterTick_NULL(Vehicle *v) {}
+ typedef void DisasterVehicleTickProc(Vehicle *v);
+ 
+@@ -682,6 +775,7 @@
+ 	DisasterTick_4b,DisasterTick_NULL,
+ 	DisasterTick_5_and_6,
+ 	DisasterTick_5_and_6,
++	DisasterTick_Volcano,
+ };
+ 
+ 
+@@ -933,6 +1027,18 @@
+ 	} while (--maxloop != 0);
+ }
+ 
++// Volcano
++static void Disaster8_Init(void)
++{
++	Vehicle *v = ForceAllocateSpecialVehicle();
++
++	if (v == NULL)
++		return;
++
++	InitializeDisasterVehicle(v, 0, 0, 0, 3, 15);
++	v->dest_tile = RandomTile();
++}
++
+ static DisasterInitProc * const _disaster_initprocs[] = {
+ 	Disaster0_Init,
+ 	Disaster1_Init,
+@@ -942,6 +1048,7 @@
+ 	Disaster5_Init,
+ 	Disaster6_Init,
+ 	Disaster7_Init,
++	Disaster8_Init,
+ };
+ 
+ typedef struct {
+@@ -949,7 +1056,7 @@
+ } DisasterYears;
+ 
+ #define MK(a,b) {a-20,b-20}
+-static const DisasterYears _dis_years[8] = {
++static const DisasterYears _dis_years[9] = {
+ 	MK(30,55),
+ 	MK(40,70),
+ 	MK(60,90),
+@@ -958,6 +1065,7 @@
+ 	MK(40,65),
+ 	MK(75,110),
+ 	MK(50,85),
++	MK(100,200),
+ };
+ 
+ 

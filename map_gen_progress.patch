@@ -1,0 +1,439 @@
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2708)
++++ misc_gui.c	(working copy)
+@@ -1866,3 +1866,38 @@
+ 	if (w)
+ 		SetWindowDirty(w);
+ }
++
++static void MapGenStatusWindowWndProc(Window *w, WindowEvent *e)
++{
++	if (e->event == WE_PAINT) {
++		DrawWindowWidgets(w);
++		/* Draw nice progress bar :) */
++		
++		SetDParam(0, _map_gen_status);
++		DrawStringCentered(125, 35, STR_CONFIG_PATCHES_INT32, 14);
++		
++		DrawFrameRect(20, 18, 20 * _map_gen_status, 28, 10, 0);
++	}
++}
++
++static const Widget _map_gen_status_window_widget[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5, STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   249,     0,    13, STR_MAPGEN_CREATING, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   249,    14,    84, 0x0,STR_NULL},
++{   WIDGETS_END},
++};
++
++static const WindowDesc _map_gen_status_window_desc = {
++	WDP_CENTER, WDP_CENTER, 250, 85,
++	WC_MAPGEN_STATUS_WINDOW, 0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET,
++	_map_gen_status_window_widget,
++	MapGenStatusWindowWndProc,
++};
++
++Window *ShowMapGenStatusWindow(void)
++{
++	Window *w;
++	w = AllocateWindowDesc(&_map_gen_status_window_desc);
++	return w;
++}
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2708)
++++ lang/english.txt	(working copy)
+@@ -1180,6 +1180,8 @@
+ STR_CONFIG_PATCHES_SERVINT_ISPERCENT                            :{LTBLUE}Service intervals are in percents: {ORANGE}{STRING1}
+ STR_CONFIG_GAME_PRODUCTION                                      :{WHITE}Change production
+ 
++STR_MAPGEN_CREATING                                      :Creating map...
++
+ TEMP_AI_IN_PROGRESS                                             :{WHITE}Welcome to this new AI, a work in progress. You should expect problems. When you happen take a screenshot and post it in the forum. Enjoy!
+ TEMP_AI_ACTIVATED                                               :{WHITE}Warning: this new AI is still alpha! Currently, only trucks and busses work!
+ 
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2708)
++++ variables.h	(working copy)
+@@ -459,4 +459,7 @@
+ /* Forking stuff */
+ VARDEF bool _dedicated_forks;
+ 
++/* Map gen loop */
++VARDEF uint _map_gen_status;
++
+ #endif /* VARIABLES_H */
+Index: gui.h
+===================================================================
+--- gui.h	(revision 2708)
++++ gui.h	(working copy)
+@@ -123,6 +123,7 @@
+ /*	FIOS_TYPE_FILE, FIOS_TYPE_OLDFILE etc. different colours */
+ static const byte _fios_colors[] = {13, 9, 9, 6, 5, 6, 5};
+ 
++bool GenerateWorldTHREADED(int blah);
+ 
+ /* network gui */
+ void ShowNetworkGameWindow(void);
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 2708)
++++ openttd.c	(working copy)
+@@ -572,34 +572,9 @@
+ 
+ static void MakeNewGame(void)
+ {
+-	_game_mode = GM_NORMAL;
++	int i = 1;
+ 
+-	// Copy in game options
+-	_opt_ptr = &_opt;
+-	memcpy(_opt_ptr, &_opt_newgame, sizeof(GameOptions));
+-
+-	GfxLoadSprites();
+-
+-	// Reinitialize windows
+-	ResetWindowSystem();
+-	LoadStringWidthTable();
+-
+-	SetupColorsAndInitialWindow();
+-
+-	// Randomize world
+-	GenerateWorld(0, 1<<_patches.map_x, 1<<_patches.map_y);
+-
+-	// In a dedicated server, the server does not play
+-	if (_network_dedicated) {
+-		_local_player = OWNER_SPECTATOR;
+-	} else {
+-		// Create a single player
+-		DoStartupNewPlayer(false);
+-
+-		_local_player = 0;
+-	}
+-
+-	MarkWholeScreenDirty();
++	CreateOTTDThread(&GenerateWorldTHREADED, &i);
+ }
+ 
+ static void MakeNewEditorWorld(void)
+@@ -997,7 +972,7 @@
+ 	StateGameLoop();
+ #endif /* ENABLE_NETWORK */
+ 
+-	if (!_pause && _display_opt&DO_FULL_ANIMATION)
++	if (!_pause && _display_opt&DO_FULL_ANIMATION || _generating_world)
+ 		DoPaletteAnimations();
+ 
+ 	if (!_pause || _cheats.build_in_pause.value)
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2708)
++++ openttd.h	(working copy)
+@@ -446,6 +446,7 @@
+ 	WC_HIGHSCORE = 0x4D,
+ 	WC_ENDSCREEN = 0x4E,
+ 	WC_SIGN_LIST = 0x4F,
++	WC_MAPGEN_STATUS_WINDOW = 0x50,	
+ };
+ 
+ 
+Index: gfx.c
+===================================================================
+--- gfx.c	(revision 2708)
++++ gfx.c	(working copy)
+@@ -15,7 +15,7 @@
+ 
+ Colour _cur_palette[256];
+ 
+-static void GfxMainBlitter(const Sprite *sprite, int x, int y, int mode);
++static void GfxMainBlitter(const Sprite* sprite, int x, int y, int mode, bool drawing_text);
+ 
+ static int _stringwidth_out;
+ static Pixel _cursor_backup[64 * 64];
+@@ -622,7 +622,7 @@
+ 		if (c >= ASCII_LETTERSTART) {
+ 			if (x >= dpi->left + dpi->width) goto skip_char;
+ 			if (x + 26 >= dpi->left) {
+-				GfxMainBlitter(GetSprite(base + 2 + c - ASCII_LETTERSTART), x, y, 1);
++				GfxMainBlitter(GetSprite(base + 2 + c - ASCII_LETTERSTART), x, y, 1, 1);
+ 			}
+ 			x += GetCharacterWidth(base + c);
+ 		} else if (c == ASCII_NL) { // newline = {}
+@@ -664,12 +664,12 @@
+ {
+ 	if (img & PALETTE_MODIFIER_COLOR) {
+ 		_color_remap_ptr = GetNonSprite(GB(img, PALETTE_SPRITE_START, PALETTE_SPRITE_WIDTH)) + 1;
+-		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 1);
++		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 1, 0);
+ 	} else if (img & PALETTE_MODIFIER_TRANSPARENT) {
+ 		_color_remap_ptr = GetNonSprite(GB(img, PALETTE_SPRITE_START, PALETTE_SPRITE_WIDTH)) + 1;
+-		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 2);
++		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 2, 0);
+ 	} else {
+-		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 0);
++		GfxMainBlitter(GetSprite(img & SPRITE_MASK), x, y, 0, 0);
+ 	}
+ }
+ 
+@@ -896,7 +896,7 @@
+ 	byte done;
+ 	Pixel *dst;
+ 	const byte* ctab;
+-
++	
+ 	if (bp->mode & 1) {
+ 		src_o += READ_LE_UINT16(src_o + bp->start_y * 2);
+ 		do {
+@@ -1101,7 +1101,7 @@
+ 	byte done;
+ 	Pixel *dst;
+ 	const byte* ctab;
+-
++	
+ 	if (bp->mode & 1) {
+ 		src_o += READ_LE_UINT16(src_o + bp->start_y * 2);
+ 		for(;;) {
+@@ -1359,14 +1359,14 @@
+ 
+ typedef void (*BlitZoomFunc)(BlitterParams *bp);
+ 
+-static void GfxMainBlitter(const Sprite* sprite, int x, int y, int mode)
++static void GfxMainBlitter(const Sprite* sprite, int x, int y, int mode, bool drawing_text)
+ {
+ 	DrawPixelInfo *dpi = _cur_dpi;
+ 	int start_x, start_y;
+ 	byte info;
+ 	BlitterParams bp;
+ 	int zoom_mask = ~((1 << dpi->zoom) - 1);
+-
++	
+ 	static const BlitZoomFunc zf_tile[3] =
+ 	{
+ 		GfxBlitTileZoomIn,
+@@ -1380,6 +1380,9 @@
+ 		GfxBlitZoomOutUncomp
+ 	};
+ 
++	if (_generating_world && !drawing_text)
++		return;
++
+ 	/* decode sprite header */
+ 	x += sprite->x_offs;
+ 	y += sprite->y_offs;
+@@ -1720,7 +1723,6 @@
+ {
+ 	DrawPixelInfo dp;
+ 	DrawPixelInfo* old;
+-
+ 	old = _cur_dpi;
+ 	_cur_dpi = &dp;
+ 	dp = _screen;
+@@ -1732,7 +1734,7 @@
+ extern bool _dbg_screen_rect;
+ 
+ void RedrawScreenRect(int left, int top, int right, int bottom)
+-{
++{		
+ 	assert(right <= _screen.width && bottom <= _screen.height);
+ 	if (_cursor.visible) {
+ 		if (right > _cursor.draw_pos.x &&
+@@ -1762,6 +1764,9 @@
+ 	int x;
+ 	int y;
+ 
++	//if (_generating_world)
++	//	return;
++
+ 	y = 0;
+ 	do {
+ 		x = 0;
+@@ -1870,9 +1875,19 @@
+ 
+ void MarkWholeScreenDirty(void)
+ {
+-	SetDirtyBlocks(0, 0, _screen.width, _screen.height);
++	if (!_generating_world)
++		SetDirtyBlocks(0, 0, _screen.width, _screen.height);
+ }
+ 
++void MarkWholeScreenClean(void)
++{
++	int i;
++	
++	for (i = 0; i < DIRTY_BYTES_PER_LINE * MAX_SCREEN_HEIGHT / 8; i++)
++		_dirty_blocks[i]	= 0;
++	
++}
++
+ bool FillDrawPixelInfo(DrawPixelInfo *n, DrawPixelInfo *o, int left, int top, int width, int height)
+ {
+ 	int t;
+Index: gfx.h
+===================================================================
+--- gfx.h	(revision 2708)
++++ gfx.h	(working copy)
+@@ -66,6 +66,7 @@
+ void DrawDirtyBlocks(void);
+ void SetDirtyBlocks(int left, int top, int right, int bottom);
+ void MarkWholeScreenDirty(void);
++void MarkWholeScreenClean(void);
+ 
+ void GfxInitPalettes(void);
+ 
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2708)
++++ misc.c	(working copy)
+@@ -19,6 +19,9 @@
+ #include "vehicle_gui.h"
+ #include "variables.h"
+ 
++#include "debug.h"
++#include "window.h"
++
+ extern void StartupEconomy(void);
+ extern void InitNewsItemStructs(void);
+ 
+@@ -234,6 +237,123 @@
+ 	ResetObjectToPlace();
+ }
+ 
++void MapGenerationProgress(int progress, Window *w)
++{
++	_map_gen_status = progress;
++	MarkWholeScreenClean();
++	SetWindowDirty(w);
++	DrawDirtyBlocks();
++	//MarkWholeScreenDirty();
++	DEBUG(misc,0)("Position: %d", progress);
++	DEBUG(misc,0)("Prog: %d", 20 * progress);
++}
++
++bool GenerateWorldTHREADED(int blah)
++{
++	uint i;
++	int mode = 0;
++	Window *w;
++
++	_opt_ptr = &_opt;
++	memcpy(_opt_ptr, &_opt_newgame, sizeof(GameOptions));
++
++	for(w = _windows; w != _last_window;) {
++		SetWindowDirty(w);
++		DeleteWindow(w);
++		w = _windows;
++	}
++	w = ShowMapGenStatusWindow();
++	MapGenerationProgress(1, w);
++	
++	_pause = true;
++	DrawDirtyBlocks();
++	
++	for(i = 0x500; i != 0; i--)
++		RunTileLoop();
++
++	DrawDirtyBlocks();
++	MarkWholeScreenClean();
++
++	// Make sure everything is done via OWNER_NONE
++	_current_player = OWNER_NONE;
++	_generating_world = true;
++
++	MapGenerationProgress(2, w);
++
++	GfxLoadSprites();
++	LoadStringWidthTable();
++	
++	InitializeGame(1<<_patches.map_x, 1<<_patches.map_y);
++
++	MapGenerationProgress(3, w);
++
++	_pause = true;
++	
++	SetObjectToPlace(SPR_CURSOR_ZZZ, 0, 0, 0);
++
++	// Must start economy early because of the costs.
++	StartupEconomy();
++
++	MapGenerationProgress(4, w);
++
++	// Don't generate landscape items when in the scenario editor.
++	GenerateLandscape();
++	MapGenerationProgress(5, w);
++		
++	GenerateClearTile();
++	MapGenerationProgress(6, w);
++
++	GenerateTowns();
++	MapGenerationProgress(7, w);
++			
++	GenerateIndustries();
++	MapGenerationProgress(8, w);
++			
++	GenerateUnmovables();
++	MapGenerationProgress(9, w);
++			
++	GenerateTrees();	
++	MapGenerationProgress(10, w);
++
++	// These are probably pointless when inside the scenario editor.
++	StartupPlayers();
++	StartupEngines();
++	StartupDisasters();
++
++	MapGenerationProgress(11, w);
++
++	for(i=0x500; i!=0; i--)
++		RunTileLoop();
++
++	ResetObjectToPlace();
++
++	MapGenerationProgress(12, w);
++
++	if (_network_dedicated) {
++		_local_player = OWNER_SPECTATOR;
++	} else {
++		// Create a single player
++		DoStartupNewPlayer(false);
++	_local_player = 0;
++	}
++
++	MapGenerationProgress(13, w);
++
++	_game_mode = GM_NORMAL;
++	_generating_world = false;
++	_pause = false;
++	ResetWindowSystem();
++	LoadStringWidthTable();
++	SetupColorsAndInitialWindow();
++		
++	MarkWholeScreenDirty();
++	DrawDirtyBlocks();
++	
++	CloseOTTDThread();
++	return true;
++}
++
++
+ void DeleteName(StringID id)
+ {
+ 	if ((id & 0xF800) == 0x7800) {
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2708)
++++ main_gui.c	(working copy)
+@@ -44,6 +44,7 @@
+ 
+ static byte _terraform_size = 1;
+ static byte _last_built_railtype;
++
+ extern void GenerateWorld(int mode, uint size_x, uint size_y);
+ 
+ extern void GenerateIndustries(void);
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream

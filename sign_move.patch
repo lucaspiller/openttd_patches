@@ -1,0 +1,73 @@
+Index: ttd.c
+===================================================================
+--- ttd.c	(revision 2261)
++++ ttd.c	(working copy)
+@@ -1025,6 +1025,41 @@
+ 		_current_player = p;
+ 	}
+ 
++	if (_game_mode == GM_MENU && _tick_counter - _sign_last_update > 370) {
++		// 370 ticks ~ 10 secs
++		SignStruct *ss = NULL;
++		Window *w = FindWindowById(WC_MAIN_WINDOW, 0);
++		char buf1[64];
++		int zoom_level, found = 0;
++		uint32 start_no;
++		assert(w);
++	
++		start_no = _view_sign_number;
++		while (found < 1) {
++			_view_sign_number++;
++			if (_view_sign_number >= GetSignPoolSize())
++				_view_sign_number = 0;
++			ss = GetSign(_view_sign_number);
++			if (ss && ss->str)
++				found = 1;
++			else if (start_no == _view_sign_number)
++				found = 2;
++		}
++		
++		if (found == 1) {
++			GetString(buf1, ss->str);
++			zoom_level = strtol(buf1, NULL, 10);
++			if (zoom_level < 0 || zoom_level > 2)
++				zoom_level = 0;
++		
++			DEBUG(misc, 2) ("Sign number: %d Zoom: %d", _view_sign_number + 1, zoom_level);
++			w->viewport->zoom = zoom_level;
++                	ScrollMainWindowToTile(TILE_FROM_XY(ss->x, ss->y));
++		}
++
++		_sign_last_update = _tick_counter;
++	}
++
+ 	_in_state_game_loop = false;
+ }
+ 
+Index: ttd.h
+===================================================================
+--- ttd.h	(revision 2261)
++++ ttd.h	(working copy)
+@@ -536,6 +536,9 @@
+ };
+ VARDEF byte _no_scroll;
+ 
++VARDEF uint16 _sign_last_update;
++VARDEF uint32 _view_sign_number;
++
+ #include "functions.h"
+ #include "variables.h"
+ 
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 2261)
++++ viewport.c	(working copy)
+@@ -916,7 +916,7 @@
+ 	int left, top, right, bottom;
+ 	StringSpriteToDraw *sstd;
+ 
+-	if (!(_display_opt & DO_SHOW_SIGNS))
++	if (!(_display_opt & DO_SHOW_SIGNS || _game_mode == GM_MENU))
+ 		return;
+ 
+ 	left = dpi->left;

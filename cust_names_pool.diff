@@ -1,0 +1,429 @@
+Index: oldloader.c
+===================================================================
+--- oldloader.c	(revision 3091)
++++ oldloader.c	(working copy)
+@@ -15,6 +15,7 @@
+ #include "signs.h"
+ #include "debug.h"
+ #include "depot.h"
++#include "names.h"
+ 
+ enum {
+ 	HEADER_SIZE = 49,
+@@ -445,7 +446,7 @@
+ #define REMAP_ORDER_IDX(x) ((x) - (0x045AB08 - 0x0458EF0)) / 2
+ 
+ extern TileIndex _animated_tile_list[256];
+-extern char _name_array[512][32];
++char _name_array[512][32];
+ extern uint16 _custom_sprites_base;
+ 
+ static byte   _old_vehicle_multipler;
+@@ -1542,6 +1543,7 @@
+ static bool LoadOldMain(LoadgameState *ls)
+ {
+ 	int i;
++	uint j;
+ 
+ 	/* The first 49 is the name of the game + checksum, skip it */
+ 	fseek(ls->file, HEADER_SIZE, SEEK_SET);
+@@ -1566,6 +1568,10 @@
+ 		_m[i].m4 = _old_map3[i * 2 + 1];
+ 	}
+ 
++	/* Convert old custom names */
++	for (j = 0; j < sizeof(_name_array); j++)
++		HandleOldName(_name_array[i], i);
++
+ 	for (i = 0; i < OLD_MAP_SIZE; i ++) {
+ 		if (IsTileType(i, MP_RAILWAY)) {
+ 			/* We save presignals different from TTDPatch, convert them */
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 3091)
++++ saveload.c	(working copy)
+@@ -29,7 +29,7 @@
+ #include <setjmp.h>
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 16,
++	SAVEGAME_MAJOR_VERSION = 17,
+ 	SAVEGAME_MINOR_VERSION = 0,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+@@ -1071,6 +1071,7 @@
+ extern const ChunkHandler _engine_chunk_handlers[];
+ extern const ChunkHandler _economy_chunk_handlers[];
+ extern const ChunkHandler _animated_tile_chunk_handlers[];
++extern const ChunkHandler _name_chunk_handlers[];
+ 
+ static const ChunkHandler * const _chunk_handlers[] = {
+ 	_misc_chunk_handlers,
+@@ -1086,6 +1087,7 @@
+ 	_station_chunk_handlers,
+ 	_player_chunk_handlers,
+ 	_animated_tile_chunk_handlers,
++	_name_chunk_handlers,
+ 	NULL,
+ };
+ 
+Index: misc.c
+===================================================================
+--- misc.c	(revision 3091)
++++ misc.c	(working copy)
+@@ -18,11 +18,11 @@
+ #include "engine.h"
+ #include "vehicle_gui.h"
+ #include "variables.h"
++#include "pool.h"
++#include "names.h"
+ 
+ extern void StartupEconomy(void);
+ 
+-char _name_array[512][32];
+-
+ #ifndef MERSENNE_TWISTER
+ 
+ #ifdef RANDOM_DEBUG
+@@ -103,7 +103,7 @@
+ void InitializeTrees(void);
+ void InitializeSigns(void);
+ void InitializeStations(void);
+-static void InitializeNameMgr(void);
++void InitializeNames(void);
+ void InitializePlayers(void);
+ static void InitializeCheats(void);
+ void InitializeNPF(void);
+@@ -162,7 +162,7 @@
+ 	InitializeStations();
+ 	InitializeIndustries();
+ 
+-	InitializeNameMgr();
++	InitializeNames();
+ 	InitializeVehiclesGuiList();
+ 	InitializeTrains();
+ 	InitializeNPF();
+@@ -225,54 +225,11 @@
+ 	ResetObjectToPlace();
+ }
+ 
+-void DeleteName(StringID id)
+-{
+-	if ((id & 0xF800) == 0x7800) {
+-		memset(_name_array[id & 0x1FF], 0, sizeof(_name_array[id & 0x1FF]));
+-	}
+-}
+-
+-char *GetName(int id, char *buff)
+-{
+-	return strecpy(buff, _name_array[id & ~0x600], NULL);
+-}
+-
+-
+ static void InitializeCheats(void)
+ {
+ 	memset(&_cheats, 0, sizeof(Cheats));
+ }
+ 
+-
+-static void InitializeNameMgr(void)
+-{
+-	memset(_name_array, 0, sizeof(_name_array));
+-}
+-
+-StringID RealAllocateName(const char *name, byte skip, bool check_double)
+-{
+-	char (*free_item)[lengthof(*_name_array)] = NULL;
+-	char (*i)[lengthof(*_name_array)];
+-
+-	for (i = _name_array; i != endof(_name_array); ++i) {
+-		if ((*i)[0] == '\0') {
+-			if (free_item == NULL) free_item = i;
+-		} else if (check_double && strncmp(*i, name, lengthof(*i) - 1) == 0) {
+-			_error_message = STR_0132_CHOSEN_NAME_IN_USE_ALREADY;
+-			return 0;
+-		}
+-	}
+-
+-	if (free_item != NULL) {
+-		ttd_strlcpy(*free_item, name, lengthof(*free_item));
+-		return (free_item - _name_array) | 0x7800 | (skip << 8);
+-	} else {
+-		_error_message = STR_0131_TOO_MANY_NAMES_DEFINED;
+-		return 0;
+-	}
+-}
+-
+-
+ #define M(a,b) ((a<<5)|b)
+ static const uint16 _month_date_from_year_day[] = {
+ M(0,1),M(0,2),M(0,3),M(0,4),M(0,5),M(0,6),M(0,7),M(0,8),M(0,9),M(0,10),M(0,11),M(0,12),M(0,13),M(0,14),M(0,15),M(0,16),M(0,17),M(0,18),M(0,19),M(0,20),M(0,21),M(0,22),M(0,23),M(0,24),M(0,25),M(0,26),M(0,27),M(0,28),M(0,29),M(0,30),M(0,31),
+@@ -632,24 +589,14 @@
+ 	buffer = NULL;
+ }
+ 
+-static void Save_NAME(void)
+-{
+-	int i;
+-
+-	for (i = 0; i != lengthof(_name_array); ++i) {
+-		if (_name_array[i][0] != '\0') {
+-			SlSetArrayIndex(i);
+-			SlArray(_name_array[i], strlen(_name_array[i]), SLE_UINT8);
+-		}
+-	}
+-}
+-
+ static void Load_NAME(void)
+ {
+ 	int index;
++	char name[32];
+ 
+ 	while ((index = SlIterateArray()) != -1) {
+-		SlArray(_name_array[index],SlGetFieldLength(),SLE_UINT8);
++		SlArray(name, SlGetFieldLength(), SLE_UINT8);
++		HandleOldName(name, index);
+ 	}
+ }
+ 
+@@ -995,7 +942,7 @@
+ 	{ 'MAP5', Save_MAP5, Load_MAP5, CH_RIFF },
+ 	{ 'MAPE', Save_MAPE, Load_MAPE, CH_RIFF },
+ 
+-	{ 'NAME', Save_NAME, Load_NAME, CH_ARRAY},
++	{ 'NAME', NULL, Load_NAME, CH_ARRAY},
+ 	{ 'DATE', SaveLoad_DATE, SaveLoad_DATE, CH_RIFF},
+ 	{ 'VIEW', SaveLoad_VIEW, SaveLoad_VIEW, CH_RIFF},
+ 	{ 'OPTS', SaveLoad_OPTS, SaveLoad_OPTS, CH_RIFF},
+Index: Makefile
+===================================================================
+--- Makefile	(revision 3091)
++++ Makefile	(working copy)
+@@ -625,6 +625,7 @@
+ C_SOURCES += misc_gui.c
+ C_SOURCES += mixer.c
+ C_SOURCES += music_gui.c
++C_SOURCES += names.c
+ C_SOURCES += namegen.c
+ C_SOURCES += network.c
+ C_SOURCES += network_client.c
+Index: names.c
+===================================================================
+--- names.c	(revision 0)
++++ names.c	(revision 0)
+@@ -0,0 +1,170 @@
++/* $Id */
++
++#include "stdafx.h"
++#include "openttd.h"
++#include "names.h"
++#include "string.h"
++#include "variables.h"
++#include "table/strings.h"
++#include "saveload.h"
++#include "functions.h"
++
++enum {
++	/* Max names: 64000 (4 * 16000) */
++	NAME_POOL_BLOCK_SIZE_BITS = 2,       /* In bits, so (1 << 2) == 4 */
++	NAME_POOL_MAX_BLOCKS = 1024
++};
++
++/**
++ * Called if a new block is added to the name-pool
++ */
++static void NamePoolNewBlock(uint start_item)
++{
++	NameStruct *ns;
++	FOR_ALL_NAMES_FROM(ns, start_item)
++		ns->index = start_item++;
++}
++
++/** Pool for custom names */
++MemoryPool _name_pool = { "Names", NAME_POOL_MAX_BLOCKS, NAME_POOL_BLOCK_SIZE_BITS, sizeof(NameStruct), &NamePoolNewBlock, 0, 0, NULL};
++
++/**
++*
++* Deletes a name
++*/
++void DeleteName(StringID id)
++{
++	DEBUG(misc,0)("Delete %d", id & 0x1FF);
++	if (id > GetNamePoolSize())
++		return;
++	NameStruct *ns;
++	GetNameStruct(id & 0x1FF);
++	ns->name[0] = '\0';
++	/* Ok, so it doesn't really delete the name, but it can be re-used */
++}
++
++/**
++ *
++ * Puts a name in buff
++ *
++ * @return Result of strecpy
++ */
++char *GetName(int id, char *buff)
++{
++	DEBUG(misc,0)("Request for StringID %d", id & ~0x600);
++	NameStruct *ns = GetNameStruct(id & ~0x600);
++	return strecpy(buff, ns->name, NULL);
++}
++
++/**
++ *
++ * Allocates a new name
++ *
++ * @return The StringID of the string, or 0 if there is no more free space
++ */
++ StringID RealAllocateName(const char *name, byte skip, bool check_double)
++{
++	NameStruct *ns;
++
++	DEBUG(misc,0)("Allocated %s", name);
++
++	/* Check if there are any repeats (if needed) */
++	if (check_double) {
++		FOR_ALL_NAMES(ns) {
++			if (ns->name[0] != '\0' && strncmp(ns->name, name, lengthof(ns->name) - 1) == 0) {
++				_error_message = STR_0132_CHOSEN_NAME_IN_USE_ALREADY;
++				return 0;
++			}
++		}
++	}
++	
++	/* Find a free entry */
++	FOR_ALL_NAMES(ns) {
++		if (ns->name[0] == '\0') {
++			StringID index = ns->index;
++	
++			memset(ns, 0, sizeof(NameStruct));
++			ns->index = index;
++			ttd_strlcpy(ns->name, name, lengthof(ns->name));
++			
++			return index;
++		}
++	}
++	
++	/* Check if we can add a block to the pool */
++	if (AddBlockToPool(&_name_pool))
++		return RealAllocateName(name, skip, check_double);
++	
++	_error_message = STR_0131_TOO_MANY_NAMES_DEFINED;
++	return 0;
++}
++ 
++ /**
++ *
++ * Handle names from old format -- StringIDs need to be kept
++ *
++ */
++void HandleOldName(char name[32], int index)
++{
++	NameStruct *ns;
++	char temp[32];
++	ttd_strlcpy(temp, name, lengthof(temp));
++
++	while (index >= GetNamePoolSize())
++		AddBlockToPool(&_name_pool);
++
++	DEBUG(misc,0)("Old loader `%s` %d %d", temp, index & ~0x600, GetNamePoolSize());
++		
++	ns = GetNameStruct(index & ~0x600);
++	ttd_strlcpy(ns->name, name, sizeof(name));
++}
++ 
++void InitializeNames(void)
++{
++	CleanPool(&_name_pool);
++	AddBlockToPool(&_name_pool);
++}
++
++/** CNME --- Custom NaME
++ * NAME is already used for the old array
++*/
++
++/**
++ *
++ * Save all custom names
++ *
++ */
++static void Save_CNME(void)
++{
++	NameStruct *ns;
++
++	FOR_ALL_NAMES(ns) {
++		/* we need to save empty names otherwise the StringID gets messed up */
++		SlSetArrayIndex(ns->index);
++		SlArray(ns->name, strlen(ns->name), SLE_UINT8);
++	}
++}
++
++/**
++ *
++ * Load all custom names
++ *
++ */
++static void Load_CNME(void)
++{
++	int index;
++	while ((index = SlIterateArray()) != -1) {
++		NameStruct *ns;
++
++		if (!AddBlockIfNeeded(&_name_pool, index))
++			error("Names: failed loading savegame: too many custom names");
++
++		DEBUG(misc,0)("Loading CNME %d", index);
++		ns = GetNameStruct(index);
++		SlArray(ns->name, strlen(ns->name), SLE_UINT8);
++	}
++}
++
++const ChunkHandler _name_chunk_handlers[] = {
++	{ 'CNME', Save_CNME, Load_CNME, CH_ARRAY | CH_LAST},
++};
+Index: names.h
+===================================================================
+--- names.h	(revision 0)
++++ names.h	(revision 0)
+@@ -0,0 +1,40 @@
++/* $Id */
++
++#ifndef NAMES_H
++#define NAMES_H
++
++#include "pool.h"
++#include "debug.h"
++
++/* struct for custom names */
++typedef struct NameStruct {
++	char name[32];
++	StringID index;
++} NameStruct;
++
++extern MemoryPool _name_pool;
++
++/**
++ * Get the current size of the SignPool
++ */
++static inline uint16 GetNamePoolSize(void)
++{
++	return _name_pool.total_items;
++}
++
++/**
++ * Get the pointer to the name with index 'index'
++ */
++static inline NameStruct *GetNameStruct(StringID index)
++{
++	if (index >= GetNamePoolSize())
++		return (NameStruct*)GetItemFromPool(&_name_pool, 0);
++	return (NameStruct*)GetItemFromPool(&_name_pool, index);
++}
++
++#define FOR_ALL_NAMES_FROM(ns, start) for (ns = GetNameStruct(start); ns != NULL; ns = (ns->index + 1 < GetNamePoolSize()) ? GetNameStruct(ns->index + 1) : NULL)
++#define FOR_ALL_NAMES(ns) FOR_ALL_NAMES_FROM(ns, 0)
++
++void HandleOldName(char name[32], int index);
++
++#endif /* NAMES_H */

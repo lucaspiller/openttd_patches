@@ -1,0 +1,44 @@
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2505)
++++ train_cmd.c	(working copy)
+@@ -293,25 +293,23 @@
+ 		resistance += (area * drag_coeff * speed * speed) / 10000;
+ 	} else
+ 		resistance = (area * (drag_coeff / 2) * speed * speed) / 10000;
++		
+ 	resistance += incl;
+ 	resistance *= 4; //[N]
+ 
+-	if (speed > 0) {
+-		switch (v->u.rail.railtype) {
+-			case 0:
+-			case 1:
+-				force = power / speed; //[N]
+-				force *= 22;
+-				force /= 10;
+-				break;
+-
+-			case 2:
+-				force = power / 25;
+-				break;
+-		}
+-	} else {
+-		//"kickoff" acceleration
+-		force = (mass * 8) + resistance;
++	if (speed <= 0) speed = 1;
++	
++	switch (v->u.rail.railtype) {
++		case 0:
++		case 1:
++			force = power / speed; //[N]
++			force *= 22;
++			force /= 10;
++			break;
++	
++		case 2:
++			force = power / 25;
++			break;
+ 	}
+ 
+ 	if (force <= 0) force = 10000;

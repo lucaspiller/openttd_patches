@@ -1,0 +1,25 @@
+Index: disaster_cmd.c
+===================================================================
+--- disaster_cmd.c	(revision 2236)
++++ disaster_cmd.c	(working copy)
+@@ -917,10 +919,20 @@
+ 
+ 				{
+ 					uint tile = i->xy;
++					uint tile2 = i->xy;
+ 					TileIndexDiff step = TileOffsByDir(Random() & 3);
+ 					int count = 30;
++					uint height;
+ 					do {
+ 						DisasterClearSquare(tile);
++						height = TileHeight(tile);
++						BEGIN_TILE_LOOP(tile2,2,2,tile - TILE_XY(1,1))
++							tile2 = TILE_MASK(tile2);
++							DisasterClearSquare(tile2);
++						END_TILE_LOOP(tile2,2,2,tile - TILE_XY(1,1))
++						if (height > 0) {
++							SetTileHeight(tile, height - 1);
++						}
+ 						tile = TILE_MASK(tile + step);
+ 					} while (--count);
+ 				}

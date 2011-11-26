@@ -1,0 +1,62 @@
+Index: spritecache.h
+===================================================================
+--- spritecache.h	(revision 2521)
++++ spritecache.h	(working copy)
+@@ -31,5 +31,6 @@
+ 
+ void GfxLoadSprites(void);
+ void IncreaseSpriteLRU(void);
++uint32 GetSpriteCacheUsage(void);
+ 
+ #endif
+Index: console_cmds.c
+===================================================================
+--- console_cmds.c	(revision 2521)
++++ console_cmds.c	(working copy)
+@@ -14,6 +14,7 @@
+ #include "settings.h"
+ #include "hal.h" /* for file list */
+ #include "vehicle.h"
++#include "spritecache.h"
+ 
+ // ** scriptfile handling ** //
+ static FILE *_script_file;
+@@ -121,6 +122,17 @@
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConCacheUsage)
++{
++	if (argc == 0) {
++		IConsoleHelp("Show the current sprite cache usage. Only useful for debugging.");
++		return true;
++	}
++
++	IConsolePrintF(_icolour_def, "%d bytes", GetSpriteCacheUsage());
++	return true;
++}
++
+ #ifdef _DEBUG
+ DEF_CONSOLE_CMD(ConResetTile)
+ {
+@@ -1248,6 +1260,7 @@
+ 	IConsoleCmdRegister("newgame",      ConNewGame);
+ 	IConsoleCmdRegister("quit",         ConExit);
+ 	IConsoleCmdRegister("resetengines", ConResetEngines);
++	IConsoleCmdRegister("cacheusage", ConCacheUsage);
+ 	IConsoleCmdRegister("return",       ConReturn);
+ 	IConsoleCmdRegister("screenshot",   ConScreenShot);
+ 	IConsoleCmdRegister("script",       ConScript);
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2521)
++++ spritecache.c	(working copy)
+@@ -439,7 +439,7 @@
+ 	return (MemBlock*)((byte*)block + (block->size & ~S_FREE_MASK));
+ }
+ 
+-static uint32 GetSpriteCacheUsage(void)
++uint32 GetSpriteCacheUsage(void)
+ {
+ 	size_t tot_size = 0;
+ 	MemBlock* s;

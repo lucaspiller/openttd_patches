@@ -1,0 +1,268 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2356)
++++ lang/english.txt	(working copy)
+@@ -600,11 +600,13 @@
+ STR_0225                                                        :{BLACK}{DOWNARROW}
+ STR_0226_RANDOM_LAND                                            :{BLACK}Random Land
+ STR_0227_RESET_LAND                                             :{BLACK}Reset Land
++STR_LOAD_LAND_FROM_PNG                                          :{BLACK}Load Land
+ STR_0228_INCREASE_SIZE_OF_LAND_AREA                             :{BLACK}Increase area of land to lower/raise
+ STR_0229_DECREASE_SIZE_OF_LAND_AREA                             :{BLACK}Decrease area of land to lower/raise
+ STR_022A_GENERATE_RANDOM_LAND                                   :{BLACK}Generate random land
+ STR_022B_RESET_LANDSCAPE                                        :{BLACK}Reset landscape
+-STR_022C_RESET_LANDSCAPE                                        :{WHITE}Reset Landscape
++STR_022C_RESET_LANDSCAPE                                        :{WHITE}Rebuild Landscape
++STR_LOAD_LANDSCAPE_FROM_PNG                                     :{BLACK}Load land from PNG
+ STR_022D_ARE_YOU_SURE_YOU_WANT_TO                               :{WHITE}Are you sure you want to reset the landscape?
+ STR_022E_LANDSCAPE_GENERATION                                   :{BLACK}Landscape generation
+ STR_022F_TOWN_GENERATION                                        :{BLACK}Town generation
+@@ -1416,6 +1418,15 @@
+ STR_CONFIG_PATCHES_MAP_X                                        :{LTBLUE}X-size of map: {ORANGE}{STRING}
+ STR_CONFIG_PATCHES_MAP_Y                                        :{LTBLUE}Y-size of map: {ORANGE}{STRING}
+ 
++
++##### PNG-MAP-Loader
++
++STR_PNGMAP_ARE_YOU_SURE                                         :{WHITE}Are you sure you want to load the landscape from a PNG?
++STR_PNGMAP_ERROR                                                :{WHITE}Cannot load landscape from PNG...
++STR_PNGMAP_ERR_FILE_NOT_FOUND                                   :{WHITE}...file map.png not found
++STR_PNGMAP_ERR_IMAGE_TYPE                                       :{WHITE}...wrong file format. 4-bit indexed PNG with resolution (MapX x MapY) needed.
++STR_PNGMAP_ERR_MISC                                             :{WHITE}...something just went wrong. Sorry.
++
+ ##id 0x0800
+ STR_0800_COST                                                   :{TINYFONT}{RED}Cost: {CURRENCY}
+ STR_0801_COST                                                   :{RED}Cost: {CURRENCY}
+Index: landscape.c
+===================================================================
+--- landscape.c	(revision 2356)
++++ landscape.c	(working copy)
+@@ -3,6 +3,7 @@
+ #include "map.h"
+ #include "spritecache.h"
+ #include "table/sprites.h"
++#include "table/strings.h"
+ #include "tile.h"
+ #include <stdarg.h>
+ #include "gfx.h"
+@@ -656,6 +657,127 @@
+ 		CreateDesertOrRainForest();
+ }
+ 
++#ifdef WITH_PNG
++#include "png.h"
++
++int LoadLandscapeFromPNG(void) {
++	uint width, height;
++	uint row, col, col_flip;
++	byte current_tile;
++	
++	png_byte color_type;
++	png_byte bit_depth;
++
++	png_structp png_ptr;
++	png_infop info_ptr;
++	png_bytep * row_pointers=NULL;
++
++	FILE *fp=fopen("map.png", "rb"); //TODO load it from a dialog!
++	if (!fp) 
++		return STR_PNGMAP_ERR_FILE_NOT_FOUND;
++
++	png_ptr = png_create_read_struct (PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
++	if (!png_ptr) {
++		fclose(fp);
++		return STR_PNGMAP_ERR_MISC;
++	}
++	info_ptr = png_create_info_struct(png_ptr);
++	if (!info_ptr || setjmp(png_jmpbuf(png_ptr))) {
++		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
++		fclose(fp);
++		return STR_PNGMAP_ERR_MISC;
++	}
++	png_init_io(png_ptr, fp);
++
++	png_set_packing(png_ptr);
++	png_read_png(png_ptr, info_ptr, PNG_TRANSFORM_PACKING, NULL); //allocates memory for image
++	row_pointers = png_get_rows(png_ptr, info_ptr);
++	fclose(fp);
++
++	width = info_ptr->width;
++	height = info_ptr->height;
++	color_type = info_ptr->color_type;
++	bit_depth = info_ptr->bit_depth;
++
++
++	// maps of wrong size or color-depth are not used
++	if ((height != MapSizeY()) || (width != MapSizeX()) || (color_type != PNG_COLOR_TYPE_PALETTE) || (bit_depth != 8)) {
++		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
++		return STR_PNGMAP_ERR_IMAGE_TYPE;
++	}
++
++
++	// form the landscape
++	for (row=0; row<height; row++) {
++		for (col=0; col<width; col++) {
++			col_flip = width - col - 1; // flip image horizontally - TTD is "backwards"
++			current_tile = row_pointers[row][col_flip];
++			
++			// change border to level 0
++			if (DistanceFromEdge(TILE_XY(col, row)) <= 1 ) {
++				current_tile = 0;
++			}
++
++			_map_type_and_height[TILE_XY(col, row)] = current_tile;
++			_map5[TILE_XY(col, row)] = 0;
++			_map_owner[TILE_XY(col, row)] = 0x10; // no owner
++		}
++	}
++
++
++	// adjust height difference to 1 maximum horizontal/vertical
++	// top and left edges
++	for (row = 1; row < height - 2; row++) {
++		for (col = 1; col < width - 2; col++) {
++			// find lowest tile out of top and left
++			current_tile = _map_type_and_height[TILE_XY(col-1, row)]; // top edge
++			if (_map_type_and_height[TILE_XY(col, row-1)] < current_tile) {
++				current_tile = _map_type_and_height[TILE_XY(col, row-1)]; // left edge
++			}
++			
++			// set current point to only 1 level higher than neighbors if it's higher
++			current_tile++;
++			if (current_tile > 15) {
++				current_tile = 15;
++			}
++			if (_map_type_and_height[TILE_XY(col, row)] > current_tile) {
++				_map_type_and_height[TILE_XY(col, row)] = current_tile;
++			}
++		}
++	}
++	
++	// bottom and right edges
++	for (row = height - 2; row > 0; row--) {
++		for (col = width - 2; col > 0; col--) {
++			// find lowest tile out of bottom and right
++			current_tile = _map_type_and_height[TILE_XY(col+1, row)]; // bottom edge
++			if (_map_type_and_height[TILE_XY(col, row+1)] < current_tile) {
++				current_tile = _map_type_and_height[TILE_XY(col, row+1)]; // right edge
++			}
++			
++			// set current point to only 1 level higher neighbors if it's higher
++			current_tile++;
++			if (current_tile > 15) {
++				current_tile = 15;
++			}
++			if (_map_type_and_height[TILE_XY(col, row)] > current_tile) {
++				_map_type_and_height[TILE_XY(col, row)] = current_tile;
++			}
++		}
++	}
++
++	
++	ConvertGroundTilesIntoWaterTiles();
++	MarkWholeScreenDirty();
++
++	png_destroy_read_struct(&png_ptr, &info_ptr, NULL); //free all memory of libpng
++
++	return 0;
++}
++
++
++#endif//WITH_PNG
++
+ void OnTick_Town(void);
+ void OnTick_Trees(void);
+ void OnTick_Station(void);
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2356)
++++ main_gui.c	(working copy)
+@@ -1091,6 +1091,10 @@
+ {   WIDGETS_END},
+ };
+ 
++#ifdef WITH_PNG
++int LoadLandscapeFromPNG(void);
++#endif//WITH_PNG
++
+ // Ask first to reset landscape or to make a random landscape
+ static void AskResetLandscapeWndProc(Window *w, WindowEvent *e)
+ {
+@@ -1099,7 +1103,8 @@
+ 	switch(e->event) {
+ 	case WE_PAINT:
+ 		DrawWindowWidgets(w);
+-		DrawStringMultiCenter(90, 38, mode?STR_022D_ARE_YOU_SURE_YOU_WANT_TO:STR_GENERATE_RANDOM_LANDSCAPE , 168);
++		DrawStringMultiCenter(90, 38, mode==2?STR_PNGMAP_ARE_YOU_SURE:
++								mode==1?STR_022D_ARE_YOU_SURE_YOU_WANT_TO:STR_GENERATE_RANDOM_LANDSCAPE , 168);
+ 		break;
+ 	case WE_CLICK:
+ 		switch(e->click.widget) {
+@@ -1112,7 +1117,13 @@
+ 			DeleteWindowByClass(WC_TOWN_VIEW);
+ 			DeleteWindowByClass(WC_LAND_INFO);
+ 
+-			if (mode) { // reset landscape
++			if (mode==2) { // load landscape from png
++#ifdef WITH_PNG
++				int res=LoadLandscapeFromPNG();
++				if (res)
++					ShowErrorMessage(res, STR_PNGMAP_ERROR,0,0);
++#endif//WITH_PNG
++			} else if (mode==1) { // reset landscape
+ 				ResetLandscape();
+ 			} else { // make random landscape
+ 				SndPlayFx(SND_15_BEEP);
+@@ -1249,7 +1260,7 @@
+ {   WWT_TEXTBTN,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5,                  STR_018B_CLOSE_WINDOW},
+ {   WWT_CAPTION,   RESIZE_NONE,     7,    11,   169,     0,    13, STR_0223_LAND_GENERATION,  STR_018C_WINDOW_TITLE_DRAG_THIS},
+ { WWT_STICKYBOX,   RESIZE_NONE,     7,   170,   181,     0,    13, STR_NULL,                  STR_STICKY_BUTTON},
+-{    WWT_IMGBTN,   RESIZE_NONE,     7,     0,   181,    14,   101, STR_NULL,                  STR_NULL},
++{    WWT_IMGBTN,   RESIZE_NONE,     7,     0,   181,    14,   114, STR_NULL,                  STR_NULL},
+ 
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,     2,    23,    14,    35, SPR_IMG_DYNAMITE,          STR_018D_DEMOLISH_BUILDINGS_ETC},
+ {    WWT_IMGBTN,   RESIZE_NONE,    14,    24,    45,    14,    35, SPR_IMG_TERRAFORM_DOWN,    STR_018F_RAISE_A_CORNER_OF_LAND},
+@@ -1263,6 +1274,7 @@
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,   139,   149,    56,    67, STR_0225,                  STR_0229_DECREASE_SIZE_OF_LAND_AREA},
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,    34,   149,    75,    86, STR_0226_RANDOM_LAND,      STR_022A_GENERATE_RANDOM_LAND},
+ {   WWT_TEXTBTN,   RESIZE_NONE,    14,    34,   149,    88,    99, STR_0227_RESET_LAND,       STR_022B_RESET_LANDSCAPE},
++{   WWT_TEXTBTN,   RESIZE_NONE,    14,    34,   149,   101,   112, STR_LOAD_LAND_FROM_PNG,    STR_LOAD_LANDSCAPE_FROM_PNG},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1402,9 +1414,12 @@
+ 			AskResetLandscape(0);
+ 			break;
+ 		case 15: /* reset landscape */
+-			HandleButtonClick(w,15);
++			HandleButtonClick(w, 15);
+ 			AskResetLandscape(1);
+ 			break;
++		case 16: /* landscape from png */
++			HandleButtonClick(w, 16);
++			AskResetLandscape(2);
+ 		}
+ 		break;
+ 
+@@ -1433,7 +1448,7 @@
+ }
+ 
+ static const WindowDesc _scen_edit_land_gen_desc = {
+-	-1,-1, 182, 102,
++	-1,-1, 182, 115,
+ 	WC_SCEN_LAND_GEN,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_scen_edit_land_gen_widgets,
+@@ -1442,7 +1457,11 @@
+ 
+ static inline void ShowEditorTerraformToolBar(void)
+ {
+-	AllocateWindowDescFront(&_scen_edit_land_gen_desc, 0);
++	Window * w;
++	w = AllocateWindowDescFront(&_scen_edit_land_gen_desc, 0);
++#ifndef WITH_PNG
++	SETBIT(w->disabled_state, 16);
++#endif
+ }
+ 
+ static void ToolbarScenGenLand(Window *w)

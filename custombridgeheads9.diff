@@ -1,0 +1,780 @@
+Index: pbs.c
+===================================================================
+--- pbs.c	(revision 2865)
++++ pbs.c	(working copy)
+@@ -10,6 +10,7 @@
+ #include "npf.h"
+ #include "pathfind.h"
+ #include "depot.h"
++#include "bridge.h"
+ 
+ /** @file pbs.c Path-Based-Signalling implementation file
+  *  @see pbs.h */
+@@ -69,6 +70,20 @@
+ 			}
+ 			break;
+ 		case MP_TUNNELBRIDGE:
++			if (IsTileBridgeEnd(tile)) { // Bridge End
++				if (GetBridgeEndTrackBits(tile)) { // Custom Bridgehead
++					byte encrt = GB(_m[tile].m2, 0, 4); // get current encoded info (see comments at top of file)
++					if (encrt == 0) // nothing reserved before
++						encrt = track + 1;
++					else if (encrt == (track^1) + 1) // opposite track reserved before
++						encrt |= 8;
++					_m[tile].m2 &= ~0xF;
++					_m[tile].m2 |= encrt;
++					break;
++				}
++				SETBIT(_m[tile].m4, 6);
++				break;
++			}
+ 			_m[tile].m4 |= (1 << track) & 3;
+ 			break;
+ 		case MP_STATION:
+@@ -104,6 +119,14 @@
+ 				return res;
+ 			}
+ 		case MP_TUNNELBRIDGE:
++			if (IsTileBridgeEnd(tile)) { // Bridge End
++				if (GetBridgeEndTrackBits(tile)) { // Custom Bridgehead
++					byte res = encrt_to_reserved[GB(_m[tile].m2, 0, 4)];
++					assert(res != 0xFF);
++					return res;
++				}
++				return GB(_m[tile].m4, 6, 1) << GB(_m[tile].m5, 0, 1);
++			}
+ 			return (_m[tile].m4 & 3);
+ 		case MP_STATION:
+ 			// check if its reserved
+@@ -136,6 +159,14 @@
+ 				return res;
+ 			}
+ 		case MP_TUNNELBRIDGE:
++			if (IsTileBridgeEnd(tile)) { // Bridge End
++				if (GetBridgeEndTrackBits(tile)) { // Custom Bridgehead
++					uint16 res = encrt_to_unavail[GB(_m[tile].m2, 0, 4)];
++					assert(res != 0xFFFF);
++					return res;
++				}
++				return (GB(_m[tile].m4, 6, 1) << GB(_m[tile].m5, 0, 1)) * 0x101;
++			}
+ 			return (_m[tile].m4 & 3) | ((_m[tile].m4 & 3) << 8);
+ 		case MP_STATION:
+ 			return HASBIT(_m[tile].m3, 6) ? TRACKDIR_BIT_MASK : 0;
+@@ -173,6 +204,22 @@
+ 			}
+ 			break;
+ 		case MP_TUNNELBRIDGE:
++			if (IsTileBridgeEnd(tile)) { // Bridge End
++				if (GetBridgeEndTrackBits(tile)) { // Custom Bridgehead
++					byte encrt = GB(_m[tile].m2, 0, 4);
++					if (encrt == track + 1)
++						encrt = 0;
++					else if (encrt == track + 1 + 8)
++						encrt = (track^1) + 1;
++					else if (encrt == (track^1) + 1 + 8)
++						encrt &= 7;
++					_m[tile].m2 &= ~0xF;
++					_m[tile].m2 |= encrt;
++					break;
++				}
++				CLRBIT(_m[tile].m4, 6);
++				break;
++			}
+ 			_m[tile].m4 &= ~((1 << track) & 3);
+ 			break;
+ 		case MP_STATION:
+Index: rail.h
+===================================================================
+--- rail.h	(revision 2865)
++++ rail.h	(working copy)
+@@ -576,4 +576,14 @@
+ 	return HASBIT(GetRailTypeInfo(enginetype)->compatible_railtypes, tiletype);
+ }
+ 
++/**
++ * Draws the ground sprite and track pieces.
++ * @param ti TileInfo, used to work out slopes and rail type.
++ * @param track TrackBits to draw.
++ * @param earth Flag whether to draw the ground below as brown.
++ * @param snow Flag whether to draw as snow.
++ * @param flat Always draw foundation to ensure flat tile.
++ */
++void DrawTrackBits(TileInfo *ti, TrackBits track, bool earth, bool snow, bool flat);
++
+ #endif // RAIL_H
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 2865)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -22,6 +22,7 @@
+ #include "debug.h"
+ #include "variables.h"
+ #include "bridge.h"
++#include "rail.h"
+ 
+ #include "table/bridge_land.h"
+ #include "table/tunnel_land.h"
+@@ -955,6 +956,7 @@
+ };
+ 
+ extern const byte _road_sloped_sprites[14];
++extern void DrawRoadBits(TileInfo *ti, byte road, byte ground_type, bool snow, bool flat);
+ 
+ static void DrawBridgePillars(TileInfo *ti, int x, int y, int z)
+ {
+@@ -1057,6 +1059,24 @@
+ 		tmp = (ti->map5&3) + (tmp*2);
+ 
+ 		if (!(ti->map5 & 0x40)) {	// bridge ramps
++			switch (GB(ti->map5, 1, 2)) {
++				case TRANSPORT_RAIL: {
++					TrackBits track = GetBridgeEndTrackBits(ti->tile);
++					if (ti->tileh != 0 && track != 0) { // Custom bridgehead
++						DrawTrackBits(ti, track, false, ice, true);
++						return;
++					}
++				} break;
++				case TRANSPORT_ROAD: {
++					byte road = GetBridgeEndRoadBits(ti->tile);
++					if (ti->tileh != 0 && road != 0) { // Custom bridgehead
++						DrawRoadBits(ti, road, 1, ice, true); // 1 = on grass.
++						return;
++					}
++				} break;
++				default:
++					break;
++			}
+ 
+ 			if (!(BRIDGE_NO_FOUNDATION & (1 << ti->tileh))) {	// no foundations for 0, 3, 6, 9, 12
+ 				int f = GetBridgeFoundation(ti->tileh, ti->map5 & 0x1);	// pass direction
+@@ -1184,6 +1204,15 @@
+ 	// swap directions if Y tunnel/bridge to let the code handle the X case only.
+ 	if (ti->map5 & 1) uintswap(x,y);
+ 
++	if (IsTileBridgeEnd(ti->tile)) {
++		// Bridge Ending
++		if (ti->tileh != 0) {
++			TransportType mode = GB(ti->map5, 1, 2);
++			if (mode == TRANSPORT_RAIL && GetBridgeEndTrackBits(ti->tile)) return z + 8;
++			if (mode == TRANSPORT_ROAD && GetBridgeEndRoadBits(ti->tile)) return z + 8;
++		}
++	}
++
+ 	// to the side of the tunnel/bridge?
+ 	if (IS_INT_INSIDE(y, 5, 10+1)) {
+ 		// tunnel?
+@@ -1364,9 +1393,32 @@
+ 	} else if (m5 & 0x80) {
+ 		/* This is a bridge */
+ 		result = 0;
+-		if (((m5 & 0x6U) >> 1) == mode) {
++		if ((TransportType)GB(m5, 1, 2) == mode) {
+ 			/* Transport over the bridge is compatible */
+-			result = m5&1 ? 0x202 : 0x101;
++			if (IsTileBridgeEnd(tile)) {
++				switch ((TransportType)GB(m5, 1, 2)) {
++					case TRANSPORT_RAIL:
++						result = GetBridgeEndTrackBits(tile);
++						if (result == 3)
++							// Add 0x40 so the pathfinder knows the paths cross.
++							result |= 0x40;
++						break;
++					case TRANSPORT_ROAD: {
++						static const byte _road_trackbits[16] = {
++							0x0, 0x0, 0x0, 0x10, 0x0, 0x2, 0x8, 0x1A,
++							0x0, 0x4, 0x1, 0x15, 0x20, 0x26, 0x29, 0x3F,
++						};
++						result = _road_trackbits[GetBridgeEndRoadBits(tile)];
++					} break;
++					default: result = 0;
++				}
++				result |= result << 8;
++				if (!result)
++					result = HASBIT(m5, 0) ? 0x202 : 0x101;
++				return result;
++			} else {
++				result = HASBIT(m5, 0) ? 0x202 : 0x101;
++			}
+ 		}
+ 		if (m5 & 0x40) {
+ 			/* Bridge middle part */
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2865)
++++ saveload.c	(working copy)
+@@ -30,7 +30,7 @@
+ 
+ enum {
+ 	SAVEGAME_MAJOR_VERSION = 16,
+-	SAVEGAME_MINOR_VERSION = 0,
++	SAVEGAME_MINOR_VERSION = 1,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+ };
+Index: road_cmd.c
+===================================================================
+--- road_cmd.c	(revision 2865)
++++ road_cmd.c	(working copy)
+@@ -17,6 +17,7 @@
+ #include "depot.h"
+ #include "pbs.h"
+ #include "debug.h"
++#include "bridge.h"
+ 
+ /* When true, GetTrackStatus for roads will treat roads under reconstruction
+  * as normal roads instead of impassable. This is used when detecting whether
+@@ -187,6 +188,31 @@
+ 		if (!EnsureNoVehicleZ(tile, TilePixelHeight(tile)))
+ 			return CMD_ERROR;
+ 
++		if (IsTileBridgeEnd(tile)) {
++			byte current_road;
++			if (!IsTileOwner(tile, _current_player) ||
++					ti.tileh == 0 ||
++					(GB(_m[tile].m5, 1, 2) != TRANSPORT_ROAD) ||
++					!EnsureNoVehicle(tile))
++				return CMD_ERROR;
++
++			current_road = GetBridgeEndRoadBits(tile);
++			if (!(current_road & pieces))
++				return CMD_ERROR; // Road bit isn't there
++
++			if (flags & DC_EXEC) {
++				UnsetBridgeEndRoadBits(tile, pieces);
++				MarkTileDirtyByTile(tile);
++			}
++
++			cost = _price.remove_road;
++			if (!(current_road & ~pieces)) {
++				// If removing the last piece add the cost of terraforming, and the normal road piece.
++				cost += _price.terraform + _price.build_road;
++			}
++			return cost;
++		}
++
+ 		if ((ti.map5 & 0xE9) == 0xE8) {
+ 			if (pieces & 10) goto return_error;
+ 		} else if ((ti.map5 & 0xE9) == 0xE9) {
+@@ -359,7 +385,7 @@
+ int32 CmdBuildRoad(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TileInfo ti;
+-	int32 cost;
++	int32 cost = 0;
+ 	byte pieces = (byte)p1, existing = 0;
+ 	TileIndex tile;
+ 
+@@ -423,6 +449,41 @@
+ 		if (IsSteepTileh(ti.tileh)) // very steep tile
+ 				return_cmd_error(STR_1000_LAND_SLOPED_IN_WRONG_DIRECTION);
+ 
++		if (IsTileBridgeEnd(tile)) {
++			if (!IsTileOwner(tile, _current_player) ||
++					ti.tileh == 0 ||
++					(GB(_m[tile].m5, 1, 2) != TRANSPORT_ROAD) || // Must be road bridge
++					!EnsureNoVehicle(tile))
++				return CMD_ERROR;
++
++			existing = GetBridgeEndRoadBits(tile);
++			if (existing & pieces)
++				return CMD_ERROR; // Road bit is already there
++
++			if (!(HASBIT(_m[tile].m5, 0))) { // X
++				if (!(ti.tileh & 9) && HASBIT(pieces, 0)) return CMD_ERROR; // Top left
++				if (!(ti.tileh & 6) && HASBIT(pieces, 2)) return CMD_ERROR; // Buttom rght
++			} else {
++				if (!(ti.tileh & 3) && HASBIT(pieces, 1)) return CMD_ERROR; // Bottom left
++				if (!(ti.tileh & 12) && HASBIT(pieces, 3)) return CMD_ERROR; // Top right
++			}
++
++			if (existing == 0) {
++				if (!((HASBIT(_m[tile].m5, 0) ? 5 : 10) & pieces)) {
++					cost += _price.build_road;
++					pieces |= HASBIT(_m[tile].m5, 0) ? 5 : 10;
++				}
++				// Charge for raising the land.
++				cost += _price.terraform;
++			}
++
++			if (flags & DC_EXEC) {
++				SetBridgeEndRoadBits(tile, pieces);
++				MarkTileDirtyByTile(tile);
++			}
++			return cost + _price.build_road;
++		}
++
+ 		/* is this middle part of a bridge? */
+ 		if ((ti.map5 & 0xC0) != 0xC0)
+ 				goto do_clear;
+@@ -770,59 +831,74 @@
+ 	0,  0
+ };
+ 
+-static void DrawTile_Road(TileInfo *ti)
+-{
+-	uint32 image;
+-	uint16 m2;
+-
+-	if ( (ti->map5 & 0xF0) == 0) { // if it is a road the upper 4 bits are 0
+-		const DrawRoadTileStruct *drts;
++/**
++ * Draws the ground sprite and road pieces.
++ * @param ti TileInfo, used to work out slopes.
++ * @param road RoadBits to draw.
++ * @param ground_type Type of ground to draw.
++ * - ground_type = 0 bare land.
++ * - ground_type = 1 grass.
++ * - ground_type = 2 pavement.
++ * - ground_type = 3 pavement with streetlights.
++ * - ground_type = 5 pavement with trees.
++ * - ground_type = 6 grass with road works.
++ * - ground_type = 7 pavement with road works.
++ * @param snow Flag whether to draw as snow (or desert).
++ * @param flag Always draw foundation to ensure flat tile..
++ */
++void DrawRoadBits(TileInfo *ti, byte road, byte ground_type, bool snow, bool flat) {
++	const DrawRoadTileStruct *drts;
++	PalSpriteID image = 0;
+ 
+-		if (ti->tileh != 0) {
+-			int f = GetRoadFoundation(ti->tileh, ti->map5 & 0xF);
+-			if (f) DrawFoundation(ti, f);
+-
+-			// default sloped sprites..
+-			if (ti->tileh != 0) {
+-				image = _road_sloped_sprites[ti->tileh - 1] + 0x53F;
+-			} else  {
+-				image = _road_tile_sprites_1[ti->map5 & 0xF];
+-			}
++	if (ti->tileh != 0) {
++		int foundation;
++		if (flat) {
++			foundation = ti->tileh;
+ 		} else {
+-			image = _road_tile_sprites_1[ti->map5 & 0xF];
++			foundation = GetRoadFoundation(ti->tileh, road);
+ 		}
+ 
+-		m2 = GB(_m[ti->tile].m4, 4, 3);
++		if (foundation) DrawFoundation(ti, foundation);
+ 
+-		if (m2 == 0) image |= PALETTE_TO_BARE_LAND;
++		// default sloped sprites..
++		if (ti->tileh != 0) image = _road_sloped_sprites[ti->tileh - 1] + 0x53F;
++	}
+ 
+-		if (_m[ti->tile].m4 & 0x80) {
+-			image += 19;
+-		} else if (m2 > 1 && m2 != 6) {
+-			image -= 19; /* pavement along the road? */
+-		}
++	if (image == 0) image = _road_tile_sprites_1[road];
++	if (ground_type == 0) image |= PALETTE_TO_BARE_LAND;
++	if (snow) image += 19;
++	if (ground_type > 1 && ground_type != 6) image -= 19; // pavement along road
+ 
+-		DrawGroundSprite(image);
++	DrawGroundSprite(image);
+ 
+-		if (!(_display_opt & DO_FULL_DETAIL) || _cur_dpi->zoom == 2)
+-			return;
++	if (!(_display_opt & DO_FULL_DETAIL) || _cur_dpi->zoom == 2)
++		return;
+ 
+-		if (m2 >= 6) {
+-			// roadwork
+-			DrawGroundSprite(0x586 + ((ti->map5&8)!=0 ? 0 : 1));
+-			return;
+-		}
++	if (ground_type >= 6) {
++		// Road works
++		DrawGroundSprite(0x586 + (HASBIT(road, 4) ? 0 : 1));
++		return;
++	}
+ 
+-		drts = _road_display_table[m2][ti->map5 & 0xF];
++	drts = _road_display_table[ground_type][road];
+ 
+-		while ((image = drts->image) != 0) {
+-			int x = ti->x | drts->subcoord_x;
+-			int y = ti->y | drts->subcoord_y;
+-			byte z = ti->z;
+-			if (ti->tileh != 0)	z = GetSlopeZ(x, y);
+-			AddSortableSpriteToDraw(image, x, y, 2, 2, 0x10, z);
+-			drts++;
+-		}
++	while ((image = drts->image) != 0) {
++		int x = ti->x | drts->subcoord_x;
++		int y = ti->y | drts->subcoord_y;
++		byte z = ti->z;
++		if (ti->tileh != 0) z = GetSlopeZ(x, y);
++		AddSortableSpriteToDraw(image, x, y, 2, 2, 0x10, z);
++		drts++;
++	}
++}
++
++static void DrawTile_Road(TileInfo *ti)
++{
++	uint32 image;
++	uint16 m2;
++
++	if ( (ti->map5 & 0xF0) == 0) { // if it is a road the upper 4 bits are 0
++		DrawRoadBits(ti, GB(ti->map5, 0, 4), GB(_m[ti->tile].m4, 4, 3), HASBIT(_m[ti->tile].m4, 7), false);
+ 	} else if ( (ti->map5 & 0xE0) == 0) { // railroad crossing
+ 		int f = GetRoadFoundation(ti->tileh, ti->map5 & 0xF);
+ 		if (f) DrawFoundation(ti, f);
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2865)
++++ rail_cmd.c	(working copy)
+@@ -23,6 +23,7 @@
+ #include "npf.h"
+ #include "rail.h"
+ #include "railtypes.h" // include table for railtypes
++#include "bridge.h"
+ 
+ extern uint16 _custom_sprites_base;
+ 
+@@ -287,6 +288,51 @@
+ 
+ 	switch (GetTileType(tile)) {
+ 		case MP_TUNNELBRIDGE:
++			if (IsTileBridgeEnd(tile)) { // Bridge Ending
++				TrackBits current_trackbits;
++
++				if (!IsTileOwner(tile, _current_player) || // Must be same owner.
++						tileh == 0 || // Flat land means the bridge is sloped, so we can't build on it.
++						(GB(_m[tile].m5, 1, 2) != TRANSPORT_RAIL) || // Must be railway bridge.
++						((RailType)GB(_m[tile].m3, 0, 4) != (RailType)p1) || // Wrong track type.
++						!EnsureNoVehicle(tile))
++					return CMD_ERROR;
++
++				current_trackbits = GetBridgeEndTrackBits(tile);
++				if (current_trackbits & trackbit)
++					return CMD_ERROR; // Track bit is already there
++
++				if (!(HASBIT(m5, 0))) { // X
++					if (!(tileh & 9) && (trackbit & (TRACK_BIT_UPPER | TRACK_BIT_LEFT | TRACK_BIT_DIAG2))) return CMD_ERROR; // Top left
++					if (!(tileh & 6) && (trackbit & (TRACK_BIT_LOWER | TRACK_BIT_RIGHT | TRACK_BIT_DIAG2))) return CMD_ERROR; // Bottom right
++				} else { // Y
++					if (!(tileh & 3) && (trackbit & (TRACK_BIT_LOWER | TRACK_BIT_LEFT | TRACK_BIT_DIAG1))) return CMD_ERROR; // Bottom left
++					if (!(tileh & 12) && (trackbit & (TRACK_BIT_UPPER | TRACK_BIT_RIGHT | TRACK_BIT_DIAG1))) return CMD_ERROR; // Top right
++				}
++
++				if (current_trackbits == 0) {
++					if (!((HASBIT(m5, 0) ? 2 : 1) & trackbit)) {
++						// We are building a piece other than the normal bridge end track. Charge extra for it.
++						cost += _price.build_rail;
++						trackbit |= HASBIT(m5, 0) ? 2 : 1;
++					}
++					// Charge for raising the land.
++					cost += _price.terraform;
++				}
++
++				if (flags & DC_EXEC) {
++					bool reserved = false;
++					if (current_trackbits == 0) {
++						reserved = PBSTileReserved(tile);
++						if (reserved)
++							PBSClearTrack(tile, HASBIT(m5, 0));
++					}
++					SetBridgeEndTrackBits(tile, trackbit);
++					if (reserved)
++						PBSReserveTrack(tile, HASBIT(m5, 0));
++				}
++				break;
++			}
+ 			if ((m5 & 0xC0) != 0xC0 || // not bridge middle part?
+ 					(m5 & 0x01 ? 1 : 2) != trackbit) { // wrong direction?
+ 				// Get detailed error message
+@@ -441,6 +487,37 @@
+ 			if (!EnsureNoVehicleZ(tile, TilePixelHeight(tile)))
+ 				return CMD_ERROR;
+ 
++			if (IsTileBridgeEnd(tile)) { // Bridge Ending
++				TrackBits current_trackbits;
++				bool reserved = false;
++
++				if (!IsTileOwner(tile, _current_player) || // Must be same owner.
++						tileh == 0 || // Flat land means the bridge is sloped, so we can't build on it.
++						(GB(_m[tile].m5, 1, 2) != 0) || // Must be railway bridge.
++						((RailType)GB(_m[tile].m3, 0, 4) != (RailType)p1) || // Wrong track type.
++						!EnsureNoVehicle(tile))
++					return CMD_ERROR;
++
++				current_trackbits = GetBridgeEndTrackBits(tile);
++				if (!(current_trackbits & trackbit))
++					return CMD_ERROR; // Track bit isn't there
++
++				if (!(current_trackbits & ~trackbit)) {
++					// If removing the last piece add the cost of terraforming, and the normal rail piece.
++					cost += _price.terraform + _price.build_rail;
++					reserved = PBSTileReserved(tile);
++				}
++
++				if (flags & DC_EXEC) {
++					if (reserved)
++						PBSClearTrack(tile, HASBIT(m5, 0));
++					UnsetBridgeEndTrackBits(tile, trackbit);
++					if (reserved)
++						PBSReserveTrack(tile, HASBIT(m5, 0));
++				}
++				break;
++			}
++
+ 			if ((_m[tile].m5 & 0xF8) != 0xE0)
+ 				return CMD_ERROR;
+ 
+@@ -1367,76 +1444,96 @@
+ 	AddSortableSpriteToDraw(image, ti->x + x, ti->y + y, xsize, ysize, zsize, ti->z + z);
+ }
+ 
+-static void DrawTile_Track(TileInfo *ti)
+-{
+-	byte m5;
++/**
++ * Draws the ground sprite and track pieces.
++ * @param ti TileInfo, used to work out slopes and rail type.
++ * @param track TrackBits to draw.
++ * @param earth Flag whether to draw the ground below as brown.
++ * @param snow Flag whether to draw as snow.
++ * @param flag Always draw foundation to ensure flat tile..
++ */
++void DrawTrackBits(TileInfo *ti, TrackBits track, bool earth, bool snow, bool flat) {
+ 	const RailtypeInfo *rti = GetRailTypeInfo(GetRailType(ti->tile));
+-	uint32 image;	//XXX ok why the hell is SpriteID 16 bit when all the drawing routines need 32?
++	PalSpriteID image;
++	bool special = false;
+ 
+-	_drawtile_track_palette = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)));
+-
+-	m5 = (byte)ti->map5;
+-	if (!(m5 & RAIL_TYPE_SPECIAL)) {
+-		bool special;
++	// Select the sprite to use.
++	(image = rti->base_sprites.track_y, track == TRACK_BIT_DIAG2) ||
++	(image++,                           track == TRACK_BIT_DIAG1) ||
++	(image++,                           track == TRACK_BIT_UPPER) ||
++	(image++,                           track == TRACK_BIT_LOWER) ||
++	(image++,                           track == TRACK_BIT_RIGHT) ||
++	(image++,                           track == TRACK_BIT_LEFT) ||
++	(image++,                           track == (TRACK_BIT_DIAG1 | TRACK_BIT_DIAG2)) ||
++
++	(image = rti->base_sprites.track_ns, track == (TRACK_BIT_UPPER | TRACK_BIT_LOWER)) ||
++	(image++,                            track == (TRACK_BIT_LEFT | TRACK_BIT_RIGHT)) ||
++
++	(special = true, false) ||
++	(image = rti->base_sprites.ground, !(track & (TRACK_BIT_RIGHT | TRACK_BIT_UPPER | TRACK_BIT_DIAG1))) ||
++	(image++,                          !(track & (TRACK_BIT_LEFT | TRACK_BIT_LOWER | TRACK_BIT_DIAG1))) ||
++	(image++,                          !(track & (TRACK_BIT_LEFT | TRACK_BIT_UPPER | TRACK_BIT_DIAG2))) ||
++	(image++,                          !(track & (TRACK_BIT_RIGHT | TRACK_BIT_LOWER | TRACK_BIT_DIAG2))) ||
++	(image++, true);
+ 
+-		m5 &= TRACK_BIT_MASK;
+-
+-		special = false;
++	if (ti->tileh != 0) {
++		int foundation;
++		if (flat) {
++			foundation = ti->tileh;
++		} else {
++			foundation = GetRailFoundation(ti->tileh, track);
++		}
+ 
+-		// select the sprite to use based on the map5 byte.
+-		(image = rti->base_sprites.track_y, m5 == TRACK_BIT_DIAG2) ||
+-		(image++,				m5 == TRACK_BIT_DIAG1) ||
+-		(image++,				m5 == TRACK_BIT_UPPER) ||
+-		(image++,				m5 == TRACK_BIT_LOWER) ||
+-		(image++,				m5 == TRACK_BIT_RIGHT) ||
+-		(image++,				m5 == TRACK_BIT_LEFT) ||
+-		(image++,				m5 == (TRACK_BIT_DIAG1|TRACK_BIT_DIAG2)) ||
++		if (foundation)
++			DrawFoundation(ti, foundation);
+ 
+-		(image = rti->base_sprites.track_ns, m5 == (TRACK_BIT_UPPER|TRACK_BIT_LOWER)) ||
+-		(image++,				m5 == (TRACK_BIT_LEFT|TRACK_BIT_RIGHT)) ||
++		// default sloped sprites..
++		if (ti->tileh != 0) image = _track_sloped_sprites[ti->tileh - 1] + rti->base_sprites.track_y;
++	}
+ 
+-		(special=true, false) ||
++	if (earth) {
++		image = (image & SPRITE_MASK) | PALETTE_TO_BARE_LAND; // Use brown palette
++	} else if (snow) {
++		image += rti->snow_offset;
++	}
+ 
+-		(image = rti->base_sprites.ground, !(m5 & (TRACK_BIT_RIGHT|TRACK_BIT_UPPER|TRACK_BIT_DIAG1))) ||
+-		(image++,				!(m5 & (TRACK_BIT_LEFT|TRACK_BIT_LOWER|TRACK_BIT_DIAG1))) ||
+-		(image++,				!(m5 & (TRACK_BIT_LEFT|TRACK_BIT_UPPER|TRACK_BIT_DIAG2))) ||
+-		(image++,				!(m5 & (TRACK_BIT_RIGHT|TRACK_BIT_LOWER|TRACK_BIT_DIAG2))) ||
+-		(image++, true);
++	DrawGroundSprite(image);
+ 
+-		if (ti->tileh != 0) {
+-			int f = GetRailFoundation(ti->tileh, ti->map5 & 0x3F);
+-			if (f) DrawFoundation(ti, f);
++	/* Draw track pieces individually for junctions */
++	if (special) {
++		if (track & TRACK_BIT_DIAG1) DrawGroundSprite(rti->base_sprites.single_y);
++		if (track & TRACK_BIT_DIAG2) DrawGroundSprite(rti->base_sprites.single_x);
++		if (track & TRACK_BIT_UPPER) DrawGroundSprite(rti->base_sprites.single_n);
++		if (track & TRACK_BIT_LOWER) DrawGroundSprite(rti->base_sprites.single_s);
++		if (track & TRACK_BIT_LEFT)  DrawGroundSprite(rti->base_sprites.single_w);
++		if (track & TRACK_BIT_RIGHT) DrawGroundSprite(rti->base_sprites.single_e);
++	}
+ 
+-			// default sloped sprites..
+-			if (ti->tileh != 0) image = _track_sloped_sprites[ti->tileh - 1] + rti->base_sprites.track_y;
+-		}
++	if (_debug_pbs_level >= 1) {
++		byte pbs = PBSTileReserved(ti->tile);
++		if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(rti->base_sprites.single_y | PALETTE_CRASH);
++		if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite(rti->base_sprites.single_x | PALETTE_CRASH);
++		if (pbs & TRACK_BIT_UPPER) DrawGroundSprite(rti->base_sprites.single_n | PALETTE_CRASH);
++		if (pbs & TRACK_BIT_LOWER) DrawGroundSprite(rti->base_sprites.single_s | PALETTE_CRASH);
++		if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite(rti->base_sprites.single_w | PALETTE_CRASH);
++		if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite(rti->base_sprites.single_e | PALETTE_CRASH);
++	}
++}
+ 
+-		if ((_m[ti->tile].m2 & RAIL_MAP2LO_GROUND_MASK) == RAIL_GROUND_BROWN) {
+-			image = (image & SPRITE_MASK) | PALETTE_TO_BARE_LAND; // use a brown palette
+-		 } else if ((_m[ti->tile].m2 & RAIL_MAP2LO_GROUND_MASK) == RAIL_GROUND_ICE_DESERT) {
+-			image += rti->snow_offset;
+-		}
++static void DrawTile_Track(TileInfo *ti)
++{
++	byte m5;
++	const RailtypeInfo *rti = GetRailTypeInfo(GetRailType(ti->tile));
++	uint32 image;	//XXX ok why the hell is SpriteID 16 bit when all the drawing routines need 32?
+ 
+-		DrawGroundSprite(image);
++	_drawtile_track_palette = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)));
+ 
+-		if (special) {
+-			if (m5 & TRACK_BIT_DIAG1) DrawGroundSprite(rti->base_sprites.single_y);
+-			if (m5 & TRACK_BIT_DIAG2) DrawGroundSprite(rti->base_sprites.single_x);
+-			if (m5 & TRACK_BIT_UPPER) DrawGroundSprite(rti->base_sprites.single_n);
+-			if (m5 & TRACK_BIT_LOWER) DrawGroundSprite(rti->base_sprites.single_s);
+-			if (m5 & TRACK_BIT_LEFT)  DrawGroundSprite(rti->base_sprites.single_w);
+-			if (m5 & TRACK_BIT_RIGHT) DrawGroundSprite(rti->base_sprites.single_e);
+-		}
++	m5 = (byte)ti->map5;
++	if (!(m5 & RAIL_TYPE_SPECIAL)) {
++		bool earth = (_m[ti->tile].m2 & RAIL_MAP2LO_GROUND_MASK) == RAIL_GROUND_BROWN;
++		bool snow = (_m[ti->tile].m2 & RAIL_MAP2LO_GROUND_MASK) == RAIL_GROUND_ICE_DESERT;
+ 
+-		if (_debug_pbs_level >= 1) {
+-			byte pbs = PBSTileReserved(ti->tile);
+-			if (pbs & TRACK_BIT_DIAG1) DrawGroundSprite(rti->base_sprites.single_y | PALETTE_CRASH);
+-			if (pbs & TRACK_BIT_DIAG2) DrawGroundSprite(rti->base_sprites.single_x | PALETTE_CRASH);
+-			if (pbs & TRACK_BIT_UPPER) DrawGroundSprite(rti->base_sprites.single_n | PALETTE_CRASH);
+-			if (pbs & TRACK_BIT_LOWER) DrawGroundSprite(rti->base_sprites.single_s | PALETTE_CRASH);
+-			if (pbs & TRACK_BIT_LEFT)  DrawGroundSprite(rti->base_sprites.single_w | PALETTE_CRASH);
+-			if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite(rti->base_sprites.single_e | PALETTE_CRASH);
+-		}
++		DrawTrackBits(ti, m5 & TRACK_BIT_MASK, earth, snow, false);
+ 
+ 		if (_display_opt & DO_FULL_DETAIL) {
+ 			_detailed_track_proc[_m[ti->tile].m2 & RAIL_MAP2LO_GROUND_MASK](ti);
+Index: landscape.c
+===================================================================
+--- landscape.c	(revision 2865)
++++ landscape.c	(working copy)
+@@ -209,9 +209,9 @@
+ 
+ 	TileInfo ti2;
+ 	FindLandscapeHeight(&ti2, ti->x, ti->y-1);
+-	if(hasFoundation( &ti2, true )) sprite_base += 22;		// foundation in NW direction
++	if(hasFoundation( &ti2, true ) || (IsTileType(ti2.tile, MP_TUNNELBRIDGE) && (ti2.map5 & 0xC1) == 0xC1)) sprite_base += 22;		// foundation in NW direction
+ 	FindLandscapeHeight(&ti2, ti->x-1, ti->y);
+-	if(hasFoundation( &ti2, false )) sprite_base += 22*2;	// foundation in NE direction
++	if(hasFoundation( &ti2, false ) || (IsTileType(ti2.tile, MP_TUNNELBRIDGE) && (ti2.map5 & 0xC1) == 0xC0)) sprite_base += 22*2;	// foundation in NE direction
+ 
+ 	if (f < 15) {
+ 		// leveled foundation
+Index: bridge.h
+===================================================================
+--- bridge.h	(revision 2865)
++++ bridge.h	(working copy)
+@@ -5,6 +5,9 @@
+ #ifndef BRIDGE_H
+ #define BRIDGE_H
+ 
++#include "macros.h"
++#include "rail.h"
++
+ /** Struct containing information about a single bridge type
+  */
+ typedef struct Bridge {
+@@ -19,4 +22,49 @@
+ 
+ extern const Bridge _bridge[MAX_BRIDGES];
+ 
++/**
++ * Gets track bits on the given Bridge End tile.
++ * @param tile Tile.
++ * @return Track bits that are on the tile.
++ */
++static inline TrackBits GetBridgeEndTrackBits(TileIndex tile)
++{
++	return GB(_m[tile].m4, 0, 6);
++}
++
++/**
++ * Sets track bits on the given Bridge End tile.
++ * @param tile Tile.
++ * @param track Track bits to set.
++ */
++static inline void SetBridgeEndTrackBits(TileIndex tile, TrackBits track)
++{
++	_m[tile].m4 |= track & 0x3F;
++}
++
++/**
++ * Removes track bits from the given Bridge End tile.
++ * @param tile Tile.
++ * @param track Track bits to remove.
++ */
++static inline void UnsetBridgeEndTrackBits(TileIndex tile, TrackBits track)
++{
++	_m[tile].m4 &= ~(track & 0x3F);
++}
++
++static inline byte GetBridgeEndRoadBits(TileIndex tile)
++{
++	return GB(_m[tile].m4, 0, 4);
++}
++
++static inline void SetBridgeEndRoadBits(TileIndex tile, byte road)
++{
++	_m[tile].m4 |= road & 0x0F;
++}
++
++static inline void UnsetBridgeEndRoadBits(TileIndex tile, byte road)
++{
++	_m[tile].m4 &= ~(road & 0x0F);
++}
++
+ #endif /* BRIDGE_H */
+Index: tile.h
+===================================================================
+--- tile.h	(revision 2865)
++++ tile.h	(working copy)
+@@ -102,6 +102,13 @@
+ 	return IsTileType(tile, MP_TUNNELBRIDGE) && (_m[tile].m5 & 0xF0) == 0;
+ }
+ 
++static inline bool IsTileBridgeEnd(TileIndex tile)
++{
++	return IsTileType(tile, MP_TUNNELBRIDGE) &&
++		HASBIT(_m[tile].m5, 7) &&
++		!HASBIT(_m[tile].m5, 6);
++}
++
+ static inline Owner GetTileOwner(TileIndex tile)
+ {
+ 	assert(tile < MapSize());

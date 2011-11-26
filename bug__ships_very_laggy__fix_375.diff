@@ -1,0 +1,44 @@
+Index: map.c
+===================================================================
+--- map.c	(revision 2921)
++++ map.c	(working copy)
+@@ -6,6 +6,7 @@
+ #include "functions.h"
+ #include "macros.h"
+ #include "map.h"
++#include "variables.h"
+ 
+ uint _map_log_x;
+ uint _map_size_x;
+@@ -167,7 +168,7 @@
+ 	 * (dx-dy) - straightTracks  == (min + max) - straightTracks = min + // max - 2 * min = max - min */
+ 	const uint diagTracks = dx + dy - straightTracks; /* The number of diagonal (full tile length) tracks. */
+ 
+-	return diagTracks + straightTracks * STRAIGHT_TRACK_LENGTH;
++	return diagTracks * NPF_TILE_LENGTH + straightTracks * NPF_TILE_LENGTH * STRAIGHT_TRACK_LENGTH;
+ }
+ 
+ uint DistanceFromEdge(TileIndex tile)
+Index: npf.c
+===================================================================
+--- npf.c	(revision 2921)
++++ npf.c	(working copy)
+@@ -63,6 +63,9 @@
+ 		if (IsTileDepotType(dst_tile, TRANSPORT_RAIL) && (exitdir != ReverseDiagdir(GetDepotDirection(dst_tile, TRANSPORT_RAIL))))
+ 			return true;
+ 
++		if (IsTileType(dst_tile, MP_TUNNELBRIDGE) && (_m[dst_tile].m5 & 0xF0)==0 && (_m[dst_tile].m5 & 3) == ReverseDiagdir(exitdir))
++				return true;
++
+ 		/* Check for oneway signal against us */
+ 		if (IsTileType(dst_tile, MP_RAILWAY) && GetRailTileType(dst_tile) == RAIL_TYPE_SIGNALS) {
+ 			if (HasSignalOnTrackdir(dst_tile, ReverseTrackdir(FindFirstBit2x64(ts))) && !HasSignalOnTrackdir(dst_tile, FindFirstBit2x64(ts)))
+@@ -235,7 +238,7 @@
+ 		dist = DistanceManhattan(from, to) * NPF_TILE_LENGTH;
+ 	else
+ 		/* Ships and trains can also go diagonal, so the minimum distance is shorter */
+-		dist = DistanceTrack(from, to) * NPF_TILE_LENGTH;
++		dist = DistanceTrack(from, to);
+ 
+ 	DEBUG(npf, 4)("Calculating H for: (%d, %d). Result: %d", TileX(current->tile), TileY(current->tile), dist);
+ 

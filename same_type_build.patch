@@ -1,0 +1,66 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2586)
++++ lang/english.txt	(working copy)
+@@ -2455,6 +2455,8 @@
+ STR_8830_CAN_T_SEND_TRAIN_TO_DEPOT                              :{WHITE}Can't send train to depot...
+ STR_8831_NO_MORE_SPACE_FOR_ORDERS                               :{WHITE}No more space for orders
+ STR_8832_TOO_MANY_ORDERS                                        :{WHITE}Too many orders
++STR_INCOMPATIBLE_RAIL_TYPE                           :{WHITE}Incompatible rail type
++
+ STR_8833_CAN_T_INSERT_NEW_ORDER                                 :{WHITE}Can't insert new order...
+ STR_8834_CAN_T_DELETE_THIS_ORDER                                :{WHITE}Can't delete this order...
+ STR_8835_CAN_T_MODIFY_THIS_ORDER                                :{WHITE}Can't modify this order...
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2586)
++++ train_cmd.c	(working copy)
+@@ -405,8 +405,17 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+ 	rvi = RailVehInfo(engine);
++	
+ 	value = (rvi->base_cost * _price.build_railwagon) >> 8;
+ 
++	e = GetEngine(engine);
++
++	/* Check to make sure train type is same as depot type */
++	if (e->railtype != GetRailType(tile)) {
++		_error_message = STR_INCOMPATIBLE_RAIL_TYPE;
++		return CMD_ERROR;
++	}
++		
+ 	if (!(flags & DC_QUERY_COST)) {
+ 		_error_message = STR_00E1_TOO_MANY_VEHICLES_IN_GAME;
+ 
+@@ -459,7 +468,6 @@
+ 			v->value = value;
+ //			v->day_counter = 0;
+ 
+-			e = GetEngine(engine);
+ 			v->u.rail.railtype = e->railtype;
+ 
+ 			v->build_year = _cur_year;
+@@ -576,6 +584,14 @@
+ 	Engine *e;
+ 	TileIndex tile = TileVirtXY(x, y);
+ 
++	e = GetEngine(p1);
++	
++	/* Check to make sure train type is same as depot type */
++	if (e->railtype != GetRailType(tile)) {
++		_error_message = STR_INCOMPATIBLE_RAIL_TYPE;
++		return CMD_ERROR;
++	}
++
+ 	/* Check if the engine-type is valid (for the player) */
+ 	if (!IsEngineBuildable(p1, VEH_Train)) return CMD_ERROR;
+ 
+@@ -628,7 +644,6 @@
+ 			v->dest_tile = 0;
+ 
+ 			v->engine_type = (byte)p1;
+-			e = GetEngine(p1);
+ 
+ 			v->reliability = e->reliability;
+ 			v->reliability_spd_dec = e->reliability_spd_dec;

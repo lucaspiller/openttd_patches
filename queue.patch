@@ -1,0 +1,1343 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2440)
++++ station_cmd.c	(working copy)
+@@ -460,6 +460,8 @@
+ 		ge->last_age = 0xFF;
+ 	}
+ 
++	st->airport_queue = new_VQueue();
++
+ 	_global_station_sort_dirty = true; // build a new station
+ }
+ 
+@@ -1781,6 +1783,8 @@
+ 		InvalidateWindow(WC_STATION_LIST, st->owner);
+ 	}
+ 
++	st->airport_queue = new_VQueue();
++
+ 	return cost;
+ }
+ 
+@@ -2417,6 +2421,12 @@
+ 	DeleteDestinationFromVehicleOrder(order);
+ 
+ 	DeleteSubsidyWithStation(index);
++
++	st->airport_queue->clear;
++	free(st->airport_queue);
++	// Freed by above?
++	//free(st->airport_queue);
++
+ }
+ 
+ void DeleteAllPlayerStations(void)
+@@ -3113,6 +3123,8 @@
+ 				InitializeRoadStop(st->truck_stops, NULL, st->lorry_tile_obsolete, st->index);
+ 			}
+ 		}
++
++	st->airport_queue = new_VQueue();
+ 	}
+ 
+ 	/* This is to ensure all pointers are within the limits of _stations_size */
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2440)
++++ functions.h	(working copy)
+@@ -27,7 +27,7 @@
+ 
+ bool IsValidTile(TileIndex tile);
+ 
+-static inline Point RemapCoords(int x, int y, int z)
++static inline Point RemapCoords(int x, int y, uint32 z)
+ {
+ #if !defined(NEW_ROTATION)
+ 	Point pt;
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 2440)
++++ aircraft_cmd.c	(working copy)
+@@ -15,6 +15,7 @@
+ #include "player.h"
+ #include "airport.h"
+ #include "vehicle_gui.h"
++#include "queue.h"
+ 
+ static bool AirportMove(Vehicle *v, const AirportFTAClass *Airport);
+ static bool AirportSetBlocks(Vehicle *v, AirportFTA *current_pos, const AirportFTAClass *Airport);
+@@ -25,7 +26,7 @@
+ static void CrashAirplane(Vehicle *v);
+ 
+ static void AircraftNextAirportPos_and_Order(Vehicle *v);
+-static byte GetAircraftFlyingAltitude(const Vehicle *v);
++static uint32 GetAircraftFlyingAltitude(Vehicle *v);
+ 
+ static const SpriteID _aircraft_sprite[] = {
+ 	0x0EB5, 0x0EBD, 0x0EC5, 0x0ECD,
+@@ -457,7 +458,6 @@
+ 			if (p2 != 0) return CMD_ERROR;
+ 			// the aircraft has to search for a hangar on its own
+ 			station = FindNearestHangar(v);
+-
+ 			next_airport_has_hangar = false;
+ 			if (station == INVALID_STATION) return CMD_ERROR;
+ 			st = GetStation(station);
+@@ -721,7 +721,7 @@
+ 	EndVehicleMove(u);
+ }
+ 
+-static void SetAircraftPosition(Vehicle *v, int x, int y, int z)
++static void SetAircraftPosition(Vehicle *v, int x, int y, uint32 z)
+ {
+ 	Vehicle *u;
+ 	int yt;
+@@ -787,17 +787,30 @@
+ 	SndPlayVehicleFx(AircraftVehInfo(v->engine_type)->sfx, v);
+ }
+ 
+-static bool UpdateAircraftSpeed(Vehicle *v)
++static int UpdateAircraftSpeed(Vehicle *v)
+ {
+-	uint spd = v->acceleration * 2;
++	uint16 spd = v->acceleration * 2;
+ 	byte t;
++	uint16 new_speed;
++	
++	new_speed = v->max_speed * _patches.aircraft_speed_coeff;
+ 
+-	v->subspeed = (t=v->subspeed) + (byte)spd;
+-	spd = min( v->cur_speed + (spd >> 8) + (v->subspeed < t), v->max_speed);
++	// Don't fo faster than max
++	if(v->u.air.desired_speed > new_speed) {
++		v->u.air.desired_speed = new_speed;
++	}
+ 
++	//spd = v->cur_speed + v->acceleration;
++	v->subspeed = (t=v->subspeed) + (uint16)spd;
++	spd = min( v->cur_speed + (spd >> 8) + (v->subspeed < t), new_speed);
++
+ 	// adjust speed for broken vehicles
+-	if(v->vehstatus&VS_AIRCRAFT_BROKEN) spd = min(spd, 27);
++	if(v->vehstatus&VS_AIRCRAFT_BROKEN) spd = min(spd, v->max_speed / 3 * _patches.aircraft_speed_coeff);
+ 
++	// If landing, do not speed up!
++	if((v->u.air.state == LANDING || v->u.air.state == ENDLANDING) && spd > 15 * _patches.aircraft_speed_coeff)
++		spd = min(v->cur_speed, spd);
++
+ 	//updates statusbar only if speed have changed to save CPU time
+ 	if (spd != v->cur_speed) {
+ 		v->cur_speed = spd;
+@@ -805,6 +818,7 @@
+ 			InvalidateWindowWidget(WC_VEHICLE_VIEW, v->index, STATUS_BAR);
+ 	}
+ 
++
+ 	if (!(v->direction & 1)) {
+ 		spd = spd * 3 >> 2;
+ 	}
+@@ -812,33 +826,74 @@
+ 	if (spd == 0)
+ 		return false;
+ 
+-	if ((byte)++spd == 0)
++	if ((uint32)++spd == 0)
+ 		return true;
+ 
+-	v->progress = (t = v->progress) - (byte)spd;
+ 
+-	return (t < v->progress);
++//	v->progress = (t = v->progress) - (uint16)spd;
++
++//	return (t < v->progress);
++	spd += v->progress;
++	v->progress = (byte)spd;
++	return (spd >> 8);
+ }
+ 
+ // get Aircraft running altitude
+-static byte GetAircraftFlyingAltitude(const Vehicle *v)
++static uint32 GetAircraftFlyingAltitude(Vehicle *v)
+ {
+-	switch (v->max_speed) {
+-		case 37: return 162;
+-		case 74: return 171;
+-		default: return 180;
++//	uint16 maxz = 150;
++//	if(v->max_speed > 75 * _patches.aircraft_speed_coeff) {
++//		maxz = 4 * v->max_speed - 600;
++//	} else if(v->max_speed * _patches.aircraft_speed_coeff > 255) {
++//		maxz = 255;
++//	} else {
++//		maxz = 150;
++//	}
++	uint32 queue_adjust = 0;
++	uint32 maxz;
++	if(v->queue_item != NULL)
++		queue_adjust = 32 * v->queue_item->queue->getPos(v->queue_item->queue, v)-1;
++	
++	maxz = 162;
++	if(v->max_speed > 37 * _patches.aircraft_speed_coeff) {
++		maxz = 171;
++		if(v->max_speed > 74 * _patches.aircraft_speed_coeff) {
++			maxz = 180;
++		}
+ 	}
++
++	return maxz + queue_adjust;
+ }
+ 
++/* returns true if staying in the same tile */
++bool GetNewAircraftPos(Vehicle *v, GetNewVehiclePosResult *gp, int tilesMoved)
++{
++	static const int8 _delta_coord[16] = {
++		-1,-1,-1, 0, 1, 1, 1, 0, /* x */
++		-1, 0, 1, 1, 1, 0,-1,-1, /* y */
++	};
++
++	int x = v->x_pos + _delta_coord[v->direction] * tilesMoved;
++	int y = v->y_pos + _delta_coord[v->direction + 8] * tilesMoved;
++
++	gp->x = x;
++	gp->y = y;
++	gp->old_tile = v->tile;
++	gp->new_tile = TILE_FROM_XY(x,y);
++	return gp->old_tile == gp->new_tile;
++}
++
+ static bool AircraftController(Vehicle *v)
+ {
+ 	Station *st;
+ 	const AirportMovingData *amd;
+ 	Vehicle *u;
+-	byte z,dirdiff,newdir,maxz,curz;
++	byte dirdiff,newdir;
+ 	GetNewVehiclePosResult gp;
+-	uint dist;
++	uint dist, desired_dist;
+ 	int x,y;
++	int tilesMoved;
++	uint32 z,maxz,curz;
+ 
+ 	st = GetStation(v->u.air.targetairport);
+ 
+@@ -867,7 +922,7 @@
+ 			}
+ 		} else {
+ 			u->cur_speed = 32;
+-			if (UpdateAircraftSpeed(v)) {
++			if (UpdateAircraftSpeed(v) >= 1) {
+ 				v->tile = 0;
+ 
+ 				// Reached altitude?
+@@ -883,7 +938,7 @@
+ 
+ 	// Helicopter landing.
+ 	if (amd->flag & AMED_HELI_LOWER) {
+-		if (UpdateAircraftSpeed(v)) {
++		if (UpdateAircraftSpeed(v) >= 1) {
+ 			if (st->airport_tile == 0) {
+ 				// FIXME - AircraftController -> if station no longer exists, do not land
+ 				// helicopter will circle until sign disappears, then go to next order
+@@ -920,6 +975,61 @@
+ 	// Get distance from destination pos to current pos.
+ 	dist = myabs(x + amd->x - v->x_pos) +  myabs(y + amd->y - v->y_pos);
+ 
++	// If target airport is VERY busy (queue larger than 5), always add to queue
++	if(st->airport_queue->size > 5  && v->u.air.state == FLYING)
++	{
++		// If it's already in the queue, don't re-add it
++		// Otherwise, add it to queue - but don't add helicopters!
++		// otherwise, helicopters will be part of the queue and can't land separately!
++		if(!(v->queue_item != NULL) && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++			// Add to queue
++			assert(st->airport_queue->push(st->airport_queue, v));
++		}
++	}
++
++	// If the aircraft is flying and is within range of an airport, add it to the queue
++	if(dist < 1000 && v->u.air.state == FLYING)  
++	{
++		// If it's already in the queue, don't re-add it
++		// Otherwise, add it to queue - but don't add helicopters!
++		// otherwise, helicopters will be part of the queue and can't land separately!
++		if(!(v->queue_item != NULL) && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++			// Add to queue
++			st->airport_queue->push(st->airport_queue, v);
++		}
++	}
++
++	// Calculate desired distance
++	if(v->queue_item != NULL)
++		desired_dist = v->queue_item->queue->getPos(v->queue_item->queue, v) * 250;
++	else
++		desired_dist = st->airport_queue->size * 250;
++
++	// Try to reach desired distance
++	if(myabs(desired_dist - dist) < 10) {
++		// At or close to desired distance, maintain a good cruising speed
++		v->u.air.desired_speed = min(v->max_speed * _patches.aircraft_speed_coeff, 36 * _patches.aircraft_speed_coeff);
++	} else {
++		if(dist < desired_dist && v->queue_item != NULL) {
++			// Too close, slow down, but only if not near end of queue
++			if(v->queue_item->queue->getPos(v->queue_item->queue, v) > 2)
++				v->u.air.desired_speed = min(v->max_speed * _patches.aircraft_speed_coeff, 15 * _patches.aircraft_speed_coeff);
++			else
++				v->u.air.desired_speed = v->u.air.desired_speed = min(v->max_speed * _patches.aircraft_speed_coeff, 36 * _patches.aircraft_speed_coeff);
++		} else {
++			// Too far, speed up
++			v->u.air.desired_speed = v->max_speed * _patches.aircraft_speed_coeff;
++		}
++	}
++
++	if(v->u.air.state == FLYING) {
++		if(v->cur_speed > v->u.air.desired_speed){
++			v->cur_speed--;
++		} else {
++			v->cur_speed++;
++		}
++	}
++
+ 	// Need exact position?
+ 	if (!(amd->flag & AMED_EXACTPOS) && dist <= (uint)((amd->flag&AMED_SLOWTURN)?8:4))
+ 		return true;
+@@ -940,7 +1050,7 @@
+ 			return true;
+ 		}
+ 
+-		if (!UpdateAircraftSpeed(v))
++		if (UpdateAircraftSpeed(v) < 1)
+ 			return false;
+ 
+ 		v->direction = (v->direction+((dirdiff&7)<5?1:-1)) & 7;
+@@ -954,7 +1064,11 @@
+ 	if (!(amd->flag & AMED_NOSPDCLAMP) && v->cur_speed > 12)
+ 		v->cur_speed = 12;
+ 
+-	if (!UpdateAircraftSpeed(v))
++	//if (!UpdateAircraftSpeed(v))
++	//	return false;
++
++	tilesMoved = UpdateAircraftSpeed(v);
++	if(tilesMoved < 1)
+ 		return false;
+ 
+ 	// Decrease animation counter.
+@@ -976,7 +1090,7 @@
+ 	}
+ 
+ 	// Move vehicle.
+-	GetNewVehiclePos(v, &gp);
++	GetNewAircraftPos(v, &gp, tilesMoved);
+ 	v->tile = gp.new_tile;
+ 
+ 	// If vehicle is in the air, use tile coordinate 0.
+@@ -1027,6 +1141,20 @@
+ 			v->cur_speed -= 4;
+ 	}
+ 
++	curz = z;
++	if(v->queue_item != NULL)
++	{
++		curz = GetAircraftFlyingAltitude(v);
++	}
++
++	if(curz < z)
++	{
++		z--;
++	} else if(curz > z)
++	{
++		z++;
++	}
++
+ 	SetAircraftPosition(v, gp.x, gp.y, z);
+ 	return false;
+ }
+@@ -1039,7 +1167,7 @@
+ {
+ 	uint32 r;
+ 	Station *st;
+-	int z;
++	uint32 z;
+ 
+ 	v->u.air.crashed_counter++;
+ 
+@@ -1552,8 +1680,15 @@
+ 	byte landingtype;
+ 	AirportFTA *current;
+ 	uint16 tcur_speed, tsubspeed;
++	// For all those budding software engineers out there:
++	// An invariant that changes :P.
++	bool can_land;
++	
++	can_land = false;
+ 
++	// Get the target airport
+ 	st = GetStation(v->u.air.targetairport);
++
+ 	// flying device is accepted at this station
+ 	// small airport --> no helicopters (AIRCRAFT_ONLY)
+ 	// all other airports --> all types of flying devices (ALL)
+@@ -1567,14 +1702,59 @@
+ 		// it is possible to choose from multiple landing runways, so loop until a free one is found
+ 		landingtype = (v->subtype != 0) ? LANDING : HELILANDING;
+ 		current = Airport->layout[v->u.air.pos].next_in_chain;
++
++
++		// Check to see if we're going to land at an airport.
++
++		// Fisrt, check queue - if we are on top, or if it's empty,
++		// we can land.
++
++		// Just in case the code in AircraftController code misses,
++		// We check before the aircraft lands.
++
++		// If it's already in the queue, don't re-add it
++		// Otherwise, add it to queue - but don't add helicopters!
++		// otherwise, helicopters will be part of the queue and can't land separately!
++		if(!(v->queue_item != NULL) && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++			// Add to queue
++			assert(st->airport_queue->push(st->airport_queue, v));
++		}
++
++		// save speed before, since if AirportHasBlock is false, it resets them to 0
++		// we don't want that for plane in air
++		// hack for speed thingie
++		tcur_speed = v->cur_speed;
++		tsubspeed = v->subspeed;
++
++		// If we're on top, go in
++		if(st->airport_queue->getTop(st->airport_queue) == v && (_patches.aircraft_queueing == true && v->subtype != 0)) {
++			if (!AirportHasBlock(v, current, Airport)) {			
++				can_land = true;
++				st->airport_queue->pop(st->airport_queue);
++			} else {
++				can_land = false;
++			}
++		}
++
++		if(_patches.aircraft_queueing == false || v->subtype == 0) {
++			if (!AirportHasBlock(v, current, Airport)) {			
++				can_land = true;
++			} else {
++				can_land = false;
++			}
++		}
++
++		// Always do helicopters, regardless.
++//		if(landingtype == HELILANDING) {
++//			if (!AirportHasBlock(v, current, Airport)) {			
++//				can_land = true;
++//			}
++//		}
++
+ 		while (current != NULL) {
+ 			if (current->heading == landingtype) {
+-				// save speed before, since if AirportHasBlock is false, it resets them to 0
+-				// we don't want that for plane in air
+-				// hack for speed thingie
+-				tcur_speed = v->cur_speed;
+-				tsubspeed = v->subspeed;
+-				if (!AirportHasBlock(v, current, Airport)) {
++
++				if(can_land == true) {
+ 					v->u.air.state = landingtype; // LANDING / HELILANDING
+ 					// it's a bit dirty, but I need to set position to next position, otherwise
+ 					// if there are multiple runways, plane won't know which one it took (because
+Index: airport_movement.h
+===================================================================
+--- airport_movement.h	(revision 2440)
++++ airport_movement.h	(working copy)
+@@ -108,10 +108,10 @@
+ 	{  3, 40,AMED_NOSPDCLAMP | AMED_BRAKE,0},			// 12 Just landed, brake until end of runway
+ 	{  7, 40,0,0},																// 13 Just landed, turn around and taxi 1 square
+ 	{ 53, 40,0,0},																// 14 Taxi from runway to crossing
+-	{-31,193,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 15 Fly around waiting for a landing spot (north-east)
+-	{  1,  1,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 16 Fly around waiting for a landing spot (north-west)
+-	{257,  1,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 17 Fly around waiting for a landing spot (south-west)
+-	{273, 49,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 18 Fly around waiting for a landing spot (south)
++	{145,-58,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 15 Fly around waiting for a landing spot (north-east)
++	{260,-58,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 16 Fly around waiting for a landing spot (north-west)
++	{291, 17,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 17 Fly around waiting for a landing spot (south-west)
++	{177, 40,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 18 Fly around waiting for a landing spot (south)
+ 	{ 44, 37,AMED_HELI_RAISE,0},									// 19 Helicopter takeoff
+ 	{ 44, 40,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 20 In position above landing spot helicopter
+ 	{ 44, 40,AMED_HELI_LOWER,0}										// 21 Helicopter landing
+@@ -137,10 +137,10 @@
+ 	{  3, 85,AMED_NOSPDCLAMP | AMED_BRAKE,0},			// 15 Just landed, brake until end of runway
+ 	{ 20, 87,0,0},																// 16 Just landed, turn around and taxi 1 square
+ 	{ 36, 71,0,0},																// 17 Taxi from runway to crossing
+-	{-31,193,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 18 Fly around waiting for a landing spot (north-east)
+-	{  1,  1,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 19 Fly around waiting for a landing spot (north-west)
+-	{257,  1,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 20 Fly around waiting for a landing spot (south-west)
+-	{273, 49,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 21 Fly around waiting for a landing spot (south)
++	{145,-13,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 19 Fly around waiting for a landing spot (north-east)
++	{260,-13,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 20 Fly around waiting for a landing spot (north-west)
++	{291, 62,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 21 Fly around waiting for a landing spot (south-west)
++	{177, 85,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 22 Fly around waiting for a landing spot (south)
+ 	{ 44, 63,AMED_HELI_RAISE,0},									// 22 Helicopter takeoff
+ 	{ 28, 74,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 23 In position above landing spot helicopter
+ 	{ 28, 74,AMED_HELI_LOWER,0}										// 24 Helicopter landing
+@@ -167,10 +167,10 @@
+ 	{ 21, 85,0,0},																// 16 Just landed, turn around and taxi 1 square
+ 	{ 21, 69,0,0},																// 17 On Runway-out taxiing to In-Way
+ 	{ 21, 54,AMED_EXACTPOS,5},										// 18 Taxi from runway to crossing
+-	{-31,193,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 19 Fly around waiting for a landing spot (north-east)
+-	{  1,  1,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 20 Fly around waiting for a landing spot (north-west)
+-	{257,  1,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 21 Fly around waiting for a landing spot (south-west)
+-	{273, 49,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 22 Fly around waiting for a landing spot (south)
++	{145,-13,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 19 Fly around waiting for a landing spot (north-east)
++	{260,-13,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 20 Fly around waiting for a landing spot (north-west)
++	{291, 62,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 21 Fly around waiting for a landing spot (south-west)
++	{177, 85,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 22 Fly around waiting for a landing spot (south)
+ 	{ 44, 58,0,0},																// 23 Helicopter takeoff spot on ground (to clear airport sooner)
+ 	{ 44, 63,AMED_HELI_RAISE,0},									// 24 Helicopter takeoff
+ 	{ 15, 54,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 25 Get in position above landing spot helicopter
+@@ -216,10 +216,10 @@
+ 	{  3,104,AMED_NOSPDCLAMP | AMED_BRAKE,0},			// 34 Just landed, brake until end of runway
+ 	{ 12,104,0,0},																// 35 Just landed, turn around and taxi 1 square
+ 	{  7, 84,0,0},																// 36 Taxi from runway to crossing
+-	{-31,209,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 37 Fly around waiting for a landing spot (north-east)
+-	{  1,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 38 Fly around waiting for a landing spot (north-west)
+-	{273,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 39 Fly around waiting for a landing spot (south-west)
+-	{305, 81,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 40 Fly around waiting for a landing spot (south)
++	{193,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 37 Fly around waiting for a landing spot (north-east)
++	{388,  6,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 38 Fly around waiting for a landing spot (north-west)
++	{419, 81,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 39 Fly around waiting for a landing spot (south-west)
++	{305,104,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 40 Fly around waiting for a landing spot (south)
+ 	// Helicopter
+ 	{128, 80,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 41 Bufferspace before helipad
+ 	{128, 80,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 42 Bufferspace before helipad
+Index: lang/american.txt
+===================================================================
+--- lang/american.txt	(revision 2440)
++++ lang/american.txt	(working copy)
+@@ -1092,6 +1092,9 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_AIRQUEUE										:{LTBLUE}Queue aircraft at airports{ORANGE}
++STR_CONFIG_PATCHES_AIR_COEFF									:{LTBLUE}Aircraft speedup (1=TTD default, 8=realistic):{ORANGE} {STRING}
++
+ STR_TEMPERATE_LANDSCAPE                                         :temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :sub-tropical landscape
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2440)
++++ lang/english.txt	(working copy)
+@@ -1094,6 +1094,9 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with the chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_AIRQUEUE										:{LTBLUE}Queue aircraft at airports{ORANGE}
++STR_CONFIG_PATCHES_AIR_COEFF									:{LTBLUE}Aircraft speedup (1=TTD default, 8=realistic):{ORANGE} {STRING}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2440)
++++ variables.h	(working copy)
+@@ -193,6 +193,9 @@
+ 	byte drag_signals_density; // many signals density
+ 	bool ainew_active;  // Is the new AI active?
+ 
++	bool aircraft_queueing; // Aircraft queueing patch
++	uint aircraft_speed_coeff; // Coefficient of aircraft speed, based on Benben's patch
++
+ 	/*
+ 	 * New Path Finding
+ 	 */
+Index: macros.h
+===================================================================
+--- macros.h	(revision 2440)
++++ macros.h	(working copy)
+@@ -140,6 +140,7 @@
+ static inline void swap_byte(byte *a, byte *b) { byte t = *a; *a = *b; *b = t; }
+ static inline void swap_uint16(uint16 *a, uint16 *b) { uint16 t = *a; *a = *b; *b = t; }
+ static inline void swap_int16(int16 *a, int16 *b) { int16 t = *a; *a = *b; *b = t; }
++static inline void swap_uint32(uint32 *a, uint32 *b) { uint32 t = *a; *a = *b; *b = t; }
+ static inline void swap_int32(int32 *a, int32 *b) { int32 t = *a; *a = *b; *b = t; }
+ static inline void swap_tile(TileIndex *a, TileIndex *b) { TileIndex t = *a; *a = *b; *b = t; }
+ 
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 2440)
++++ aircraft_gui.c	(working copy)
+@@ -534,24 +534,26 @@
+ 			switch (v->current_order.type) {
+ 			case OT_GOTO_STATION: {
+ 				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 8);
++				SetDParam(1, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
+ 			} break;
+ 
+ 			case OT_GOTO_DEPOT: {
+ 				SetDParam(0, v->current_order.station);
+-				SetDParam(1, v->cur_speed * 8);
++				SetDParam(1, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				str = STR_HEADING_FOR_HANGAR + _patches.vehicle_speed;
+ 			} break;
+ 
+ 			case OT_LOADING:
++				SetDParam(0, v->current_order.station);
++				SetDParam(1, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				str = STR_882F_LOADING_UNLOADING;
+ 				break;
+ 
+ 			default:
+ 				if (v->num_orders == 0) {
+ 					str = STR_NO_ORDERS + _patches.vehicle_speed;
+-					SetDParam(0, v->cur_speed * 8);
++					SetDParam(0, v->cur_speed * 8 / _patches.aircraft_speed_coeff);
+ 				} else
+ 					str = STR_EMPTY;
+ 				break;
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2440)
++++ train_cmd.c	(working copy)
+@@ -1228,7 +1228,7 @@
+ 		swap_int32(&a->x_pos, &b->x_pos);
+ 		swap_int32(&a->y_pos, &b->y_pos);
+ 		swap_tile(&a->tile, &b->tile);
+-		swap_byte(&a->z_pos, &b->z_pos);
++		swap_uint32(&a->z_pos, &b->z_pos);
+ 
+ 		SwapTrainFlags(&a->u.rail.flags, &b->u.rail.flags);
+ 
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2440)
++++ vehicle.c	(working copy)
+@@ -200,6 +200,8 @@
+ 	memset(v, 0, sizeof(Vehicle));
+ 	v->index = index;
+ 
++	v->queue_item = NULL;
++
+ 	assert(v->orders == NULL);
+ 
+ 	v->left_coord = INVALID_COORD;
+@@ -216,6 +218,9 @@
+ 	    the other, it can be InteractiveRandomRange() without any problem
+ 	*/
+ 	v->random_bits = InteractiveRandomRange(256);
++
++	v->queue_item = NULL;
++
+ 	return v;
+ }
+ 
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 2440)
++++ viewport.c	(working copy)
+@@ -35,7 +35,7 @@
+ 	struct TileSpriteToDraw *next;
+ 	int32 x;
+ 	int32 y;
+-	byte z;
++	uint32 z;
+ } TileSpriteToDraw;
+ 
+ typedef struct ChildScreenSpriteToDraw {
+@@ -57,8 +57,8 @@
+ 	int32 tile_bottom;
+ 	ChildScreenSpriteToDraw *child;
+ 	byte unk16;
+-	byte tile_z;
+-	byte tile_z_bottom;
++	uint32 tile_z;
++	uint32 tile_z_bottom;
+ } ParentSpriteToDraw;
+ 
+ typedef struct ViewportDrawer {
+@@ -86,7 +86,7 @@
+ static TileInfo *_cur_ti;
+ 
+ 
+-Point MapXYZToViewport(ViewPort *vp, uint x, uint y, uint z)
++Point MapXYZToViewport(ViewPort *vp, uint x, uint y, uint32 z)
+ {
+ 	Point p = RemapCoords(x, y, z);
+ 	p.x -= (vp->virtual_width>>1);
+@@ -273,7 +273,7 @@
+ 
+ static Point TranslateXYToTileCoord(ViewPort *vp, int x, int y)
+ {
+-	int z;
++	uint32 z;
+ 	Point pt;
+ 	int a,b;
+ 
+@@ -394,7 +394,7 @@
+ 	_offset_ground_sprites = true;
+ }
+ 
+-static void AddCombinedSprite(uint32 image, int x, int y, byte z)
++static void AddCombinedSprite(uint32 image, int x, int y, int z)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	int t;
+@@ -414,7 +414,7 @@
+ }
+ 
+ 
+-void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, byte dz, byte z)
++void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, uint32 dz, uint32 z)
+ {
+ 	ViewportDrawer *vd = _cur_vd;
+ 	ParentSpriteToDraw *ps;
+@@ -1439,7 +1439,7 @@
+ 
+ void MarkTileDirty(int x, int y)
+ {
+-	int z = 0;
++	uint32 z = 0;
+ 	Point pt;
+ 	if (IS_INT_INSIDE(x, 0, MapSizeX() * 16) &&
+ 			IS_INT_INSIDE(y, 0, MapSizeY() * 16))
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2440)
++++ vehicle.h	(working copy)
+@@ -86,6 +86,8 @@
+   byte previous_pos;
+ 	uint16 targetairport;
+ 	byte state;
++	uint16 desired_speed;	// Speed aircraft desires to maintain, used to
++							// decrease traffic to busy airports.
+ } VehicleAir;
+ 
+ typedef struct VehicleRoad {
+@@ -157,7 +159,7 @@
+ 
+ 	int32 x_pos;			// coordinates
+ 	int32 y_pos;
+-	byte z_pos;
++	uint32 z_pos;		// Was byte, changed for aircraft queueing
+ 	byte direction;		// facing
+ 
+ 	byte spritenum; // currently displayed sprite index
+@@ -180,8 +182,8 @@
+ 	uint16 max_speed;	// maximum speed
+ 	uint16 cur_speed;	// current speed
+ 	byte subspeed;		// fractional speed
+-	byte acceleration; // used by train & aircraft
+-	byte progress;
++	uint16 acceleration; // used by train & aircraft
++	uint16 progress;
+ 
+ 	byte vehstatus;		// Status
+ 	uint16 last_station_visited;
+@@ -233,6 +235,9 @@
+ 	int32 profit_last_year;
+ 	uint32 value;
+ 
++	// Current position in a vehicle queue - can only belong to one queue at a time
++	VQueueItem* queue_item;
++
+ 	union {
+ 		VehicleRail rail;
+ 		VehicleAir air;
+Index: viewport.h
+===================================================================
+--- viewport.h	(revision 2440)
++++ viewport.h	(working copy)
+@@ -12,7 +12,7 @@
+ };
+ 
+ /* viewport.c */
+-Point MapXYZToViewport(ViewPort *vp, uint x, uint y, uint z);
++Point MapXYZToViewport(ViewPort *vp, uint x, uint y, uint32 z);
+ void AssignWindowViewport(Window *w, int x, int y,
+ 	int width, int height, uint32 follow_flags, byte zoom);
+ void SetViewportPosition(Window *w, int x, int y);
+@@ -26,7 +26,7 @@
+ 
+ void DrawGroundSprite(uint32 image);
+ void DrawGroundSpriteAt(uint32 image, int32 x, int32 y, byte z);
+-void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, byte dz, byte z);
++void AddSortableSpriteToDraw(uint32 image, int x, int y, int w, int h, uint32 dz, uint32 z);
+ void *AddStringToDraw(int x, int y, StringID string, uint32 params_1, uint32 params_2, uint32 params_3);
+ void AddChildSpriteScreen(uint32 image, int x, int y);
+ 
+Index: order_cmd.c
+===================================================================
+--- order_cmd.c	(revision 2440)
++++ order_cmd.c	(working copy)
+@@ -433,10 +433,29 @@
+ 		order->type = OT_NOTHING;
+ 		order->next = NULL;
+ 
++		if (v->type == VEH_Aircraft) {
++			/* Take out of airport queue
++			 */
++			if(v->queue_item != NULL)
++			{
++				v->queue_item->queue->del(v->queue_item->queue, v);
++			}
++		}
++
++
+ 		u = GetFirstVehicleFromSharedList(v);
+ 		while (u != NULL) {
+ 			u->num_orders--;
+ 
++			if (u->type == VEH_Aircraft) {
++				/* Take out of airport queue
++				*/
++				if(u->queue_item != NULL)
++				{
++					v->queue_item->queue->del(v->queue_item->queue, v);
++				}
++			}
++
+ 			if (sel_ord < u->cur_order_index)
+ 				u->cur_order_index--;
+ 
+@@ -499,7 +518,15 @@
+ 	}
+ 
+ 	/* We have an aircraft/ship, they have a mini-schedule, so update them all */
+-	if (v->type == VEH_Aircraft) InvalidateWindowClasses(WC_AIRCRAFT_LIST);
++	if (v->type == VEH_Aircraft) {
++		InvalidateWindowClasses(WC_AIRCRAFT_LIST);
++		/* Take out of airport queue
++		 */
++		if(v->queue_item != NULL)
++		{
++			v->queue_item->queue->del(v->queue_item->queue, v);
++		}
++	}
+ 	if (v->type == VEH_Ship) InvalidateWindowClasses(WC_SHIPS_LIST);
+ 
+ 	return 0;
+@@ -956,6 +983,15 @@
+ 				order->type = OT_DUMMY;
+ 				order->flags = 0;
+ 
++				if (v->type == VEH_Aircraft) {
++					/* Take out of airport queue
++					 */
++					if(v->queue_item != NULL)
++					{
++						v->queue_item->queue->del(v->queue_item->queue, v);
++					}
++				}
++
+ 				need_invalidate = true;
+ 			}
+ 		}
+@@ -1028,6 +1064,15 @@
+ 	v->orders = NULL;
+ 	v->num_orders = 0;
+ 
++	if (v->type == VEH_Aircraft) {
++		/* Take out of airport queue
++		 */
++		if(v->queue_item != NULL)
++		{
++			v->queue_item->queue->del(v->queue_item->queue, v);
++		}
++	}
++
+ 	order = NULL;
+ 	while (cur != NULL) {
+ 		if (order != NULL) {
+Index: openttd.vcproj
+===================================================================
+--- openttd.vcproj	(revision 2440)
++++ openttd.vcproj	(working copy)
+@@ -257,6 +257,12 @@
+ 				RelativePath="oldloader.c">
+ 			</File>
+ 			<File
++				RelativePath="openttd.c">
++			</File>
++			<File
++				RelativePath="openttd.rc">
++			</File>
++			<File
+ 				RelativePath="pathfind.c">
+ 			</File>
+ 			<File
+@@ -308,12 +314,6 @@
+ 				RelativePath=".\tile.c">
+ 			</File>
+ 			<File
+-				RelativePath="openttd.c">
+-			</File>
+-			<File
+-				RelativePath="openttd.rc">
+-			</File>
+-			<File
+ 				RelativePath="vehicle.c">
+ 			</File>
+ 			<File
+@@ -436,6 +436,9 @@
+ 				RelativePath=".\npf.h">
+ 			</File>
+ 			<File
++				RelativePath="openttd.h">
++			</File>
++			<File
+ 				RelativePath="pathfind.h">
+ 			</File>
+ 			<File
+@@ -475,9 +478,6 @@
+ 				RelativePath=".\town.h">
+ 			</File>
+ 			<File
+-				RelativePath="openttd.h">
+-			</File>
+-			<File
+ 				RelativePath="variables.h">
+ 			</File>
+ 			<File
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2440)
++++ settings.c	(working copy)
+@@ -920,6 +920,9 @@
+ 
+ 	{"ainew_active",				SDT_BOOL,		(void*)false, &_patches.ainew_active,					NULL},
+ 
++	{"aircraft_queueing",		SDT_BOOL,		(void*)false,	&_patches.aircraft_queueing,			NULL},
++	{"plane_speed_coeff",		SDT_UINT16,		(void*)8,	&_patches.aircraft_speed_coeff,			NULL},
++
+ 	{"map_x", SDT_UINT32, (void*)8, &_patches.map_x, NULL},
+ 	{"map_y", SDT_UINT32, (void*)8, &_patches.map_y, NULL},
+ 
+Index: station.h
+===================================================================
+--- station.h	(revision 2440)
++++ station.h	(working copy)
+@@ -73,6 +73,7 @@
+ 	//uint16 airport_flags;
+ 	uint32 airport_flags;
+ 	StationID index;
++	VehicleQueue *airport_queue;			// airport queue
+ 
+ 	VehicleID last_vehicle;
+ 	GoodsEntry goods[NUM_CARGO];
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2440)
++++ settings_gui.c	(working copy)
+@@ -702,6 +702,7 @@
+ 	{PE_UINT16, PF_0ISDIS, STR_CONFIG_PATCHES_SERVINT_AIRCRAFT, "servint_aircraft", &_patches.servint_aircraft, 5,800,  5, &InValidateDetailsWindow},
+ 	{PE_UINT16, PF_0ISDIS, STR_CONFIG_PATCHES_SERVINT_SHIPS,		"servint_ships",    &_patches.servint_ships,		5,800,  5, &InValidateDetailsWindow},
+ 	{PE_BOOL,   0,         STR_CONFIG_PATCHES_NOSERVICE,        "no_servicing_if_no_breakdowns", &_patches.no_servicing_if_no_breakdowns, 0, 0, 0, NULL},
++	{PE_UINT16,   0,         STR_CONFIG_PATCHES_AIR_COEFF,        "aircraft_speed_coeff", &_patches.aircraft_speed_coeff, 1, 8, 1, NULL},
+ };
+ 
+ static const PatchEntry _patches_stations[] = {
+@@ -714,6 +715,7 @@
+ 	{PE_UINT8,	0, STR_CONFIG_PATCHES_STATION_SPREAD,		"station_spread", &_patches.station_spread,						4, 64,  1, &InvalidateStationBuildWindow},
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_SERVICEATHELIPAD, "service_at_helipad", &_patches.serviceathelipad,					0,  0,  0, NULL},
+ 	{PE_BOOL, 0, STR_CONFIG_PATCHES_CATCHMENT, "modified_catchment", &_patches.modified_catchment, 0, 0, 0, NULL},
++	{PE_BOOL, 0, STR_CONFIG_PATCHES_AIRQUEUE, "aircraft_queueing", &_patches.aircraft_queueing, 0, 0, 0, NULL},
+ 
+ };
+ 
+@@ -1123,7 +1125,7 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    10,     0,    10,     0,    13, STR_00C5,												STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    10,    11,   369,     0,    13, STR_CONFIG_PATCHES_CAPTION,			STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    14,    41, 0x0,															STR_NULL},
+-{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   320, 0x0,															STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,    10,     0,   369,    42,   336, 0x0,															STR_NULL},
+ 
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,    10,    96,    16,    27, STR_CONFIG_PATCHES_GUI,					STR_NULL},
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,    97,   183,    16,    27, STR_CONFIG_PATCHES_CONSTRUCTION,	STR_NULL},
+@@ -1135,7 +1137,7 @@
+ };
+ 
+ static const WindowDesc _patches_selection_desc = {
+-	WDP_CENTER, WDP_CENTER, 370, 321,
++	WDP_CENTER, WDP_CENTER, 370, 337,
+ 	WC_GAME_OPTIONS,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_patches_selection_widgets,
+Index: queue.c
+===================================================================
+--- queue.c	(revision 2440)
++++ queue.c	(working copy)
+@@ -1,6 +1,7 @@
+ #include "stdafx.h"
+ #include "openttd.h"
+ #include "queue.h"
++#include "vehicle.h"
+ 
+ static void Stack_Clear(Queue* q, bool free_values)
+ {
+@@ -114,6 +115,18 @@
+ 	return result;
+ }
+ 
++static void* Fifo_GetTop(Queue* q)
++{
++	void* result;
++	if (q->data.fifo.head == q->data.fifo.tail)
++		return NULL;
++	result = q->data.fifo.elements[q->data.fifo.tail];
++
++	// Only getting top, do not take off
++	//q->data.fifo.tail = (q->data.fifo.tail + 1) % q->data.fifo.max_size;
++	return result;
++}
++
+ static bool Fifo_Delete(Queue* q, void* item, int priority)
+ {
+ 	return false;
+@@ -131,6 +144,7 @@
+ 	q->data.fifo.tail = 0;
+ 	q->data.fifo.elements = malloc(max_size * sizeof(void*));
+ 	q->freeq = false;
++	q->getTop = Fifo_GetTop;
+ 	return q;
+ }
+ 
+@@ -717,3 +731,232 @@
+ uint Hash_Size(Hash* h) {
+     return h->size;
+ }
++
++// Returns success
++bool VPush(VehicleQueue *q, Vehicle *v)
++{
++	VQueueItem* newItem;
++
++	// Do not push NULLs
++	assert(v != NULL);
++
++	if(q->size == 0x7FFFFFFF)
++		return false;
++
++	newItem = malloc(sizeof(VQueueItem));
++
++	if(newItem == NULL)
++		return false;
++
++	if(q->size == 0)
++	{
++		assert(q->top == NULL);
++		assert(q->bottom == NULL);
++		newItem->data = v;
++		newItem->position = 1;
++		newItem->queue = q;
++		newItem->above = NULL;
++		newItem->below = NULL;
++		q->bottom = newItem;
++		q->top = newItem;
++		v->queue_item = newItem;
++		q->size = 1;
++		return true;
++	}
++
++	q->bottom->below = newItem;
++	newItem->above = q->bottom;
++	newItem->below = NULL;
++	newItem->data = v;
++	newItem->position = q->bottom->position + 1;
++	newItem->queue = q;
++	v->queue_item = newItem;
++	q->bottom = newItem;
++	q->size++;
++	return true;
++}
++
++// Returns vehicle popped
++Vehicle* VPop(VehicleQueue *q)
++{
++	Vehicle* v;
++	VQueueItem* oldItem;
++	if(q->size == 0)
++		return NULL;
++
++	oldItem = q->top;
++
++	assert(oldItem != NULL);
++
++	q->top = oldItem->below;
++	if(q->top != NULL)
++	{
++		q->top->above = NULL;
++	}
++
++	// Had one item, now empty
++	if(q->size == 1)
++	{
++		q->bottom = NULL;
++		q->top = NULL;
++		q->size = 0;
++		q->offset = 0;
++		q->dirty = false;
++		v = oldItem->data;
++		v->queue_item = NULL;
++		free(oldItem);
++		return v;
++	}
++
++	// Top was above bottom - now top *IS* bottom
++	if(q->size == 2)
++	{
++		q->bottom->above = NULL;
++	}
++
++	v = oldItem->data;
++
++	v->queue_item = NULL;
++
++	free(oldItem);
++
++	q->offset++;
++	q->size--;
++
++	if(q->offset > 0x7FFFFFFF)
++	{
++		q->dirty = true;
++		q->clean(q);
++	}
++	return v;
++}
++
++Vehicle* VGetTop(VehicleQueue *q)
++{
++	if(q->size != 0)
++		return q->top->data;
++	else
++		return NULL;
++}
++
++void VClean(VehicleQueue *q)
++{
++	bool done;
++	uint32 currentSize;
++	VQueueItem* currItem;
++	done = false;
++
++	if(q->top == NULL)
++	{
++		assert(q->bottom == NULL);
++		assert(q->size == 0);
++		return;
++	}
++
++	currItem = q->top;
++	q->offset = 0;
++
++	currentSize = 1;
++	while(done == false)
++	{
++		currItem->position = currentSize;
++		currItem = currItem->below;
++		if(currItem == NULL)
++		{
++			done = true;
++			assert(q->size == currentSize);
++		}
++		currentSize++;
++	}
++
++	// Congrats! We now have a clean queue!
++	q->dirty = false;
++	return;
++}
++
++void VClear(VehicleQueue *q)
++{
++	while(q->pop(q) != NULL)
++	{
++		// What? Expecting something? The clearing is done
++		// in the while statement above - I don't need anything here!
++	}
++	return;
++}
++
++// This is one of the special functions - allows item to take itself off
++// the queue no matter where in the queue it is!
++void VDelete(VehicleQueue *q, Vehicle *v)
++{
++	VQueueItem* current;
++	VQueueItem* above;
++	VQueueItem* below;
++
++	current = v->queue_item;
++	if(current == NULL)
++		return;
++
++	if(current == q->top)
++	{
++		q->top = current->below;
++	}
++
++	if(current == q->bottom)
++	{
++		q->bottom = current->above;
++	}
++
++	above = current->above;
++	below = current->below;
++
++	if(above != NULL)
++		above->below = below;
++	
++	if(below != NULL)
++		below->above = above;
++
++	v->queue_item = NULL;
++
++	free(current);
++
++	q->size--;
++	q->dirty = true;
++}
++
++uint32 VGetPos(VehicleQueue *q, Vehicle *v)
++{
++	if(q->dirty)
++	{
++		q->clean(q);
++	}
++
++	return v->queue_item->position - q->offset;
++}
++
++//bool VQueue_InitProc(VehicleQueue* q)
++//{
++
++
++
++VehicleQueue* new_VQueue()
++{
++	VehicleQueue* q = malloc(sizeof(VehicleQueue));
++
++	q->push = VPush;
++	q->pop = VPop;
++	q->getTop = VGetTop;
++	q->clean = VClean;
++	q->clear = VClear;
++	q->del = VDelete;
++	q->getPos = VGetPos;
++
++	q->size = 0;
++	q->offset = 0;
++	q->top = NULL;
++	q->bottom = NULL;
++	q->dirty = false;
++	
++	//init_stack(q, max_size);
++	//q->freeq = true;
++	return q;
++}
+Index: queue.h
+===================================================================
+--- queue.h	(revision 2440)
++++ queue.h	(working copy)
+@@ -14,6 +14,9 @@
+ typedef void Queue_ClearProc(Queue* q, bool free_values);
+ typedef void Queue_FreeProc(Queue* q, bool free_values);
+ 
++// Get top without popping
++typedef void* Queue_GetTopProc(Queue* q);
++
+ typedef struct InsSortNode InsSortNode;
+ struct InsSortNode {
+ 	void* item;
+@@ -55,6 +58,11 @@
+ 	 * items are free()'d too.
+ 	 */
+ 	Queue_FreeProc* free;
++	/* Obtains the top of the queue, allowing the user to look at the 
++	 * queue without destroying it.
++	 * WARNING: ONLY IMPLEMENTED IN FIFO SO FAR!
++	 */
++	Queue_GetTopProc* getTop;
+ 
+ 	union {
+ 		struct {
+@@ -202,4 +210,78 @@
+  */
+ uint Hash_Size(Hash* h);
+ 
++/* 
++ * NOT part of normal Queue structures defined above!
++ * This is a special queue designed to have special behaviors
++ * for the aircraft queueing algorithm, which has special requirements ;).
++ * Note that this is NOT a priority queue!
++ */
++typedef struct VehicleQueue VehicleQueue;
++
++// O(1), always
++typedef bool VQueue_PushProc(VehicleQueue* q, Vehicle* item);
++// O(1), unless offset is > 2147483647 - then O(n) -- increments offset
++typedef Vehicle* VQueue_PopProc(VehicleQueue* q);
++// O(1)
++typedef Vehicle* VQueue_GetTopProc(VehicleQueue* q);
++// O(n) -- Rebuilds the "position"s, resets the offset, asserts the size.
++typedef void VQueue_CleanProc(VehicleQueue* q);
++// O(n)
++typedef void VQueue_ClearProc(VehicleQueue* q);
++// O(1) -- sets dirty bit
++typedef void VQueue_DeleteProc(VehicleQueue* q, Vehicle* item);
++// O(1) if not dirty, otherwise O(n) -- Gets current position in queue.
++typedef uint32 VQueue_GetPosProc(VehicleQueue* q, Vehicle* item);
++// O(1)
++typedef bool VQueue_InitProc(VehicleQueue* q);
++
++//typedef void VQueue_FreeProc(Queue* q, bool free_values);
++
++/*
++ * WARNING: Do NOT directly manipulate data inside this queue!
++ * Queue is *very* sensitive and will toss assertions if it detects
++ * improper values!
++ */
++typedef struct VQueueItem VQueueItem;
++struct VQueueItem
++{
++	Vehicle *data;
++	// Position in queue
++	uint32 position;
++	VQueueItem *below;
++	VQueueItem *above;
++
++	// Queue item belongs to (so we can have reverse lookups)
++	VehicleQueue *queue;
++};
++
++typedef struct VehicleQueue VehicleQueue;
++struct VehicleQueue
++{
++	// Ahh, yes! Classic C functional programming!
++	// Should really be converted to C++, though . . .
++	VQueue_PushProc*	push;
++	VQueue_PopProc*		pop;
++	VQueue_GetTopProc*	getTop;
++	VQueue_CleanProc*	clean;
++	VQueue_ClearProc*	clear;
++	VQueue_DeleteProc*	del;
++	VQueue_GetPosProc*	getPos;
++	//VQueue_InitProc*	init;
++
++	VQueueItem* top;
++	VQueueItem* bottom;
++
++	// Dirty means "position" in VQueueItems is incorrect
++	// and needs to be rebuilt.
++    bool dirty;	
++	uint32 size;
++
++	// Offset for "position" in queue - allows for O(1) pushes & pops
++	uint32 offset;
++};
++
++VehicleQueue *new_VQueue();
++
++
+ #endif /* QUEUE_H */

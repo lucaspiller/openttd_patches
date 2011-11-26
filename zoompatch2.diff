@@ -1,0 +1,663 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 3597)
++++ lang/english.txt	(working copy)
+@@ -1756,6 +1756,16 @@
+ STR_4829_REQUIRES                                               :{BLACK}Requires: {YELLOW}{STRING}, {STRING}, {STRING}
+ ############ range for requires	ends
+ 
++############ range for smallmap-specific start
++STR_RECENTRE_SMALLMAP                                           :{BLACK}Recenter the view
++STR_ZOOM_IN_SMALLMAP                                            :{BLACK}zoom in
++STR_ZOOM_OUT_SMALLMAP                                           :{BLACK}zoom out
++STR_SMALLMAP_ZOOMDISPLAY                                        :{TINYFONT}{WHITE}zoom: {COMMA}% ({COMMA})
++STR_CONFIG_PATCHES_SM                                           :{BLACK}SmallMap
++STR_CONFIG_PATCHES_SM_ACTIVE_ZOOM                               :{LTBLUE}Zoom in Minimap
++STR_CONFIG_PATCHES_SM_ACTIVE_ZOOM_SMOOTH                        :{LTBLUE}Smooth Zoom
++############ range for smallmap-specific end
++
+ STR_482A_PRODUCTION_LAST_MONTH                                  :{BLACK}Production last month:
+ STR_482B_TRANSPORTED                                            :{YELLOW}{STRING1}{BLACK} ({COMMA}% transported)
+ STR_482C_CENTER_THE_MAIN_VIEW_ON                                :{BLACK}Centre the main view on industry location
+Index: variables.h
+===================================================================
+--- variables.h	(revision 3597)
++++ variables.h	(working copy)
+@@ -177,6 +177,10 @@
+ 	bool ainew_active;  // Is the new AI active?
+ 	bool ai_in_multiplayer; // Do we allow AIs in multiplayer
+ 
++	/* new smallmap GUI */
++	bool 	sm_zoom_active;		/* activate zoom? */
++	bool 	sm_zoom_smooth;		/* use smooth zoom? */
++
+ 	/*
+ 	 * New Path Finding
+ 	 */
+Index: smallmap_gui.c
+===================================================================
+--- smallmap_gui.c	(revision 3597)
++++ smallmap_gui.c	(working copy)
+@@ -16,9 +16,11 @@
+ #include "viewport.h"
+ #include "player.h"
+ #include "vehicle.h"
++#include "industry.h"
+ #include "town.h"
+ #include "sound.h"
+ #include "variables.h"
++#include "debug.h"
+ 
+ static const Widget _smallmap_widgets[] = {
+ {  WWT_CLOSEBOX,   RESIZE_NONE,    13,     0,    10,     0,    13, STR_00C5,                STR_018B_CLOSE_WINDOW},
+@@ -32,9 +34,11 @@
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   380,   401,   280,   301, SPR_IMG_SHOW_ROUTES,     STR_0194_SHOW_TRANSPORT_ROUTES_ON},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   402,   423,   280,   301, SPR_IMG_PLANTTREES,      STR_0195_SHOW_VEGETATION_ON_MAP},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   424,   445,   280,   301, SPR_IMG_COMPANY_GENERAL, STR_0196_SHOW_LAND_OWNERS_ON_MAP},
+-{    WWT_IMGBTN,   RESIZE_LRTB,    13,   358,   379,   258,   279, 0x0,                     STR_NULL},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   358,   379,   258,   279, 683,                     STR_RECENTRE_SMALLMAP},
+ {    WWT_IMGBTN,   RESIZE_LRTB,    13,   358,   379,   280,   301, SPR_IMG_TOWN,            STR_0197_TOGGLE_TOWN_NAMES_ON_OFF},
+-{    WWT_IMGBTN,    RESIZE_RTB,    13,     0,   357,   258,   301, 0x0,                     STR_NULL},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   336,   357,   258,   279, 0x2DF,                   STR_ZOOM_IN_SMALLMAP},
++{     WWT_PANEL,   RESIZE_LRTB,    13,   336,   357,   280,   301, 0x2E0,                   STR_ZOOM_OUT_SMALLMAP},
++{    WWT_IMGBTN,    RESIZE_RTB,    13,     0,   335,   258,   301, 0x0,                     STR_NULL},
+ {     WWT_PANEL,    RESIZE_RTB,    13,     0,   433,   302,   313, 0x0,                     STR_NULL},
+ { WWT_RESIZEBOX,   RESIZE_LRTB,    13,   434,   445,   302,   313, 0x0,                     STR_RESIZE_BUTTON},
+ {  WIDGETS_END},
+@@ -42,11 +46,16 @@
+ 
+ static int _smallmap_type;
+ static bool _smallmap_show_towns = true;
++void SmallMapRecentre(void);
++void SmallMapRecentreZoom(void);
+ 
+ #define MK(a,b) a, b
+ #define MKEND() 0xFFFF
+ #define MS(a,b) (a | 0x100), b
+ 
++static double max_zoom=14;
++static double min_zoom=0.04;
++
+ /* Legend text giving the colours to look for on the minimap */
+ static const uint16 _legend_land_contours[] = {
+ 	MK(0x5A,STR_00F0_100M),
+@@ -324,16 +333,16 @@
+  * @param proc Pointer to the colour function
+  * @see GetSmallMapPixels(TileIndex)
+  */
+-static void DrawSmallMapStuff(Pixel *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc)
++static void DrawSmallMapStuff(Pixel *dst, uint xc, uint yc, int pitch, int reps, uint32 mask, GetSmallMapPixels *proc, double smallmap_zoom)
+ {
+ 	Pixel *dst_ptr_end = _screen.dst_ptr + _screen.width * _screen.height - _screen.width;
+ 
+ 	do {
+ 		// check if the tile (xc,yc) is within the map range
+-		if (xc < MapMaxX() && yc < MapMaxY()) {
++		if (xc * smallmap_zoom < MapMaxX() && yc * smallmap_zoom < MapMaxY()) {
+ 			// check if the dst pointer points to a pixel inside the screen buffer
+ 			if (dst > _screen.dst_ptr && dst < dst_ptr_end)
+-				WRITE_PIXELS_OR(dst, proc(TileXY(xc, yc)) & mask);
++				WRITE_PIXELS_OR(dst, proc(TileXY(xc * smallmap_zoom, yc * smallmap_zoom)) & mask);
+ 		}
+ 	// switch to next tile in the column
+ 	} while (xc++, yc++, dst += pitch, --reps != 0);
+@@ -587,6 +596,7 @@
+ 	int tile_x;
+ 	int tile_y;
+ 	ViewPort *vp;
++	double smallmap_zoom=WP(w, smallmap_d).zoom_ist;
+ 
+ 	old_dpi = _cur_dpi;
+ 	_cur_dpi = dpi;
+@@ -663,7 +673,7 @@
+ 		reps = (dpi->height - y + 1) / 2;
+ 		if (reps > 0) {
+ //			assert(ptr >= dpi->dst_ptr);
+-			DrawSmallMapStuff(ptr, tile_x, tile_y, dpi->pitch*2, reps, mask, _smallmap_draw_procs[type]);
++			DrawSmallMapStuff(ptr, tile_x, tile_y, dpi->pitch*2, reps, mask, _smallmap_draw_procs[type], smallmap_zoom);
+ 		}
+ 
+ skip_column:
+@@ -680,6 +690,7 @@
+ 		x += 2;
+ 	}
+ 
++
+ 	/* draw vehicles? */
+ 	if (type == 0 || type == 1) {
+ 		Vehicle *v;
+@@ -691,12 +702,11 @@
+ 					(v->vehstatus & (VS_HIDDEN | VS_UNCLICKABLE)) == 0) {
+ 				// Remap into flat coordinates.
+ 				Point pt = RemapCoords(
+-					(v->x_pos - WP(w,smallmap_d).scroll_x) / 16,
+-					(v->y_pos - WP(w,smallmap_d).scroll_y) / 16,
++					((v->x_pos / smallmap_zoom) - WP(w, smallmap_d).scroll_x) / 16,
++					((v->y_pos / smallmap_zoom) - WP(w, smallmap_d).scroll_y) / 16,
+ 					0);
+ 				x = pt.x;
+ 				y = pt.y;
+-
+ 				// Check if y is out of bounds?
+ 				y -= dpi->top;
+ 				if (!IS_INT_INSIDE(y, 0, dpi->height)) continue;
+@@ -736,9 +746,9 @@
+ 			if (t->xy != 0) {
+ 				// Remap the town coordinate
+ 				Point pt = RemapCoords(
+-					(int)(TileX(t->xy) * 16 - WP(w, smallmap_d).scroll_x) / 16,
+-					(int)(TileY(t->xy) * 16 - WP(w, smallmap_d).scroll_y) / 16,
+-					0);
++					(int)((TileX(t->xy) / smallmap_zoom) * 16 - WP(w, smallmap_d).scroll_x) / 16,
++					(int)((TileY(t->xy) / smallmap_zoom) * 16 - WP(w, smallmap_d).scroll_y) / 16,
++ 					0);
+ 				x = pt.x - WP(w,smallmap_d).subscroll + 3 - (t->sign.width_2 >> 1);
+ 				y = pt.y;
+ 
+@@ -763,11 +773,11 @@
+ 		vp = FindWindowById(WC_MAIN_WINDOW,0)->viewport;
+ 
+ 		pt = RemapCoords(WP(w, smallmap_d).scroll_x, WP(w, smallmap_d).scroll_y, 0);
++		x = (vp->virtual_left / smallmap_zoom) - pt.x;
++		y = (vp->virtual_top / smallmap_zoom) - pt.y;
++		x2 = (x + (vp->virtual_width / smallmap_zoom)) / 16;
++		y2 = (y + (vp->virtual_height / smallmap_zoom)) / 16;
+ 
+-		x = vp->virtual_left - pt.x;
+-		y = vp->virtual_top - pt.y;
+-		x2 = (x + vp->virtual_width) / 16;
+-		y2 = (y + vp->virtual_height) / 16;
+ 		x /= 16;
+ 		y /= 16;
+ 
+@@ -780,11 +790,127 @@
+ 		DrawHorizMapIndicator(x, y, x2, y);
+ 		DrawHorizMapIndicator(x, y2, x2, y2);
+ 	}
++
+ 	_cur_dpi = old_dpi;
+ }
+ 
++double oz;
++
++
++void SmallMapRecentre(void)
++{
++	int x,y,wx,wy;
++	Window *w;
++	ViewPort *vp;
++	
++	/* find the smallmap-window */
++	w = FindWindowById(WC_SMALLMAP, 0);
++	
++	/* get its zoom */
++	double smallmap_zoom=WP(w, smallmap_d).zoom_ist;
++
++	/* find the main viewport */
++	vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
++
++	wx = (w->widget[4].right  - w->widget[4].left)/2;
++	wy = (w->widget[4].bottom - w->widget[4].top )/2;
++	x =  (  (((vp->virtual_width  / smallmap_zoom) - (wx*32)) / 2) + (vp->virtual_left / smallmap_zoom)) / 4;
++	y = (((((vp->virtual_height  / smallmap_zoom) - (wy*32)) / 2) + (vp->virtual_top / smallmap_zoom)) / 2) - 32;
++
++	WP(w,smallmap_d).scroll_x = (y-x) & ~0xF;
++	WP(w,smallmap_d).scroll_y = (x+y) & ~0xF;
++	WP(w,smallmap_d).subscroll = 0;
++	
++	if (_patches.sm_zoom_active){
++		/* handle disabled states of buttons */
++		CLRBIT(w->disabled_state, 13);
++		CLRBIT(w->disabled_state, 14);
++	
++		if (smallmap_zoom <= min_zoom) {
++			SETBIT(w->disabled_state, 13);
++		}if (smallmap_zoom >= max_zoom) {
++			SETBIT(w->disabled_state, 14);
++		}
++	}
++}	
++
++void ScrollSmallmap(int mx, int my)
++{
++	int hx, hy;
++	int hvx, hvy;
++	int x, y, sub;
++
++	Window *w = FindWindowById(WC_SMALLMAP, 0);
++	double smallmap_zoom=WP(w,smallmap_d).zoom_ist;
++	oz=smallmap_zoom;
++
++	x = WP(w,smallmap_d).scroll_x;
++	y = WP(w,smallmap_d).scroll_y;
++
++	sub = WP(w,smallmap_d).subscroll + mx;
++
++	x -= (sub >> 2) << 4;
++	y += (sub >> 2) << 4;
++	sub &= 3;
++
++	x += (my >> 1) << 4;
++	y += (my >> 1) << 4;
++
++	if (my & 1) {
++		x += 16;
++		sub += 2;
++		if (sub > 3) {
++			sub -= 4;
++			x -= 16;
++			y += 16;
++		}
++	}
++
++	hx = (w->widget[4].right  - w->widget[4].left) / 2;
++	hy = (w->widget[4].bottom - w->widget[4].top ) / 2;
++	hvx = hx * -4 + hy * 8;
++	hvy = hx *  4 + hy * 8;
++	if (x < -hvx) { x = -hvx; sub = 0; }
++	if (x > (int)((MapMaxX() * 16) / smallmap_zoom) - hvx) { x = ((MapMaxX() * 16) / smallmap_zoom) - hvx; sub = 0; }
++	if (y < -hvy) { y = -hvy; sub = 0; }
++	if (y > (int)((MapMaxY() * 16) / smallmap_zoom) - hvy) { y = ((MapMaxY() * 16) / smallmap_zoom) - hvy; sub = 0; }
++	WP(w,smallmap_d).scroll_x = x;
++	WP(w,smallmap_d).scroll_y = y;
++	WP(w,smallmap_d).subscroll = sub;
++	DEBUG(misc,10)("Scroll: x: %i, y: %i, scroll_x: %i, scroll_y: %i, subscroll: %i",x,y,WP(w,smallmap_d).scroll_x,WP(w,smallmap_d).scroll_y,WP(w,smallmap_d).subscroll);
++}
++
++void SmallMapRecentreZoom(void)
++{
++	/* todo: rewrite this to work with zooming directly, not focusing everytime to the viewport! */
++	SmallMapRecentre();
++}	
++
+ static void SmallMapWindowProc(Window *w, WindowEvent *e)
+ {
++	/* zoom smoothly :) */
++	if (WP(w, smallmap_d).zoom_ist != WP(w, smallmap_d).zoom_soll){
++		if (_patches.sm_zoom_smooth){
++			double diff=WP(w, smallmap_d).zoom_soll-WP(w, smallmap_d).zoom_ist;
++			double diff_abs = (diff < 0)?diff *-1:diff;
++			DEBUG(misc,10)("diff: %f, diff_abs: %f",(float)diff,(float)diff_abs);
++			if (diff_abs < 0.01){
++				WP(w,smallmap_d).zoom_ist=WP(w,smallmap_d).zoom_soll;
++				SmallMapRecentreZoom();
++				DEBUG(misc,10)("ZOOMING smoothly FINISHED ist: %f, soll: %f",(float)WP(w,smallmap_d).zoom_ist,(float)WP(w,smallmap_d).zoom_soll);
++			} else {
++				WP(w, smallmap_d).zoom_ist+=diff/10;
++				SmallMapRecentreZoom();
++				DEBUG(misc,10)("ZOOMING smoothly ist: %f, soll: %f, diff: %f",(float)WP(w,smallmap_d).zoom_ist,(float)WP(w,smallmap_d).zoom_soll,(float)diff);
++			}
++		}else{
++			WP(w, smallmap_d).zoom_ist=WP(w,smallmap_d).zoom_soll;
++			SmallMapRecentreZoom();
++			DEBUG(misc,10)("ZOOMING unsmoothly: %f",(float)WP(w,smallmap_d).zoom_ist);
++		}
++	}
++	double smallmap_zoom=WP(w, smallmap_d).zoom_ist;
++
+ 	switch (e->event) {
+ 	case WE_PAINT: {
+ 		const uint16 *tbl;
+@@ -820,6 +946,29 @@
+ 			return;
+ 
+ 		DrawSmallMap(&new_dpi, w, _smallmap_type, _smallmap_show_towns);
++		
++		if (_patches.sm_zoom_active){
++			CLRBIT(w->disabled_state, 13);
++			CLRBIT(w->disabled_state, 14);
++
++			/* draw the zoom level */
++			int displayedzoomlevel=0;
++			if (smallmap_zoom<=1)
++				displayedzoomlevel=100+(1-smallmap_zoom)*100;
++			else if (smallmap_zoom==1)
++				displayedzoomlevel=100;
++			else if (smallmap_zoom>1)
++				displayedzoomlevel=100-(smallmap_zoom)*2;
++	
++			SetDParam(0, (int)displayedzoomlevel);
++			SetDParam(1, (int)(smallmap_zoom*10));
++			DrawString(4, w->height - 64 - 2, STR_SMALLMAP_ZOOMDISPLAY, 12);
++		} else {
++			WP(w,smallmap_d).zoom_soll=1;
++			SETBIT(w->disabled_state, 13);
++			SETBIT(w->disabled_state, 14);
++		}
++
+ 	} break;
+ 
+ 	case WE_CLICK:
+@@ -833,8 +982,9 @@
+ 			w2 = FindWindowById(WC_MAIN_WINDOW, 0);
+ 
+ 			pt = RemapCoords(WP(w,smallmap_d).scroll_x, WP(w,smallmap_d).scroll_y, 0);
+-			WP(w2,vp_d).scrollpos_x = pt.x + ((_cursor.pos.x - w->left + 2) << 4) - (w2->viewport->virtual_width >> 1);
+-			WP(w2,vp_d).scrollpos_y = pt.y + ((_cursor.pos.y - w->top - 16) << 4) - (w2->viewport->virtual_height >> 1);
++			WP(w2,vp_d).scrollpos_x = (pt.x * smallmap_zoom) + (((_cursor.pos.x - w->left + 2) << 4) * smallmap_zoom)  - (w2->viewport->virtual_width >> 1);
++			WP(w2,vp_d).scrollpos_y = (pt.y * smallmap_zoom) + (((_cursor.pos.y - w->top - 16) << 4) * smallmap_zoom) - (w2->viewport->virtual_height >> 1); 
++
+ 		} break;
+ 
+ 		case 5: /* Show land contours */
+@@ -851,13 +1001,43 @@
+ 			SndPlayFx(SND_15_BEEP);
+ 			break;
+ 
++		case 11: /* centre location */
++			SmallMapRecentre();
++			SetWindowDirty(w);
++			SndPlayFx(SND_15_BEEP);
++			break;
++
+ 		case 12: /* toggle town names */
+ 			w->click_state ^= (1 << 12);
+ 			_smallmap_show_towns = (w->click_state >> 12) & 1;
+ 			SetWindowDirty(w);
+ 			SndPlayFx(SND_15_BEEP);
+ 			break;
+-		}
++
++		case 13: /* zoom in */
++			if (_patches.sm_zoom_active){
++				if (smallmap_zoom > min_zoom){ // can zoom in up to 5 times
++					WP(w,smallmap_d).zoom_soll=WP(w,smallmap_d).zoom_ist / 2;
++					DEBUG(misc,10)("zoom-level: %f",(float)smallmap_zoom);
++					SmallMapRecentreZoom();
++					SetWindowDirty(w);
++					SndPlayFx(SND_15_BEEP);
++				}
++			}
++			break;
++
++		case 14: /* zoom out */
++			if (_patches.sm_zoom_active){
++				if (smallmap_zoom < max_zoom){
++					WP(w,smallmap_d).zoom_soll=WP(w,smallmap_d).zoom_ist * 2;
++					DEBUG(misc,10)("zoom-level: %f",(float)smallmap_zoom);
++					SmallMapRecentreZoom();
++					SetWindowDirty(w);
++					SndPlayFx(SND_15_BEEP);
++				}
++			}
++			break;
++ 		}
+ 		break;
+ 
+ 	case WE_RCLICK:
+@@ -873,6 +1053,46 @@
+ 		/* update the window every now and then */
+ 		if ((++w->vscroll.pos & 0x1F) == 0) SetWindowDirty(w);
+ 		break;
++	
++	case WE_SCROLL:
++		/* DEBUG(misc,1)("GOT SCROLL-EVENT: %i,%i",e->scroll.delta.x,e->scroll.delta.y); */
++		_cursor.fix_at = true;
++		ScrollSmallmap(e->scroll.delta.x,e->scroll.delta.y);
++		SetWindowDirty(w);
++		break;
++
++	case WE_MOUSEWHEEL:
++		if (_patches.sm_zoom_active){
++			/* DEBUG(misc,10)("GOT WHEEL-EVENT: %i",e->wheel.wheel); */
++			if ((e->wheel.wheel<0) && (smallmap_zoom > min_zoom)){	/* can zoom in up to 5 times */
++				WP(w,smallmap_d).zoom_soll=WP(w,smallmap_d).zoom_ist / (2*(-e->wheel.wheel));
++			} else if ((e->wheel.wheel>0) && (smallmap_zoom < max_zoom)) {
++				WP(w,smallmap_d).zoom_soll=WP(w,smallmap_d).zoom_ist * (2*(e->wheel.wheel));
++			} else {
++				return;
++			}
++			DEBUG(misc,10)("zoom-level: %f",(float)smallmap_zoom);
++			SmallMapRecentreZoom();
++			SetWindowDirty(w);
++		}
++		break;
++
++	case WE_TICK:
++		SetWindowDirty(w);
++		break;
++
++	case WE_MOUSEOVER:
++		//do nothing
++		break;
++	
++	/*case WE_REFRESHPOSITION:
++		SmallMapRecentre();
++		SetWindowDirty(w);
++		break;
++	*/
++	default:
++		/* DEBUG(misc,10)("got unhandled event :%i",e->event); */
++		break;
+ 	}
+ }
+ 
+@@ -888,18 +1108,22 @@
+ {
+ 	Window *w;
+ 	ViewPort *vp;
+-	int x,y;
++	int x,y,wx,wy;
+ 
+ 	w = AllocateWindowDescFront(&_smallmap_desc, 0);
+ 	if (w != NULL) {
+ 		w->click_state = ((1<<5) << _smallmap_type) | (_smallmap_show_towns << 12);
+ 		w->resize.width = 350;
+ 		w->resize.height = 250;
+-
++		WP(w,smallmap_d).zoom_ist = 1;
++		WP(w,smallmap_d).zoom_soll = 1;
++		double smallmap_zoom = WP(w,smallmap_d).zoom_ist;
+ 		vp = FindWindowById(WC_MAIN_WINDOW, 0)->viewport;
+ 
+-		x = ((vp->virtual_width  - 220 * 32) / 2 + vp->virtual_left) / 4;
+-		y = ((vp->virtual_height - 120 * 32) / 2 + vp->virtual_top ) / 2 - 32;
++		wx = (w->widget[4].right  - w->widget[4].left)/2;
++		wy = (w->widget[4].bottom - w->widget[4].top )/2;
++		x =  ((((vp->virtual_width / smallmap_zoom) - (wx*32)) / 2) + vp->virtual_left) / (4  * smallmap_zoom);
++		y = (((((vp->virtual_height  / smallmap_zoom) - (wy*32)) / 2) + vp->virtual_top) / (2 * smallmap_zoom)) - 32;
+ 		WP(w,smallmap_d).scroll_x = (y - x) & ~0xF;
+ 		WP(w,smallmap_d).scroll_y = (x + y) & ~0xF;
+ 		WP(w,smallmap_d).subscroll = 0;
+Index: settings.c
+===================================================================
+--- settings.c	(revision 3597)
++++ settings.c	(working copy)
+@@ -906,6 +906,8 @@
+ 	{"population_in_label",	SDT_BOOL,		(void*)true,	&_patches.population_in_label,	NULL},
+ 	{"link_terraform_toolbar",       SDT_BOOL,   (void*)false, &_patches.link_terraform_toolbar,       NULL},
+ 
++	{"sm_zoom_active",		SDT_BOOL,		(void*)false, &_patches.sm_zoom_active,			NULL},
++	{"sm_zoom_smooth",		SDT_BOOL,		(void*)false, &_patches.sm_zoom_smooth,			NULL},
+ 	{NULL,									0,					NULL,					NULL,																						NULL}
+ };
+ 
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 3597)
++++ settings_gui.c	(working copy)
+@@ -772,6 +772,11 @@
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_AI_BUILDS_SHIPS,"ai_disable_veh_ship",&_patches.ai_disable_veh_ship,			0,  0,  0, NULL},
+ };
+ 
++static const PatchEntry _patches_sm[] = {
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_SM_ACTIVE_ZOOM, "sm_zoom_active", &_patches.sm_zoom_active, 0, 1, 1,	NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_SM_ACTIVE_ZOOM_SMOOTH, "sm_zoom_smooth", &_patches.sm_zoom_smooth, 0, 1, 1,	NULL},
++};
++
+ typedef struct PatchPage {
+ 	const PatchEntry *entries;
+ 	uint num;
+@@ -784,6 +789,7 @@
+ 	{_patches_stations,			lengthof(_patches_stations) },
+ 	{_patches_economy,			lengthof(_patches_economy) },
+ 	{_patches_ai,						lengthof(_patches_ai) },
++	{_patches_sm,						lengthof(_patches_sm) },
+ };
+ 
+ 
+@@ -990,7 +996,7 @@
+ 
+ 			break;
+ 		}
+-		case 4: case 5: case 6: case 7: case 8: case 9:
++		case 4: case 5: case 6: case 7: case 8: case 9: case 10:
+ 			WP(w,def_d).data_1 = e->click.widget - 4;
+ 			DeleteWindowById(WC_QUERY_STRING, 0);
+ 			SetWindowDirty(w);
+@@ -1145,6 +1151,7 @@
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,   271,   357,    16,    27, STR_CONFIG_PATCHES_STATIONS,			STR_NULL},
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    10,    96,    28,    39, STR_CONFIG_PATCHES_ECONOMY,			STR_NULL},
+ {    WWT_TEXTBTN,   RESIZE_NONE,     3,    97,   183,    28,    39, STR_CONFIG_PATCHES_AI,						STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,     3,    184,  270,    28,    39, STR_CONFIG_PATCHES_SM,						STR_NULL},
+ {   WIDGETS_END},
+ };
+ 
+Index: window.c
+===================================================================
+--- window.c	(revision 3597)
++++ window.c	(working copy)
+@@ -119,9 +119,15 @@
+ {
+ 	const Widget *wi1, *wi2;
+ 	Scrollbar *sb;
+-
++	
+ 	if (widget < 0) return;
+ 
++	/* send WE_MOUSEWHEEL event to window */
++	WindowEvent e;
++	e.event = WE_MOUSEWHEEL;
++	e.wheel.wheel=wheel;
++	w->wndproc(w, &e);
++
+ 	wi1 = &w->widget[widget];
+ 	wi2 = &w->widget[widget + 1];
+ 
+
+@@ -1177,66 +1192,14 @@
+ 		WP(w,vp_d).scrollpos_y += dy << vp->zoom;
+ 
+ 	} else {
+-		int x;
+-		int y;
+-		int sub;
+-		int hx;
+-		int hy;
+-		int hvx;
+-		int hvy;
+-
+-		_cursor.fix_at = true;
+-
+-		x = WP(w,smallmap_d).scroll_x;
+-		y = WP(w,smallmap_d).scroll_y;
+-
+-		sub = WP(w,smallmap_d).subscroll + dx;
+-
+-		x -= (sub >> 2) << 4;
+-		y += (sub >> 2) << 4;
+-		sub &= 3;
+-
+-		x += (dy >> 1) << 4;
+-		y += (dy >> 1) << 4;
+-
+-		if (dy & 1) {
+-			x += 16;
+-			sub += 2;
+-			if (sub > 3) {
+-				sub -= 4;
+-				x -= 16;
+-				y += 16;
+-			}
+-		}
+-
+-		hx = (w->widget[4].right  - w->widget[4].left) / 2;
+-		hy = (w->widget[4].bottom - w->widget[4].top ) / 2;
+-		hvx = hx * -4 + hy * 8;
+-		hvy = hx *  4 + hy * 8;
+-		if (x < -hvx) {
+-			x = -hvx;
+-			sub = 0;
+-		}
+-		if (x > (int)MapMaxX() * 16 - hvx) {
+-			x = MapMaxX() * 16 - hvx;
+-			sub = 0;
+-		}
+-		if (y < -hvy) {
+-			y = -hvy;
+-			sub = 0;
+-		}
+-		if (y > (int)MapMaxY() * 16 - hvy) {
+-			y = MapMaxY() * 16 - hvy;
+-			sub = 0;
+-		}
+-
+-		WP(w,smallmap_d).scroll_x = x;
+-		WP(w,smallmap_d).scroll_y = y;
+-		WP(w,smallmap_d).subscroll = sub;
+-
+-		SetWindowDirty(w);
++		/* create a scroll-event and send it to the client */
++		WindowEvent we;
++		we.event = WE_SCROLL;
++		we.scroll.delta.x = _cursor.delta.x;
++		we.scroll.delta.y = _cursor.delta.y;
++		/* DEBUG(misc,3)("GOT SCROLL EVENT, passing to client!,%i,%i,%i",e.event,e.scroll.deltax,e.scroll.deltay); */
++		w->wndproc(w, &we);
+ 	}
+-
+ 	_cursor.delta.x = 0;
+ 	_cursor.delta.y = 0;
+ 	return false;
+@@ -1440,6 +1403,7 @@
+ 	} else {
+ 		if (mousewheel)
+ 			DispatchMouseWheelEvent(w, GetWidgetFromPos(w, x - w->left, y - w->top), mousewheel);
++			
+ 
+ 		switch (click) {
+ 			case 1: DispatchLeftClickEvent(w, x - w->left, y - w->top);  break;
+Index: window.h
+===================================================================
+--- window.h	(revision 3597)
++++ window.h	(working copy)
+@@ -134,6 +134,16 @@
+ 		uint wparam; // additional message-specific information
+ 		uint lparam; // additional message-specific information
+ 	} message;
++
++	struct {
++		byte event;
++		Point delta; // cursor delta information
++	} scroll;
++
++	struct {
++		byte event;
++		int wheel; // scrollwheel change
++	} wheel;
+ };
+ 
+ enum WindowKeyCodes {
+@@ -376,8 +386,10 @@
+ 	int32 scroll_x;
+ 	int32 scroll_y;
+ 	int32 subscroll;
++	double zoom_ist;
++	double zoom_soll;
+ } smallmap_d;
+-assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(traindetails_d));
++assert_compile(WINDOW_CUSTOM_SIZE >= sizeof(smallmap_d));
+ 
+ typedef struct {
+ 	uint32 face;
+@@ -497,7 +509,9 @@
+ 	WE_MOUSEOVER = 20,
+ 	WE_ON_EDIT_TEXT_CANCEL = 21,
+ 	WE_RESIZE = 22,
+-	WE_MESSAGE = 23
++	WE_MESSAGE = 23,
++	WE_SCROLL=24,
++	WE_MOUSEWHEEL=25
+ };
+ 
+ 

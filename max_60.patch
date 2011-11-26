@@ -1,0 +1,746 @@
+Index: graph_gui.c
+===================================================================
+--- graph_gui.c	(revision 2652)
++++ graph_gui.c	(working copy)
+@@ -10,17 +10,17 @@
+ #include "strings.h"
+ #include "debug.h"
+ 
+-static uint _legend_excludebits;
++static uint64 _legend_excludebits;
+ static uint _legend_cargobits;
+ 
+ /************************/
+ /* GENERIC GRAPH DRAWER */
+ /************************/
+ 
+-enum {GRAPH_NUM = 16};
++enum {GRAPH_NUM = (MAX_PLAYERS < 16) ? 16 : MAX_PLAYERS};
+ 
+ typedef struct GraphDrawer {
+-	uint sel; // bitmask of the players *excluded* (e.g. 11111111 means that no players are shown)
++	uint64 sel; // bitmask of the players *excluded* (e.g. 11111111 means that no players are shown)
+ 	byte num_dataset;
+ 	byte num_on_x_axis;
+ 	byte month;
+@@ -53,10 +53,11 @@
+ 	uint64 y_scaling, tmp;
+ 	int64 value;
+ 	int64 cur_val;
+-	uint sel;
++	uint64 sel;
+ 
+ 	/* the colors and cost array of GraphDrawer must accomodate
+ 	 * both values for cargo and players. So if any are higher, quit */
++	 
+ 	assert(GRAPH_NUM >= NUM_CARGO && GRAPH_NUM >= MAX_PLAYERS);
+ 
+ 	color = _color_list[gw->bg_line_color].window_color_1b;
+@@ -214,33 +215,41 @@
+ 
+ static void GraphLegendWndProc(Window *w, WindowEvent *e)
+ {
+-	Player *p;
++	Player *p, *plist[MAX_PLAYERS];
++	int pl_num, i;
+ 
+ 	switch(e->event) {
+-	case WE_PAINT:
++	case WE_PAINT:	
++		pl_num = 0;
+ 		FOR_ALL_PLAYERS(p) {
+ 			if (!p->is_active)
+ 				SETBIT(_legend_excludebits, p->index);
++			else
++				plist[pl_num++] = p;
+ 		}
+-		w->click_state = ((~_legend_excludebits) << 3);
++		
++		w->click_state = (~_legend_excludebits) >> w->vscroll.pos;
++		w->click_state = w->click_state << 3;
++
+ 		DrawWindowWidgets(w);
+ 
+-		FOR_ALL_PLAYERS(p) {
+-			if (!p->is_active)
+-				continue;
++		SetVScrollCount(w, pl_num);
+ 
+-			DrawPlayerIcon(p->index, 4, 18+p->index*12);
++			i = w->vscroll.pos;
++		do {
++			p = plist[i];
++			DrawPlayerIcon(p->index, 4, 18 + (i - w->vscroll.pos) * 12);
+ 
+ 			SetDParam(0, p->name_1);
+ 			SetDParam(1, p->name_2);
+ 			SetDParam(2, GetPlayerNameString(p->index, 3));
+-			DrawString(21,17+p->index*12,STR_7021,HASBIT(_legend_excludebits, p->index) ? 0x10 : 0xC);
+-		}
+-		break;
+-
++			DrawString(21, 17 + (i - w->vscroll.pos) * 12, STR_7021, HASBIT(_legend_excludebits, p->index) ? 0x10 : 0xC);
++			if (i + 1>= w->vscroll.cap + w->vscroll.pos)
++				break;
++		} while (++i != pl_num);
+ 	case WE_CLICK:
+ 		if (IS_INT_INSIDE(e->click.widget, 3, 11)) {
+-			_legend_excludebits ^= (1 << (e->click.widget-3));
++			_legend_excludebits ^= (1 << (e->click.widget - 3 + w->vscroll.pos));
+ 			SetWindowDirty(w);
+ 			InvalidateWindow(WC_INCOME_GRAPH, 0);
+ 			InvalidateWindow(WC_OPERATING_PROFIT, 0);
+@@ -254,8 +263,8 @@
+ 
+ static const Widget _graph_legend_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5, STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   249,     0,    13, STR_704E_KEY_TO_COMPANY_GRAPHS, STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   249,    14,   113, 0x0,STR_NULL},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   259,     0,    13, STR_704E_KEY_TO_COMPANY_GRAPHS, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   259,    14,   113, 0x0,STR_NULL},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,   247,    16,    27, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,   247,    28,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,   247,    40,    51, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+@@ -264,11 +273,12 @@
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,   247,    76,    87, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,   247,    88,    99, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,   247,   100,   111, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{  WWT_SCROLLBAR,   RESIZE_NONE,   14,   248,   259,    14,   113, 0x1,STR_0190_SCROLL_BAR_SCROLLS_LIST},
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _graph_legend_desc = {
+-	-1, -1, 250, 114,
++	-1, -1, 260, 114,
+ 	WC_GRAPH_LEGEND,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_graph_legend_widgets,
+@@ -277,7 +287,13 @@
+ 
+ static void ShowGraphLegend(void)
+ {
+-	AllocateWindowDescFront(&_graph_legend_desc, 0);
++	Window *w;
++	w = AllocateWindowDescFront(&_graph_legend_desc, 0);
++	if (w)
++	{
++		w->vscroll.pos = 0;
++		w->vscroll.cap = 8;
++	}
+ }
+ 
+ /********************/
+@@ -287,7 +303,7 @@
+ static void SetupGraphDrawerForPlayers(GraphDrawer *gd)
+ {
+ 	Player *p;
+-	uint excludebits = _legend_excludebits;
++	uint64 excludebits = _legend_excludebits;
+ 	int nums;
+ 	int mo,yr;
+ 
+@@ -836,7 +852,9 @@
+ 
+ 		qsort(plist, pl_num, sizeof(Player*), _perf_hist_comp);
+ 
+-		i = 0;
++		SetVScrollCount(w, pl_num);
++
++		i = w->vscroll.pos;
+ 		do {
+ 			SetDParam(0, i + STR_01AC_1ST);
+ 			p = plist[i];
+@@ -845,8 +863,10 @@
+ 			SetDParam(3, GetPlayerNameString(p->index, 4));
+ 			SetDParam(5, GetPerformanceTitleFromValue(p->old_economy[1].performance_history));
+ 
+-			DrawString(2, 15 + i * 10, i == 0 ? STR_7054 : STR_7055, 0);
+-			DrawPlayerIcon(p->index, 27, 16 + i * 10);
++			DrawString(2, 15 + (i - w->vscroll.pos) * 10, i == 0 ? STR_7054 : STR_7055, 0);
++			DrawPlayerIcon(p->index, 27, 16 + (i - w->vscroll.pos) * 10);
++			if (i + 1>= w->vscroll.cap + w->vscroll.pos)
++				break;
+ 		} while (++i != pl_num);
+ 
+ 		break;
+@@ -859,6 +879,7 @@
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,											STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   399,     0,    13, STR_7053_COMPANY_LEAGUE_TABLE,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   399,    14,    96, 0x0,														STR_NULL},
++{  WWT_SCROLLBAR,   RESIZE_NONE,   14,   388,   399,    14,   96, 0x1,												STR_0190_SCROLL_BAR_SCROLLS_LIST},
+ {   WIDGETS_END},
+ };
+ 
+@@ -872,7 +893,10 @@
+ 
+ void ShowCompanyLeagueTable(void)
+ {
+-	AllocateWindowDescFront(&_company_league_desc,0);
++	Window *w;
++	w = AllocateWindowDescFront(&_company_league_desc,0);
++	w->vscroll.pos = 0;
++	w->vscroll.cap = 8;
+ }
+ 
+ /*****************************/
+@@ -884,8 +908,9 @@
+ 	switch(e->event) {
+ 	case WE_PAINT: {
+ 		int val, needed, score, i;
+-		byte owner, x;
+-		uint16 y=14;
++		byte owner;
++		int x, y2;
++		uint16 y=26;
+ 		int total_score = 0;
+ 		int color_done, color_notdone;
+ 
+@@ -896,31 +921,44 @@
+ 		owner = FindFirstBit(w->click_state) - 13;
+ 
+ 		// Paint the player icons
+-		for (i=0;i<MAX_PLAYERS;i++) {
+-       		if (!GetPlayer(i)->is_active) {
+-       			// Check if we have the player as an active player
+-       			if (!(w->disabled_state & (1 << (i+13)))) {
+-       				// Bah, player gone :(
+-                   	w->disabled_state += 1 << (i+13);
+-                   	// Is this player selected? If so, select first player (always save? :s)
+-                   	if (w->click_state == 1U << (i + 13))
+-                   		w->click_state = 1 << 13;
+-                   	// We need a repaint
+-                   	SetWindowDirty(w);
+-                }
+-               	continue;
+-            }
++		x = 13;
++		y2 = 16;
++		for (i = 0; i < MAX_PLAYERS; i++) {
++       			if (!GetPlayer(i)->is_active) {
++       			
++       				// Check if we have the player as an active player
++       				if (!(w->disabled_state & (1 << (i+13)))) {
++       					// Bah, player gone :(
++                   			w->disabled_state += 1 << (i+13);
++                   			
++                	   		// Is this player selected? If so, select first player (always save? :s)
++                	   		if (w->click_state == 1U << (i + 13))
++                	   			w->click_state = 1 << 13;
++                   			
++                	   		// We need a repaint
++                	   		SetWindowDirty(w);
++                		}
++               		continue;
++            		}
+ 
+ 			// Check if we have the player marked as inactive
+ 			if ((w->disabled_state & (1 << (i+13)))) {
+ 				// New player! Yippie :p
+ 				w->disabled_state -= 1 << (i+13);
+-               	// We need a repaint
+-               	SetWindowDirty(w);
+-            }
+-
+-			if (i == owner) x = 1; else x = 0;
+-			DrawPlayerIcon(i, i * 37 + 13 + x, 16 + x);
++               			// We need a repaint
++               			SetWindowDirty(w);
++            		}
++			
++			if (i == owner)
++				DrawPlayerIcon(i, x + 1, y2 + 1);
++			else
++				DrawPlayerIcon(i, x, y2);
++				
++			x += 37;
++			if (x >= 309) {
++				x = 13;
++				y2 = 29;
++			}
+ 		}
+ 
+ 		// The colors used to show how the progress is going
+@@ -999,7 +1037,7 @@
+ 
+ 	case WE_CLICK:
+ 		// Check which button is clicked
+-		if (IS_INT_INSIDE(e->click.widget, 13, 21)) {
++		if (IS_INT_INSIDE(e->click.widget, 13, 33)) {
+ 			// Is it no on disable?
+ 			if ((w->disabled_state & (1 << e->click.widget)) == 0) {
+ 				w->click_state = 1 << e->click.widget;
+@@ -1008,8 +1046,7 @@
+ 		}
+ 		break;
+ 
+-	case WE_CREATE:
+-		{
++	case WE_CREATE: {
+     		int i;
+     		Player *p2;
+         	w->hidden_state = 0;
+@@ -1033,43 +1070,41 @@
+         	w->click_state = 1 << 13;
+ 
+ 			SetWindowDirty(w);
+-        }
+-    	break;
+-    case WE_TICK:
+-        {
+-        	// Update the player score every 5 days
+-            if (--w->custom[0] == 0) {
+-            	w->custom[0] = DAY_TICKS;
+-            	if (--w->custom[1] == 0) {
+-            		Player *p2;
+-            		w->custom[1] = 5;
+-            		FOR_ALL_PLAYERS(p2)
+-            			// Skip if player is not active
+-            			if (p2->is_active)
+-            				UpdateCompanyRatingAndValue(p2, false);
+-            		SetWindowDirty(w);
++	}
++	break;
++    	case WE_TICK: {
++		// Update the player score every 5 days
++		if (--w->custom[0] == 0) {
++            		w->custom[0] = DAY_TICKS;
++            		if (--w->custom[1] == 0) {
++            			Player *p2;
++				w->custom[1] = 5;
++				FOR_ALL_PLAYERS(p2)
++					// Skip if player is not active
++					if (p2->is_active)
++						UpdateCompanyRatingAndValue(p2, false);
++				SetWindowDirty(w);
++            		}
+             	}
+-            }
+-        }
+-        break;
++        } break;
+ 	}
+ }
+ 
+ static const Widget _performance_rating_detail_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,								STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   298,     0,    13, STR_PERFORMANCE_DETAIL,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    14,    27, 0x0,											STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    14,    40, 0x0,											STR_NULL},
+ 
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    28,    47, 0x0,STR_PERFORMANCE_DETAIL_VEHICLES_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    48,    67, 0x0,STR_PERFORMANCE_DETAIL_STATIONS_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    68,    87, 0x0,STR_PERFORMANCE_DETAIL_MIN_PROFIT_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    88,   107, 0x0,STR_PERFORMANCE_DETAIL_MIN_INCOME_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   108,   127, 0x0,STR_PERFORMANCE_DETAIL_MAX_INCOME_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   128,   147, 0x0,STR_PERFORMANCE_DETAIL_DELIVERED_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   148,   167, 0x0,STR_PERFORMANCE_DETAIL_CARGO_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   168,   187, 0x0,STR_PERFORMANCE_DETAIL_MONEY_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   188,   207, 0x0,STR_PERFORMANCE_DETAIL_LOAN_TIP},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   208,   227, 0x0,STR_PERFORMANCE_DETAIL_TOTAL_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    40,    59, 0x0,STR_PERFORMANCE_DETAIL_VEHICLES_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    60,    79, 0x0,STR_PERFORMANCE_DETAIL_STATIONS_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    80,    99, 0x0,STR_PERFORMANCE_DETAIL_MIN_PROFIT_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,    100,   119, 0x0,STR_PERFORMANCE_DETAIL_MIN_INCOME_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   120,   139, 0x0,STR_PERFORMANCE_DETAIL_MAX_INCOME_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   140,   159, 0x0,STR_PERFORMANCE_DETAIL_DELIVERED_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   160,   179, 0x0,STR_PERFORMANCE_DETAIL_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   180,   199, 0x0,STR_PERFORMANCE_DETAIL_MONEY_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   200,   219, 0x0,STR_PERFORMANCE_DETAIL_LOAN_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   298,   220,   239, 0x0,STR_PERFORMANCE_DETAIL_TOTAL_TIP},
+ 
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     2,    38,    14,    26, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,    39,    75,    14,    26, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+@@ -1079,11 +1114,19 @@
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,   187,   223,    14,    26, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,   224,   260,    14,    26, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,   261,   297,    14,    26, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     2,    38,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,    39,    75,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,    76,   112,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   113,   149,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   150,   186,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   187,   223,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   224,   260,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   261,   297,    27,    39, 0x0,STR_704F_CLICK_HERE_TO_TOGGLE_COMPANY},
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _performance_rating_detail_desc = {
+-	-1, -1, 299, 228,
++	-1, -1, 299, 240,
+ 	WC_PERFORMANCE_DETAIL,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_performance_rating_detail_widgets,
+@@ -1167,9 +1210,7 @@
+ 		}
+ 
+ 		{	const SignStruct *ss;
+-			uint16 i;
+-
+-			/* Start drawing the signs */
++			uint16 i;			/* Start drawing the signs */
+ 			for (i = w->vscroll.pos; i < w->vscroll.cap + w->vscroll.pos && i < w->vscroll.count; i++) {
+ 				ss = GetSign(_sign_sort[i]);
+ 
+Index: engine.h
+===================================================================
+--- engine.h	(revision 2652)
++++ engine.h	(working copy)
+@@ -83,7 +83,7 @@
+ 	PlayerID preview_player;
+ 	byte preview_wait;
+ 	byte railtype;
+-	PlayerID player_avail;
++	uint64 player_avail;
+ 	byte type;				// type, ie VEH_Road, VEH_Train, etc. Same as in vehicle.h
+ } Engine;
+ 
+Index: network.c
+===================================================================
+--- network.c	(revision 2652)
++++ network.c	(working copy)
+@@ -1291,7 +1291,7 @@
+ 	}
+ 	#endif // __MORPHOS__ / __AMIGA__
+ 
+-    // Network is available
++	// Network is available
+ 	_network_available = true;
+ 	_network_dedicated = false;
+ 	_network_last_advertise_date = 0;
+@@ -1308,8 +1308,7 @@
+ 
+ 	memset(&_network_game_info, 0, sizeof(_network_game_info));
+ 
+-	/* XXX - Hard number here, because the strings can currently handle no more
+-	    than 10 clients -- TrueLight */
++	// Default, can be anything up to MAX_PLAYERS + MAX_SPECTATORS - 1
+ 	_network_game_info.clients_max = 10;
+ 
+ 	// Let's load the network in windows
+Index: network.h
+===================================================================
+--- network.h	(revision 2652)
++++ network.h	(working copy)
+@@ -18,11 +18,12 @@
+ //   so in theory, this next define can be left off.
+ //#define NETWORK_SEND_DOUBLE_SEED
+ 
+-// How many clients can we have? Like.. MAX_PLAYERS - 1 is the amount of
+-//  players that can really play.. so.. a max of 4 spectators.. gives us..
+-//  MAX_PLAYERS + 3
+-#define MAX_CLIENTS (MAX_PLAYERS + 3)
++// That maximum number of spectators we can have
++#define MAX_SPECTATORS 2
+ 
++// How many clients can we have? It is - 1 at the end, because the server
++// is a player too ;)
++#define MAX_CLIENTS (MAX_PLAYERS + MAX_SPECTATORS) - 1
+ 
+ // Do not change this next line. It should _ALWAYS_ be MAX_CLIENTS + 1
+ #define MAX_CLIENT_INFO (MAX_CLIENTS + 1)
+@@ -36,7 +37,6 @@
+ 
+ #define MAX_INTERFACES 9
+ 
+-
+ // How many vehicle/station types we put over the network
+ #define NETWORK_VEHICLE_TYPES 5
+ #define NETWORK_STATION_TYPES 5
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2652)
++++ lang/english.txt	(working copy)
+@@ -1242,19 +1242,10 @@
+ STR_NETWORK_INTERNET                                            :Internet
+ STR_NETWORK_LAN_INTERNET                                        :LAN / Internet
+ STR_NETWORK_INTERNET_ADVERTISE                                  :Internet (advertise)
+-STR_NETWORK_COMBO2                                              :{BLACK}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{STRING}
+-STR_NETWORK_2_CLIENTS                                           :2 clients
+-STR_NETWORK_3_CLIENTS                                           :3 clients
+-STR_NETWORK_4_CLIENTS                                           :4 clients
+-STR_NETWORK_5_CLIENTS                                           :5 clients
+-STR_NETWORK_6_CLIENTS                                           :6 clients
+-STR_NETWORK_7_CLIENTS                                           :7 clients
+-STR_NETWORK_8_CLIENTS                                           :8 clients
+-STR_NETWORK_9_CLIENTS                                           :9 clients
+-STR_NETWORK_10_CLIENTS                                          :10 clients
++STR_NETWORK_NUM_CLIENTS                                           :{NUM} clients
+ STR_NETWORK_LANGUAGE_SPOKEN                                     :{BLACK}Language spoken:
+ STR_NETWORK_LANGUAGE_TIP                                        :{BLACK}Other players will know which language is spoken on the server
+-STR_NETWORK_COMBO3                                              :{BLACK}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{STRING}
++STR_NETWORK_COMBO2                                              :{BLACK}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{STRING}
+ STR_NETWORK_START_GAME                                          :{BLACK}Start Game
+ STR_NETWORK_START_GAME_TIP                                      :{BLACK}Start a new network game from a random map, or scenario
+ STR_NETWORK_LOAD_GAME                                           :{BLACK}Load Game
+Index: openttd.c
+===================================================================
+--- openttd.c	(revision 2652)
++++ openttd.c	(working copy)
+@@ -1314,7 +1314,29 @@
+ 				SetTileOwner(tile_cur, OWNER_WATER);
+ 		END_TILE_LOOP(tile_cur, w, h, tile)
+ 	}
++	
++	// update new special owners so up to 60 human / ai players can be used
++	//
++	// Note: We can't use GetTileOwner or SetTileOwnder, because the owners
++	// have not yet been converted, so this will give us assertions
++	//
++	if (version <= 0xf00) {
++		TileIndex tile = TileXY(0, 0);
++		uint w = MapSizeX();
++		uint h = MapSizeY();
+ 
++		BEGIN_TILE_LOOP(tile_cur, w, h, tile)
++			if (_m[tile_cur].owner == 0xf)
++				_m[tile_cur].owner = OWNER_TOWN;
++			if (_m[tile_cur].owner == 0x10)
++				_m[tile_cur].owner = OWNER_NONE;
++			if (_m[tile_cur].owner == 0x11)
++				_m[tile_cur].owner = OWNER_WATER;
++			if (_m[tile_cur].owner == 0xff)
++				_m[tile_cur].owner = OWNER_SPECTATOR;
++		END_TILE_LOOP(tile_cur, w, h, tile)
++	}
++	
+ 	// convert road side to my format.
+ 	if (_opt.road_side) _opt.road_side = 1;
+ 
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2652)
++++ saveload.c	(working copy)
+@@ -23,7 +23,7 @@
+ #include "saveload.h"
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 15,
++	SAVEGAME_MAJOR_VERSION = 16,
+ 	SAVEGAME_MINOR_VERSION = 0,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+Index: player.h
+===================================================================
+--- player.h	(revision 2652)
++++ player.h	(working copy)
+@@ -194,7 +194,11 @@
+ void UpdatePlayerMoney32(Player *p);
+ #define FOR_ALL_PLAYERS(p) for(p=_players; p != endof(_players); p++)
+ 
+-#define MAX_PLAYERS 8
++// Remember there need to be 4 reserved players (see map.h)
++// Without major changes this will not work above 64
++// There will also be a few bugs (i.e. not enough colours) if you
++// set it to anything above 16
++#define MAX_PLAYERS 16
+ VARDEF Player _players[MAX_PLAYERS];
+ 
+ static inline Player* GetPlayer(uint i)
+Index: map.h
+===================================================================
+--- map.h	(revision 2652)
++++ map.h	(working copy)
+@@ -69,10 +69,10 @@
+ }
+ 
+ typedef enum {
+-	OWNER_TOWN			= 0xf,	// a town owns the tile
+-	OWNER_NONE			= 0x10,	// nobody owns the tile
+-	OWNER_WATER			= 0x11,	// "water" owns the tile
+-	OWNER_SPECTATOR	= 0xff,	// spectator in MP or in scenario editor
++	OWNER_TOWN			= 0x3C,	// a town owns the tile
++	OWNER_NONE			= 0x3D,	// nobody owns the tile
++	OWNER_WATER			= 0x3E,	// "water" owns the tile
++	OWNER_SPECTATOR	= 0x3F,	// spectator in MP or in scenario editor
+ } Owner;
+ 
+ enum {
+Index: network_gui.c
+===================================================================
+--- network_gui.c	(revision 2652)
++++ network_gui.c	(working copy)
+@@ -412,19 +412,6 @@
+ 	UpdateNetworkGameWindow(true);
+ }
+ 
+-static const StringID _players_dropdown[] = {
+-	STR_NETWORK_2_CLIENTS,
+-	STR_NETWORK_3_CLIENTS,
+-	STR_NETWORK_4_CLIENTS,
+-	STR_NETWORK_5_CLIENTS,
+-	STR_NETWORK_6_CLIENTS,
+-	STR_NETWORK_7_CLIENTS,
+-	STR_NETWORK_8_CLIENTS,
+-	STR_NETWORK_9_CLIENTS,
+-	STR_NETWORK_10_CLIENTS,
+-	INVALID_STRING_ID
+-};
+-
+ static const StringID _language_dropdown[] = {
+ 	STR_NETWORK_LANG_ANY,
+ 	STR_NETWORK_LANG_ENGLISH,
+@@ -448,10 +435,10 @@
+ 
+ 	case WE_PAINT: {
+ 		int y = NSSWND_START, pos;
++		int color = PALETTE_MODIFIER_COLOR | _color_list[3].unk2;
+ 		const FiosItem *item;
+ 
+ 		SetDParam(7, STR_NETWORK_LAN_INTERNET + _network_advertise);
+-		SetDParam(9, STR_NETWORK_2_CLIENTS + _network_game_info.clients_max - 2);
+ 		SetDParam(11, STR_NETWORK_LANG_ANY + _network_game_info.server_lang);
+ 		DrawWindowWidgets(w);
+ 
+@@ -463,11 +450,25 @@
+ 
+ 		DrawString(10, 43, STR_NETWORK_SELECT_MAP, 2);
+ 		DrawString(280, 63, STR_NETWORK_CONNECTION, 2);
+-		DrawString(280, 95, STR_NETWORK_NUMBER_OF_CLIENTS, 2);
++		DrawString(280, 98, STR_NETWORK_NUMBER_OF_CLIENTS, 2);
+ 		DrawString(280, 127, STR_NETWORK_LANGUAGE_SPOKEN, 2);
+ 
+ 		if (_network_game_info.use_password) DoDrawString("*", 408, 23, 3);
+ 
++		// draw number of clients selecter
++		DrawFrameRect( 280, 112,  280 + 8, 112 + 8, 3, 0);
++		DrawFrameRect(290, 112, 290 + 8, 112 + 8, 3, 0);
++		if (_network_game_info.clients_max <= 1)
++			GfxFillRect( 281, 112 + 1, 281 + 8, 112 + 8, color);
++		if (_network_game_info.clients_max >= MAX_CLIENTS)
++			GfxFillRect(291, 112 + 1, 291 + 8, 112 + 8, color);
++
++		DrawStringCentered(285, 112, STR_6819, 0);
++		DrawStringCentered(295, 112, STR_681A, 0);
++
++		SetDParam(0, _network_game_info.clients_max);
++		DrawString(311, 112, STR_NETWORK_NUM_CLIENTS, 2);
++
+ 		// draw list of maps
+ 		pos = w->vscroll.pos;
+ 		while (pos < _fios_num + 1) {
+@@ -482,12 +483,26 @@
+ 
+ 			if (y >= w->vscroll.cap * NSSWND_ROWSIZE + NSSWND_START) break;
+ 		}
+-	}	break;
++	} break;
+ 
+-	case WE_CLICK:
++	case WE_CLICK: {
++		int x, y;
+ 		_selected_field = e->click.widget;
++		
++		x = e->click.pt.x;
++		y = e->click.pt.y;
++		if (IS_INT_INSIDE(x, 280, 300) && IS_INT_INSIDE(y, 112, 120)) // Button area
++		{
++			if (IS_INT_INSIDE(x, 280, 290) && _network_game_info.clients_max > 1)
++				_network_game_info.clients_max--;
++			if (IS_INT_INSIDE(x, 290, 300) && _network_game_info.clients_max < MAX_CLIENTS)
++				_network_game_info.clients_max++;
++			SetWindowDirty(w);
++			break;
++		}
++		
+ 		switch(e->click.widget) {
+-		case 0: case 15: /* Close 'X' | Cancel button */
++		case 0: case 13: /* Close 'X' | Cancel button */
+ 			ShowNetworkGameWindow();
+ 			break;
+ 		case 4: { /* Set password button */
+@@ -505,13 +520,10 @@
+ 		case 7: case 8: /* Connection type */
+ 			ShowDropDownMenu(w, _connection_types_dropdown, _network_advertise, 8, 0, 0); // do it for widget 8
+ 			break;
+-		case 9: case 10: /* Number of Players */
+-			ShowDropDownMenu(w, _players_dropdown, _network_game_info.clients_max - 2, 10, 0, 0); // do it for widget 10
++		case 9: case 10: /* Language */
++			ShowDropDownMenu(w, _language_dropdown, _network_game_info.server_lang, 10, 0, 0); // do it for widget 10
+ 			return;
+-		case 11: case 12: /* Language */
+-			ShowDropDownMenu(w, _language_dropdown, _network_game_info.server_lang, 12, 0, 0); // do it for widget 12
+-			return;
+-		case 13: /* Start game */
++		case 11: /* Start game */
+ 			_is_network_server = true;
+ 			ttd_strlcpy(_network_server_name, WP(w, querystr_d).text.buf, sizeof(_network_server_name));
+ 			UpdateTextBufferSize(&WP(w, querystr_d).text);
+@@ -529,7 +541,7 @@
+ 				}
+ 			}
+ 			break;
+-		case 14: /* Load game */
++		case 12: /* Load game */
+ 			_is_network_server = true;
+ 			ttd_strlcpy(_network_server_name, WP(w, querystr_d).text.buf, sizeof(_network_server_name));
+ 			UpdateTextBufferSize(&WP(w, querystr_d).text);
+@@ -540,16 +552,13 @@
+ 			break;
+ 		}
+ 		break;
+-
++	} break;
+ 	case WE_DROPDOWN_SELECT: /* we have selected a dropdown item in the list */
+ 		switch(e->dropdown.button) {
+ 			case 8:
+ 				_network_advertise = (e->dropdown.index != 0);
+ 				break;
+ 			case 10:
+-				_network_game_info.clients_max = e->dropdown.index + 2;
+-				break;
+-			case 12:
+ 				_network_game_info.server_lang = e->dropdown.index;
+ 				break;
+ 		}
+@@ -590,10 +599,7 @@
+ {          WWT_6,   RESIZE_NONE,   BGC,   280,   410,    77,    88, STR_NETWORK_COMBO1,						STR_NETWORK_CONNECTION_TIP},
+ {   WWT_CLOSEBOX,   RESIZE_NONE,   BGC,   399,   409,    78,    87, STR_0225,											STR_NETWORK_CONNECTION_TIP},
+ 
+-{          WWT_6,   RESIZE_NONE,   BGC,   280,   410,   109,   120, STR_NETWORK_COMBO2,						STR_NETWORK_NUMBER_OF_CLIENTS_TIP},
+-{   WWT_CLOSEBOX,   RESIZE_NONE,   BGC,   399,   409,   110,   119, STR_0225,											STR_NETWORK_NUMBER_OF_CLIENTS_TIP},
+-
+-{          WWT_6,   RESIZE_NONE,   BGC,   280,   410,   141,   152, STR_NETWORK_COMBO3,						STR_NETWORK_LANGUAGE_TIP},
++{          WWT_6,   RESIZE_NONE,   BGC,   280,   410,   141,   152, STR_NETWORK_COMBO2,						STR_NETWORK_LANGUAGE_TIP},
+ {   WWT_CLOSEBOX,   RESIZE_NONE,   BGC,   399,   409,   142,   151, STR_0225,											STR_NETWORK_LANGUAGE_TIP},
+ 
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,   BTC,    40,   140,   180,   191, STR_NETWORK_START_GAME,				STR_NETWORK_START_GAME_TIP},
+@@ -660,6 +666,7 @@
+ 		if (_network_lobby_company_count == 0)
+ 			SETBIT(w->disabled_state, 9);
+ 
++		SetVScrollCount(w, _network_lobby_company_count);
+ 		DrawWindowWidgets(w);
+ 
+ 		SetDParamStr(0, _selected_item->info.server_name);
+@@ -685,7 +692,7 @@
+ 
+ 			pos++;
+ 			y += NET_PRC__SIZE_OF_ROW_COMPANY;
+-			if (pos >= w->vscroll.cap)
++			if (pos >= w->vscroll.cap + w->vscroll.pos)
+ 				break;
+ 		}
+ 
+@@ -836,7 +843,7 @@
+ 	w = AllocateWindowDesc(&_network_lobby_window_desc);
+ 	strcpy(_edit_str_buf, "");
+ 	w->vscroll.pos = 0;
+-	w->vscroll.cap = 8;
++	w->vscroll.cap = 10;
+ }
+ 
+ 
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2652)
++++ settings_gui.c	(working copy)
+@@ -289,7 +289,7 @@
+ } GameSettingData;
+ 
+ static const GameSettingData _game_setting_info[] = {
+-	{  0,   7,  1, STR_NULL},
++	{  0,   MAX_PLAYERS - 1,  1, STR_NULL},
+ 	{  0,   3,  1, STR_6830_IMMEDIATE},
+ 	{  0,   2,  1, STR_6816_LOW},
+ 	{  0,   3,  1, STR_26816_NONE},

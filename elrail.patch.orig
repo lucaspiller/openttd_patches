@@ -1,0 +1,812 @@
+Index: rail_cmd.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/rail_cmd.c,v
+retrieving revision 1.4
+diff -u -r1.4 rail_cmd.c
+--- rail_cmd.c	19 Apr 2005 07:01:07 -0000	1.4
++++ rail_cmd.c	21 Apr 2005 13:56:44 -0000
+@@ -285,7 +285,7 @@
+ 	int32 cost = 0;
+ 	int32 ret;
+ 
+-	if (rail_type > _players[_current_player].max_railtype ||
++	if ((rail_type&7) > _players[_current_player].max_railtype ||
+ 			rail > 5) // invalid track number?
+ 		return CMD_ERROR;
+ 
+@@ -592,7 +592,7 @@
+ 		return CMD_ERROR;
+ 
+ 	for(;;) {
+-		ret = DoCommand(x, y, p2&0x3, railbit&7, flags, (mode == 0) ? CMD_BUILD_SINGLE_RAIL : CMD_REMOVE_SINGLE_RAIL);
++		ret = DoCommand(x, y, p2&0xf, railbit&7, flags, (mode == 0) ? CMD_BUILD_SINGLE_RAIL : CMD_REMOVE_SINGLE_RAIL);
+ 
+ 		if (ret == CMD_ERROR) {
+ 			if ((_error_message != STR_1007_ALREADY_BUILT) && (mode == 0))
+@@ -636,6 +636,7 @@
+ 	int32 cost, ret;
+ 	Depot *depot;
+ 	uint tileh;
++	if(!(p1&0xF)) p1|=8;
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -1289,14 +1290,89 @@
+ 	AddSortableSpriteToDraw(image, ti->x + x, ti->y + y, xsize, ysize, zsize, ti->z + z);
+ }
+ 
++void DrawElRailSprite(TileInfo *ti)
++{	uint32 image=31; //mast NW-Left
++	byte m5 = (byte)ti->map5;
++	int dy=0,dx=0;
++	bool draw=false;
++	byte sumX=0, sumY=0;
++	if(!(ti->y&16)) {sumY=1;}
++	if(!(ti->x&16)) {sumX=1;}
++	//select sprite
++		switch (ti->tileh){
++			case  3: //NE down
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE-sumX+34, ti->x+8, ti->y+11-sumX*7, 1, 1, 10, GetSlopeZ(ti->x,ti->y)+4);//Mast
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumX*8+17, ti->x, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++				return;
++			case  6: //NW down
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE-sumY+32, ti->x+11-sumY*8, ti->y+8, 1, 1, 10, GetSlopeZ(ti->x,ti->y+4));//Mast
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumY*8+16, ti->x+8, ti->y+0, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++				return;
++			case  9: //NW up
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE-sumY+32, ti->x+13-sumY*8, ti->y+8, 1, 1, 10, GetSlopeZ(ti->x,ti->y-4));//Mast
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumY*8+18, ti->x+8, ti->y, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++				return;
++			case 12: //NE up
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE-sumX+34, ti->x+8, ti->y+11-sumX*7, 1, 1, 10, GetSlopeZ(ti->x,ti->y)-4);//Mast
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumX*8+15, ti->x+0, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++				return;
++		}
++		if (m5&RAIL_BIT_DIAG2){
++			draw=true;
++			if (ti->y&16){
++				image=32; dx=11; dy=8;
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+12, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++			}else{
++				image=31; dx=4; dy=8;
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+20, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++			}
++		}
++		if (m5&RAIL_BIT_DIAG1){
++			draw=true;
++			if (ti->x&16){
++				image=34; dx=8; dy=11;
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+11, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++			}else{
++				image=33; dx=8; dy=4;
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+19, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++			}
++		}
++		if (m5&RAIL_BIT_LEFT){
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+37, ti->x+14, ti->y+1, 1, 1, 10, GetSlopeZ(ti->x,ti->y));//Mast
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+22, ti->x+8, ti->y+0, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++			draw=false;
++		}
++		if (m5&RAIL_BIT_RIGHT){
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+38, ti->x+1, ti->y+14, 1, 1, 10, GetSlopeZ(ti->x,ti->y));//Mast
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+14, ti->x+0, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++			draw=false;
++		}
++		if (m5&RAIL_BIT_UPPER){
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+35, ti->x+1, ti->y+1, 1, 1, 10, GetSlopeZ(ti->x,ti->y));//Mast
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+21, ti->x+8, ti->y+0, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++			draw=false;
++		}
++		if (m5&RAIL_BIT_LOWER){
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+36, ti->x+15, ti->y+15, 1, 1, 10, GetSlopeZ(ti->x,ti->y));//Mast
++			AddSortableSpriteToDraw(SPR_ELRAIL_BASE+13, ti->x+16, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++			draw=false;
++		}
++	if (m5&RAIL_BIT_DIAG1) if(m5&RAIL_BIT_DIAG2) draw=false;
++	if (draw){
++		AddSortableSpriteToDraw(SPR_ELRAIL_BASE+image, ti->x+dx, ti->y+dy, 1, 1, 10, GetSlopeZ(ti->x,ti->y));
++	}
++}
++
+ static void DrawTile_Track(TileInfo *ti)
+ {
+ 	uint32 tracktype_offs, image;
+ 	byte m5;
++    bool tracktype_extra;
+ 
+ 	_drawtile_track_palette = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(_map_owner[ti->tile]));
+ 
+-	tracktype_offs = (_map3_lo[ti->tile] & 0xF) * TRACKTYPE_SPRITE_PITCH;
++	tracktype_extra = (_map3_lo[ti->tile] & 0x8);
++	tracktype_offs = (_map3_lo[ti->tile] & 0x7) * TRACKTYPE_SPRITE_PITCH;
+ 
+ 	m5 = (byte)ti->map5;
+ 	if (!(m5 & RAIL_TYPE_SPECIAL)) {
+@@ -1350,6 +1426,8 @@
+ 			if (m5 & RAIL_BIT_RIGHT) DrawGroundSprite(0x3F1 + tracktype_offs);
+ 		}
+ 
++		if (tracktype_extra) DrawElRailSprite(ti);
++
+ 		if (_display_opt & DO_FULL_DETAIL) {
+ 			_detailed_track_proc[_map2[ti->tile] & RAIL_MAP2LO_GROUND_MASK](ti);
+ 		}
+@@ -1413,7 +1491,8 @@
+ 				// emulate station tile - open with building
+ 				DrawTileSprites *cust = &stat->renderdata[2 + (m5 & 0x1)];
+ 				uint32 relocation = GetCustomStationRelocation(stat, ComposeWaypointStation(ti->tile), 0);
+-				int railtype=(_map3_lo[ti->tile] & 0xF);
++				int railtype=(_map3_lo[ti->tile] & 0x7);
++#define RAILTYPE_EXTRA HASBIT(_map3_lo[ti->tile],3)
+ 
+ 				/* We don't touch the 0x8000 bit. In all this
+ 				 * waypoint code, it is used to indicate that
+@@ -1434,6 +1513,19 @@
+ 					DrawSpecialBuilding(image, 0, ti,
+ 					                    seq->delta_x, seq->delta_y, seq->delta_z,
+ 					                    seq->width, seq->height, seq->unk);
++				}
++				if (RAILTYPE_EXTRA){
++					if (ti->map5&0x1){
++						if (ti->y&0x10)
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+12, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++						else
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+20, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++					}else{
++						if (ti->x&0x10)
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+11, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++						else
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+19, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++					}
+ 				}
+ 				return;
+ 			}
+Index: rail_gui.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/rail_gui.c,v
+retrieving revision 1.4
+diff -u -r1.4 rail_gui.c
+--- rail_gui.c	19 Apr 2005 07:01:07 -0000	1.4
++++ rail_gui.c	21 Apr 2005 12:47:06 -0000
+@@ -16,6 +16,7 @@
+ 
+ static uint _cur_railtype;
+ static bool _remove_button_clicked;
++static bool _thirdline_button_clicked;
+ static byte _build_depot_direction;
+ static byte _waypoint_count=1;
+ static byte _cur_waypoint_type;
+@@ -211,29 +212,30 @@
+ 	VpStartPlaceSizing(tile, VPM_SIGNALDIRS);
+ }
+ 
++#define cursor(x) ((_cur_railtype==0x8)? SPR_ELRAIL_BASE + 43 + x:_cur_railtype*4 + 0x4EF +x)
+ static void BuildRailClick_N(Window *w)
+ {
+-	HandlePlacePushButton(w, 4, _cur_railtype*4 + 0x4EF, 1, PlaceRail_N);
++	HandlePlacePushButton(w, 4, cursor(0), 1, PlaceRail_N);
+ }
+ 
+ static void BuildRailClick_NE(Window *w)
+ {
+-	HandlePlacePushButton(w, 5, _cur_railtype*4 + 0x4F0, 1, PlaceRail_NE);
++	HandlePlacePushButton(w, 5, cursor(1), 1, PlaceRail_NE);
+ }
+ 
+ static void BuildRailClick_E(Window *w)
+ {
+-	HandlePlacePushButton(w, 6, _cur_railtype*4 + 0x4F1, 1, PlaceRail_E);
++	HandlePlacePushButton(w, 6, cursor(2), 1, PlaceRail_E);
+ }
+ 
+ static void BuildRailClick_NW(Window *w)
+ {
+-	HandlePlacePushButton(w, 7, _cur_railtype*4 + 0x4F2, 1, PlaceRail_NW);
++	HandlePlacePushButton(w, 7, cursor(3), 1, PlaceRail_NW);
+ }
+ 
+ static void BuildRailClick_AutoRail(Window *w)
+ {
+-	HandlePlacePushButton(w, 8, _cur_railtype + SPR_CURSOR_AUTORAIL, VHM_RAIL, PlaceRail_AutoRail);
++	HandlePlacePushButton(w, 8, (_cur_railtype&7) + SPR_CURSOR_AUTORAIL, VHM_RAIL, PlaceRail_AutoRail);
+ }
+ 
+ static void BuildRailClick_Demolish(Window *w)
+@@ -249,7 +251,7 @@
+ 
+ static void BuildRailClick_Depot(Window *w)
+ {
+-	if (HandlePlacePushButton(w, 10, _depot_cursors[_cur_railtype], 1, PlaceRail_Depot)) ShowBuildTrainDepotPicker();
++	if (HandlePlacePushButton(w, 10, _depot_cursors[_cur_railtype&7], 1, PlaceRail_Depot)) ShowBuildTrainDepotPicker(); 
+ }
+ 
+ static void BuildRailClick_Waypoint(Window *w)
+@@ -277,7 +279,7 @@
+ 
+ static void BuildRailClick_Tunnel(Window *w)
+ {
+-	HandlePlacePushButton(w, 15, 0x982 + _cur_railtype, 3, PlaceRail_Tunnel);
++	HandlePlacePushButton(w, 15, ((_cur_railtype==0x8)? SPR_ELRAIL_BASE + 48:_cur_railtype*4 + 0x982), 3, PlaceRail_Tunnel);
+ }
+ 
+ static void BuildRailClick_Remove(Window *w)
+@@ -301,9 +303,25 @@
+ 	}
+ }
+ 
++static void BuildRailClick_ThirdLine(Window *w)
++{
++	SetWindowDirty(w);
++	SndPlayFx(SND_15_BEEP);
++
++	//_thd.make_square_red = !!((w->click_state ^= (1 << 17)) & (1<<17));
++	MarkTileDirty(_thd.pos.x, _thd.pos.y);
++	w->click_state^=(1 << 17);
++	_thirdline_button_clicked = (w->click_state & (1 << 17)) != 0;
++	if (_thirdline_button_clicked)
++		_cur_railtype = 0x8;
++	else
++		_cur_railtype = 0;
++}
++
+ static void BuildRailClick_Convert(Window *w)
+ {
+-	HandlePlacePushButton(w, 17, (SPR_OPENTTD_BASE + 26) + _cur_railtype * 2, 1, PlaceRail_ConvertRail);
++#define BUTTON_NUM ( _cur_railtype&7 ? 17:18 )
++	HandlePlacePushButton(w, BUTTON_NUM, (SPR_OPENTTD_BASE + 26) + (_cur_railtype&7) * 2, 1, PlaceRail_ConvertRail); 
+ }
+ 
+ static void BuildRailClick_Landscaping(Window *w)
+@@ -366,6 +384,7 @@
+ 	BuildRailClick_Bridge,
+ 	BuildRailClick_Tunnel,
+ 	BuildRailClick_Remove,
++	BuildRailClick_ThirdLine,
+ 	BuildRailClick_Convert,
+ 	BuildRailClick_Landscaping,
+ };
+@@ -400,13 +419,18 @@
+ 			w->disabled_state |= (1 << 16);
+ 			w->click_state &= ~(1<<16);
+ 		}
++		if (_thirdline_button_clicked && !(_cur_railtype&0x7)) {w->click_state|=(1<<17); _cur_railtype=8;};
+ 		DrawWindowWidgets(w);
+ 		break;
+ 
+ 	case WE_CLICK:
+ 		if (e->click.widget >= 4) {
++			byte proc;
+ 			_remove_button_clicked = false;
+-			_build_railroad_button_proc[e->click.widget - 4](w);
++			proc=e->click.widget;
++			if (proc>=16 && (_cur_railtype&7)!=0) (proc++);
++			_build_railroad_button_proc[proc - 4](w);
++			if (_thirdline_button_clicked && !_cur_railtype&0x7){ w->click_state|=(1<<17); _cur_railtype=8;};
+ 		}
+ 	break;
+ 
+@@ -482,8 +506,8 @@
+ 
+ static const Widget _build_railroad_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5,STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,   RESIZE_NONE,     7,    11,   359,     0,    13, STR_100A_RAILROAD_CONSTRUCTION, STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{  WWT_STICKYBOX,   RESIZE_NONE,     7,   360,   371,     0,    13, 0x0,     STR_STICKY_BUTTON},
++{    WWT_CAPTION,   RESIZE_NONE,     7,    11,   381,     0,    13, STR_100A_RAILROAD_CONSTRUCTION, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,     7,   382,   393,     0,    13, 0x0,     STR_STICKY_BUTTON}, 
+ 
+ {      WWT_PANEL,   RESIZE_NONE,     7,   110,   113,    14,    35, 0x0,			STR_NULL},
+ 
+@@ -502,15 +526,16 @@
+ {      WWT_PANEL,   RESIZE_NONE,     7,   244,   285,    14,    35, 0xA22,		STR_101C_BUILD_RAILROAD_BRIDGE},
+ {      WWT_PANEL,   RESIZE_NONE,     7,   286,   305,    14,    35, 0x97E,		STR_101D_BUILD_RAILROAD_TUNNEL},
+ {      WWT_PANEL,   RESIZE_NONE,     7,   306,   327,    14,    35, 0x2CA,		STR_101E_TOGGLE_BUILD_REMOVE_FOR},
+-{      WWT_PANEL,   RESIZE_NONE,     7,   328,   349,    14,    35, SPR_OPENTTD_BASE + 25, STR_CONVERT_RAIL_TIP},
++{      WWT_PANEL,   RESIZE_NONE,     7,   328,   349,    14,    35, SPR_ELRAIL_BASE + 40,		STR_TOGGLE_BUILD_THIRDLINE},
++{      WWT_PANEL,   RESIZE_NONE,     7,   350,   371,    14,    35, SPR_OPENTTD_BASE + 25, STR_CONVERT_RAIL_TIP},
+ 
+-{      WWT_PANEL,   RESIZE_NONE,     7,   350,   371,    14,    35, SPR_IMG_LANDSCAPING,	STR_LANDSCAPING_TOOLBAR_TIP},
++{      WWT_PANEL,   RESIZE_NONE,     7,   372,   393,    14,    35, SPR_IMG_LANDSCAPING,	STR_LANDSCAPING_TOOLBAR_TIP},
+ 
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _build_railroad_desc = {
+-	640-372, 22, 372, 36,
++	640-394, 22, 394, 36,
+ 	WC_BUILD_TOOLBAR,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_build_railroad_widgets,
+@@ -607,7 +632,7 @@
+ 	// don't recreate the window if we're clicking on a button and the window exists.
+ 	if (button < 0 || !(w = FindWindowById(WC_BUILD_TOOLBAR, 0)) || w->wndproc != BuildRailToolbWndProc) {
+ 		DeleteWindowById(WC_BUILD_TOOLBAR, 0);
+-		_cur_railtype = (byte)index;
++		_cur_railtype = (byte)index|(_thirdline_button_clicked<<3);
+ 		w = AllocateWindowDesc(_build_rr_desc[index]);
+ 	}
+ 
+@@ -674,8 +699,8 @@
+ 
+ 		DrawWindowWidgets(w);
+ 
+-		StationPickerDrawSprite(39, 42, _cur_railtype, 2);
+-		StationPickerDrawSprite(107, 42, _cur_railtype, 3);
++		StationPickerDrawSprite(39, 42, _cur_railtype&7, 2);
++		StationPickerDrawSprite(107, 42, _cur_railtype&7, 3);
+ 
+ 		DrawStringCentered(74, 15, STR_3002_ORIENTATION, 0);
+ 		DrawStringCentered(74, 76, STR_3003_NUMBER_OF_TRACKS, 0);
+@@ -803,7 +828,7 @@
+ 		w->click_state = (1 << 3) << _build_depot_direction;
+ 		DrawWindowWidgets(w);
+ 
+-		r = _cur_railtype;
++		r = _cur_railtype&7;
+ 		DrawTrainDepotSprite(70, 17, 0, r);
+ 		DrawTrainDepotSprite(70, 69, 1, r);
+ 		DrawTrainDepotSprite(2, 69, 2, r);
+Index: road_cmd.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/road_cmd.c,v
+retrieving revision 1.3
+diff -u -r1.3 road_cmd.c
+--- road_cmd.c	4 Apr 2005 10:22:14 -0000	1.3
++++ road_cmd.c	21 Apr 2005 12:47:06 -0000
+@@ -1,5 +1,6 @@
+ #include "stdafx.h"
+ #include "ttd.h"
++#include "table/sprites.h"
+ #include "table/strings.h"
+ #include "map.h"
+ #include "tile.h"
+@@ -813,7 +814,22 @@
+ 			if (m2 > 1) image += 4;
+ 		}
+ 
+-		DrawGroundSprite(image + (_map3_hi[ti->tile] & 0xF) * 12);
++		DrawGroundSprite(image + (_map3_hi[ti->tile] & 0x7) * 12);
++		if(_map3_hi[ti->tile] & 0x8){
++			if (!(ti->map5 & 8)){
++				if (ti->y&16){
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+12, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++				}else{
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+20, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++				}
++			} else {
++				if (ti->x&16){
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+11, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++				}else{
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+19, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++				}
++			}
++		} 
+ 	} else {
+ 		uint32 ormod;
+ 		int player;
+Index: spritecache.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/spritecache.c,v
+retrieving revision 1.2
+diff -u -r1.2 spritecache.c
+--- spritecache.c	1 Apr 2005 10:38:03 -0000	1.2
++++ spritecache.c	21 Apr 2005 12:47:06 -0000
+@@ -901,6 +901,9 @@
+ 		load_index = SPR_CANALS_BASE;
+ 		load_index += LoadGrfFile("canalsw.grf", load_index, i++);
+ 
++		load_index = SPR_ELRAIL_BASE;
++		load_index +=	LoadGrfFile("elrailsw.grf",	load_index,	i++);
++
+ 		load_index = SPR_OPENTTD_BASE + OPENTTD_SPRITES_COUNT + 1;
+ 
+ 
+@@ -942,6 +945,7 @@
+ 
+ 		FioOpenFile(i++, "trkfoundw.grf");
+ 		FioOpenFile(i++, "canalsw.grf");
++		FioOpenFile(i++, "elrailsw.grf");
+ 
+ 		// FIXME: if a user changes his newgrf's, the cached-sprites gets
+ 		//  invalid. We should have some kind of check for this.
+Index: station_cmd.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/station_cmd.c,v
+retrieving revision 1.3
+diff -u -r1.3 station_cmd.c
+--- station_cmd.c	19 Apr 2005 07:01:07 -0000	1.3
++++ station_cmd.c	21 Apr 2005 12:47:06 -0000
+@@ -2097,7 +2097,8 @@
+ 	uint32 image;
+ 	const DrawTileSeqStruct *dtss;
+ 	const DrawTileSprites *t = NULL;
+-	byte railtype = _map3_lo[ti->tile] & 0xF;
++	byte railtype = _map3_lo[ti->tile] & 0x7;
++#define RAILTYPE_EXTRA HASBIT(_map3_lo[ti->tile],3)
+ 	uint32 relocation = 0;
+ 
+ 	{
+@@ -2153,6 +2154,19 @@
+ 			AddChildSpriteScreen(image, dtss->delta_x, dtss->delta_y);
+ 		}
+ 	}
++	if (RAILTYPE_EXTRA){
++		if (ti->map5&0x1){
++			if (ti->y&0x10)
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+12, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++			else
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+20, ti->x+8, ti->y, 1, 16, 1, GetSlopeZ(ti->x,ti->y)+10);
++		}else{
++			if (ti->x&0x10)
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+11, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++			else
++				AddSortableSpriteToDraw(SPR_ELRAIL_BASE+19, ti->x, ti->y+8, 16, 1, 1, GetSlopeZ(ti->x,ti->y)+10);
++		}
++	}
+ }
+ 
+ void StationPickerDrawSprite(int x, int y, int railtype, int image)
+@@ -2175,7 +2189,7 @@
+ 
+ 	foreach_draw_tile_seq(dtss, t->seq) {
+ 		Point pt = RemapCoords(dtss->delta_x, dtss->delta_y, dtss->delta_z);
+-		DrawSprite((dtss->image | ormod) + railtype, x + pt.x, y + pt.y);
++		DrawSprite((dtss->image | ormod) + (railtype&7), x + pt.x, y + pt.y);
+ 	}
+ }
+ 
+@@ -3142,4 +3156,3 @@
+ 	{ 'STNS', Save_STNS,      Load_STNS,      CH_ARRAY },
+ 	{ 'ROAD', Save_ROADSTOP,  Load_ROADSTOP,  CH_ARRAY | CH_LAST},
+ };
+-
+Index: train_cmd.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/train_cmd.c,v
+retrieving revision 1.4
+diff -u -r1.4 train_cmd.c
+--- train_cmd.c	19 Apr 2005 07:01:08 -0000	1.4
++++ train_cmd.c	21 Apr 2005 12:47:06 -0000
+@@ -2183,7 +2183,7 @@
+ 			// tracks over roads, do owner check of tracks (_map_owner[tile])
+ 			return
+ 				_map_owner[tile] == v->owner &&
+-				(v->subtype != TS_Front_Engine || (_map3_hi[tile] & 0xF) == v->u.rail.railtype);
++				(v->subtype != TS_Front_Engine || (_map3_hi[tile] & 0x7) == v->u.rail.railtype);
+ 
+ 		default:
+ 			return true;
+@@ -2191,7 +2191,7 @@
+ 
+ 	return
+ 		_map_owner[tile] == v->owner &&
+-		(v->subtype != TS_Front_Engine || (_map3_lo[tile] & 0xF) == v->u.rail.railtype);
++		(v->subtype != TS_Front_Engine || (_map3_lo[tile] & 0x7) == v->u.rail.railtype);
+ }
+ 
+ typedef struct {
+Index: train_gui.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/train_gui.c,v
+retrieving revision 1.3
+diff -u -r1.3 train_gui.c
+--- train_gui.c	19 Apr 2005 07:01:08 -0000	1.3
++++ train_gui.c	21 Apr 2005 12:47:06 -0000
+@@ -107,6 +107,7 @@
+ 	for (i = 0; i < NUM_TRAIN_ENGINES; i++) {
+ 		const Engine *e = DEREF_ENGINE(i);
+ 		const RailVehicleInfo *rvi = RailVehInfo(i);
++		railtype&=7;
+ 
+ 		if (e->railtype != railtype || !(rvi->flags & RVI_WAGON) != is_engine ||
+ 				!HASBIT(e->player_avail, _local_player))
+@@ -135,12 +136,12 @@
+ 
+ 		{
+ 			int count = 0;
+-			byte railtype = WP(w,buildtrain_d).railtype;
++			byte railtype = (WP(w,buildtrain_d).railtype);
+ 			int i;
+ 
+ 			for (i = 0; i < NUM_TRAIN_ENGINES; i++) {
+ 				const Engine *e = DEREF_ENGINE(i);
+-				if (e->railtype == railtype
++				if (e->railtype == (railtype&7)
+ 				    && HASBIT(e->player_avail, _local_player))
+ 					count++;
+ 			}
+@@ -151,7 +152,7 @@
+ 		DrawWindowWidgets(w);
+ 
+ 		{
+-			byte railtype = WP(w,buildtrain_d).railtype;
++			byte railtype = (WP(w,buildtrain_d).railtype);
+ 			int sel = WP(w,buildtrain_d).sel_index;
+ 			int pos = w->vscroll.pos;
+ 			int x = 1;
+Index: tunnelbridge_cmd.c
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/tunnelbridge_cmd.c,v
+retrieving revision 1.2
+diff -u -r1.2 tunnelbridge_cmd.c
+--- tunnelbridge_cmd.c	1 Apr 2005 10:38:05 -0000	1.2
++++ tunnelbridge_cmd.c	21 Apr 2005 12:47:06 -0000
+@@ -1015,23 +1015,50 @@
+ 	// draw tunnel?
+ 	if ( (byte)(ti->map5&0xF0) == 0) {
+ 		/* railway type */
+-		image = (_map3_lo[ti->tile] & 0xF) * 8;
++		image = (_map3_lo[ti->tile] & 0x7) * 8;
+ 
+ 		/* ice? */
+ 		if (ice)
+ 			image += 32;
+ 
++		/* rail or street */
+ 		image += _draw_tunnel_table_1[(ti->map5 >> 2) & 0x3];
++		/* direction */
+ 		image += (ti->map5 & 3) << 1;
++		/* draw */
+ 		DrawGroundSprite(image);
+ 
+ 		AddSortableSpriteToDraw(image+1, ti->x + 15, ti->y + 15, 1, 1, 8, (byte)ti->z);
++
++		// draw third line
++		if (_map3_lo[ti->tile] & 0x8){
++			uint32 x=ti->x,y=ti->y;
++			switch (ti->map5&0x3){
++				case 0: {x+=0;y+=8;break;}
++				case 1: {x+=8;y+=0;break;}
++				case 2: {x-=8;y+=8;break;}
++				case 3: {x+=8;y+=8;break;}
++			}
++			if (ti->map5&0x1){
++				if (ti->y&0x10)
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+30, x, y-8, 1, 8, 1, ti->z+10);
++				else
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+28, x, y, 1, 8, 1, ti->z+10);
++			}else{
++				if (ti->x&0x10)
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+27, x, y, 8, 1, 1, ti->z+10);
++				else
++					AddSortableSpriteToDraw(SPR_ELRAIL_BASE+29, x+8, y, 8, 1, 1, ti->z+10);
++			}
++		}
+ 	// draw bridge?
+ 	} else if ((byte)ti->map5 & 0x80) {
+ 		// get type of track on the bridge.
++		bool railtype_extra;
+ 		tmp = _map3_lo[ti->tile];
+ 		if (ti->map5 & 0x40) tmp >>= 4;
+-		tmp &= 0xF;
++		railtype_extra=HASBIT(tmp,3);
++		tmp &= 0x7;
+ 
+ 		// 0 = rail bridge
+ 		// 1 = road bridge
+@@ -1070,6 +1097,43 @@
+ 			// draw ramp
+ 			if (_display_opt & DO_TRANS_BUILDINGS) image = (image & 0x3FFF) | 0x03224000;
+ 			AddSortableSpriteToDraw(image, ti->x, ti->y, 16, 16, 7, ti->z);
++
++			// draw third line
++			if (railtype_extra){
++				byte sumX=0, sumY=0;
++				if(!(ti->y&16)) {sumY=1;}
++				if(!(ti->x&16)) {sumX=1;}
++				if (ti->tileh == 0){ //We need up or down Sprite
++					if (ti->map5 & 0x20){//up
++						if(tmp&1){//NW
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumY*8+18, ti->x+8, ti->y, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++						}else{//NE
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumX*8+15, ti->x+0, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line				
++						}
++					}else{//down
++						if(tmp&1){//NW
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumY*8+16, ti->x+8, ti->y+0, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++						}else{//NE
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumX*8+17, ti->x, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++						}
++					}
++				}else{//Not up/down
++					if (ti->map5 & 0x20){//tile->z returns lower value
++						if(tmp&1){//NW
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumY*8+12, ti->x+8, ti->y, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++						}else{//NE
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumX*8+11, ti->x, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+18);//Line
++						}
++					}else{//tile->z returns higher value
++						if(tmp&1){//NW
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumY*8+12, ti->x+8, ti->y, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++						}else{//NE
++							AddSortableSpriteToDraw(SPR_ELRAIL_BASE+sumX*8+11, ti->x, ti->y+8, 8, 8, 1, GetSlopeZ(ti->x,ti->y)+10);//Line
++						}
++					}					
++				}
++			}
++
+ 		} else {
+ 			// bridge middle part.
+ 			uint z;
+@@ -1134,6 +1198,21 @@
+ 			} else {
+ 				y += 12;
+ 				if (image&0x3FFF) AddSortableSpriteToDraw(image, x,y, 16, 1, 0x28, z);
++			}
++
++			// draw third line
++			if (railtype_extra){
++				if (ti->map5&0x1){
++					if (ti->y&0x10)
++						AddSortableSpriteToDraw(SPR_ELRAIL_BASE+12, ti->x+8, ti->y, 1, 16, 1, z+12);
++					else
++						AddSortableSpriteToDraw(SPR_ELRAIL_BASE+20, ti->x+8, ti->y, 1, 16, 1, z+12);
++				}else{
++					if (ti->x&0x10)
++						AddSortableSpriteToDraw(SPR_ELRAIL_BASE+11, ti->x, ti->y+8, 16, 1, 1, z+12);
++					else
++						AddSortableSpriteToDraw(SPR_ELRAIL_BASE+19, ti->x, ti->y+8, 16, 1, 1, z+12);
++				}
+ 			}
+ 
+ 			if (ti->z + 5 == z ) {
+Index: lang/english.txt
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/lang/english.txt,v
+retrieving revision 1.5
+diff -u -r1.5 english.txt
+--- lang/english.txt	21 Apr 2005 08:22:06 -0000	1.5
++++ lang/english.txt	21 Apr 2005 12:47:06 -0000
+@@ -2820,3 +2820,6 @@
+ ############ End of list of rail types
+ 
+ STR_TINY_BLACK                                                  :{BLACK}{TINYFONT}{COMMA16}
++
++STR_TOGGLE_BUILD_THIRDLINE                                      :{BLACK}Toggle build 3rd Line
++
+Index: patches/elrail.patch
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/patches/elrail.patch,v
+retrieving revision 1.1
+diff -u -r1.1 elrail.patch
+--- patches/elrail.patch	21 Apr 2005 12:00:59 -0000	1.1
++++ patches/elrail.patch	21 Apr 2005 13:56:46 -0000
+@@ -4,16 +4,16 @@
+ retrieving revision 1.4
+ diff -u -r1.4 rail_cmd.c
+ --- rail_cmd.c	19 Apr 2005 07:01:07 -0000	1.4
+-+++ rail_cmd.c	21 Apr 2005 11:43:55 -0000
+-@@ -576,7 +576,7 @@
+- {
+- 	int ex, ey;
+- 	int32 ret, total_cost = 0;
+--	int railbit = (p2 >> 4) & 7;
+-+	int railbit = (p2 >> 4) & 0xf;
+- 	byte mode = HASBIT(p2, 7);
+++++ rail_cmd.c	21 Apr 2005 13:56:44 -0000
++@@ -285,7 +285,7 @@
++ 	int32 cost = 0;
++ 	int32 ret;
++ 
++-	if (rail_type > _players[_current_player].max_railtype ||
+++	if ((rail_type&7) > _players[_current_player].max_railtype ||
++ 			rail > 5) // invalid track number?
++ 		return CMD_ERROR;
+  
+- 	/* unpack end point */
+ @@ -592,7 +592,7 @@
+  		return CMD_ERROR;
+  
+@@ -167,7 +167,7 @@
+ retrieving revision 1.4
+ diff -u -r1.4 rail_gui.c
+ --- rail_gui.c	19 Apr 2005 07:01:07 -0000	1.4
+-+++ rail_gui.c	21 Apr 2005 11:30:09 -0000
+++++ rail_gui.c	21 Apr 2005 12:47:06 -0000
+ @@ -16,6 +16,7 @@
+  
+  static uint _cur_railtype;
+@@ -351,7 +351,7 @@
+ retrieving revision 1.3
+ diff -u -r1.3 road_cmd.c
+ --- road_cmd.c	4 Apr 2005 10:22:14 -0000	1.3
+-+++ road_cmd.c	21 Apr 2005 11:06:32 -0000
+++++ road_cmd.c	21 Apr 2005 12:47:06 -0000
+ @@ -1,5 +1,6 @@
+  #include "stdafx.h"
+  #include "ttd.h"
+@@ -389,7 +389,7 @@
+ retrieving revision 1.2
+ diff -u -r1.2 spritecache.c
+ --- spritecache.c	1 Apr 2005 10:38:03 -0000	1.2
+-+++ spritecache.c	21 Apr 2005 11:26:41 -0000
+++++ spritecache.c	21 Apr 2005 12:47:06 -0000
+ @@ -901,6 +901,9 @@
+  		load_index = SPR_CANALS_BASE;
+  		load_index += LoadGrfFile("canalsw.grf", load_index, i++);
+@@ -414,7 +414,7 @@
+ retrieving revision 1.3
+ diff -u -r1.3 station_cmd.c
+ --- station_cmd.c	19 Apr 2005 07:01:07 -0000	1.3
+-+++ station_cmd.c	21 Apr 2005 10:39:48 -0000
+++++ station_cmd.c	21 Apr 2005 12:47:06 -0000
+ @@ -2097,7 +2097,8 @@
+  	uint32 image;
+  	const DrawTileSeqStruct *dtss;
+@@ -465,7 +465,7 @@
+ retrieving revision 1.4
+ diff -u -r1.4 train_cmd.c
+ --- train_cmd.c	19 Apr 2005 07:01:08 -0000	1.4
+-+++ train_cmd.c	21 Apr 2005 10:54:32 -0000
+++++ train_cmd.c	21 Apr 2005 12:47:06 -0000
+ @@ -2183,7 +2183,7 @@
+  			// tracks over roads, do owner check of tracks (_map_owner[tile])
+  			return
+@@ -490,7 +490,7 @@
+ retrieving revision 1.3
+ diff -u -r1.3 train_gui.c
+ --- train_gui.c	19 Apr 2005 07:01:08 -0000	1.3
+-+++ train_gui.c	21 Apr 2005 11:13:33 -0000
+++++ train_gui.c	21 Apr 2005 12:47:06 -0000
+ @@ -107,6 +107,7 @@
+  	for (i = 0; i < NUM_TRAIN_ENGINES; i++) {
+  		const Engine *e = DEREF_ENGINE(i);
+@@ -529,7 +529,7 @@
+ retrieving revision 1.2
+ diff -u -r1.2 tunnelbridge_cmd.c
+ --- tunnelbridge_cmd.c	1 Apr 2005 10:38:05 -0000	1.2
+-+++ tunnelbridge_cmd.c	21 Apr 2005 11:39:04 -0000
+++++ tunnelbridge_cmd.c	21 Apr 2005 12:47:06 -0000
+ @@ -1015,23 +1015,50 @@
+  	// draw tunnel?
+  	if ( (byte)(ti->map5&0xF0) == 0) {
+@@ -655,7 +655,7 @@
+ retrieving revision 1.5
+ diff -u -r1.5 english.txt
+ --- lang/english.txt	21 Apr 2005 08:22:06 -0000	1.5
+-+++ lang/english.txt	21 Apr 2005 11:33:12 -0000
+++++ lang/english.txt	21 Apr 2005 12:47:06 -0000
+ @@ -2820,3 +2820,6 @@
+  ############ End of list of rail types
+  
+@@ -663,22 +663,3 @@
+ +
+ +STR_TOGGLE_BUILD_THIRDLINE                                      :{BLACK}Toggle build 3rd Line
+ +
+-Index: table/sprites.h
+-===================================================================
+-RCS file: D:/CVS_View/Repositories/openttd/openttd/table/sprites.h,v
+-retrieving revision 1.3
+-diff -u -r1.3 sprites.h
+---- table/sprites.h	4 Apr 2005 10:22:04 -0000	1.3
+-+++ table/sprites.h	21 Apr 2005 10:56:18 -0000
+-@@ -44,8 +44,9 @@
+- 	/* Extra graphic spritenumbers */
+- 	SPR_CANALS_BASE		= 5126,
+- 	SPR_SLOPES_BASE		= SPR_CANALS_BASE + 70,
+--	SPR_AUTORAIL_BASE		= SPR_SLOPES_BASE + 78,
+--	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
+-+	SPR_AUTORAIL_BASE	= SPR_SLOPES_BASE + 78,
+-+	SPR_ELRAIL_BASE		= SPR_AUTORAIL_BASE + 55,
+-+	SPR_OPENTTD_BASE	= SPR_ELRAIL_BASE + 55, // can be lowered once autorail.grf is finalized
+- 
+- 	SPR_BLOT = SPR_OPENTTD_BASE + 32, // colored circle (mainly used as vehicle profit marker and for sever compatibility)
+- 
+Index: table/sprites.h
+===================================================================
+RCS file: D:/CVS_View/Repositories/openttd/openttd/table/sprites.h,v
+retrieving revision 1.3
+diff -u -r1.3 sprites.h
+--- table/sprites.h	4 Apr 2005 10:22:04 -0000	1.3
++++ table/sprites.h	21 Apr 2005 12:47:06 -0000
+@@ -44,8 +44,9 @@
+ 	/* Extra graphic spritenumbers */
+ 	SPR_CANALS_BASE		= 5126,
+ 	SPR_SLOPES_BASE		= SPR_CANALS_BASE + 70,
+-	SPR_AUTORAIL_BASE		= SPR_SLOPES_BASE + 78,
+-	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
++	SPR_AUTORAIL_BASE	= SPR_SLOPES_BASE + 78,
++	SPR_ELRAIL_BASE		= SPR_AUTORAIL_BASE + 55,
++	SPR_OPENTTD_BASE	= SPR_ELRAIL_BASE + 55, // can be lowered once autorail.grf is finalized
+ 
+ 	SPR_BLOT = SPR_OPENTTD_BASE + 32, // colored circle (mainly used as vehicle profit marker and for sever compatibility)
+ 

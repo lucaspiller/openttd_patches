@@ -1,0 +1,2892 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2465)
++++ station_cmd.c	(working copy)
+@@ -458,7 +458,10 @@
+ 		ge->last_speed = 0;
+ 		ge->last_age = 0xFF;
+ 		ge->feeder_profit = 0;
++		ge->last_vehicle_speed = 0;
++		ge->last_vehicle_type = INVALID_VEHICLE;
+ 	}
++	InitializeStationStats(st);
+ 
+ 	_global_station_sort_dirty = true; // build a new station
+ }
+@@ -2472,46 +2475,167 @@
+ static void UpdateStationRating(Station *st)
+ {
+ 	GoodsEntry *ge;
+-	int rating;
++	RatingStats *rs;
+ 	StationID index;
+-	int waiting;
++	int rating, waiting, lv_type, b, old_rating, points;
+ 	bool waiting_changed = false;
++	byte age, days;
+ 
+ 	byte_inc_sat(&st->time_since_load);
+ 	byte_inc_sat(&st->time_since_unload);
+ 
+ 	ge = st->goods;
++	rs = st->rating_stats;
++
+ 	do {
+ 		if (ge->enroute_from != INVALID_STATION) {
+ 			byte_inc_sat(&ge->enroute_time);
+ 			byte_inc_sat(&ge->days_since_pickup);
+ 
+ 			rating = 0;
++			old_rating = 0;
++			points = 0;
++			lv_type = ge->last_vehicle_type;
++			if (lv_type == INVALID_VEHICLE)
++				if (st->last_vehicle != INVALID_VEHICLE)
++					lv_type = GetVehicle(st->last_vehicle)->type;
++				else
++					lv_type = INVALID_VEHICLE;
+ 
++			b = ge->last_speed;
++			if (_patches.nsr_speed)
+ 			{
+-				int b = ge->last_speed;
++				points = ge->last_vehicle_speed;
++				if (points == 0)
++					points = b;
++				rs->last_speed = points;
++				switch (lv_type)
++				{
++					case VEH_Train:
++						if (points <= 300) // "normal" trains
++							points -= (ge == &st->goods[CT_PASSENGERS]) ? 85 : 60;
++						else // monorail + maglev
++							points /= 2;
++						break;
++					case VEH_Road:
++						points *= 3 / 2;
++						points -= (ge == &st->goods[CT_PASSENGERS]) ?  20 : -5;
++                        break;
++					case VEH_Ship:
++						rs->last_speed = points / 2;
++						if (ge != &st->goods[CT_PASSENGERS])
++							points *= 2;
++						break;
++					case VEH_Aircraft:
++						rs->last_speed = (points * 64) / 5; // * 8 * 16 / 10
++						if (ge != &st->goods[CT_PASSENGERS])
++							points *= 2;
++						break;
++					default:	
++						points -= 85;	break;
++				}
++				// max 170 >> 2 = 42 points for speedrating
++				rating += clamp(points,0,170) >> 2;
++			}
++			else
++			{
+ 				if ((b-=85) >= 0)
+ 					rating += b >> 2;
++				rs->last_speed = ge->last_speed;
+ 			}
++			rs->ratings[RATING_SPEED] = rating - old_rating;
++			old_rating = rating;
+ 
++			age = ge->last_age;
++			if (_patches.nsr_age)
+ 			{
+-				byte age = ge->last_age;
++				switch (age)
++				{
++					case 0:	rating += 13;	break;
++					case 1:	rating += 9;	break;
++					case 2:	rating += 6;	break;
++					case 3:	rating += 4;	break;
++					case 4:	rating += 2;	break;
++					case 5:	rating += 1;	break;
++				}
++				if (ge == &st->goods[CT_PASSENGERS])
++					points = age * 2; // double age effect for Passengers
++				else
++					points = age;
++				switch (lv_type)	// scale age to 20 years
++				{
++					case VEH_Train:		points = clamp(points,0,20);			break;
++					case VEH_Road:		points = clamp(points,0,10) * 10;		break;
++					case VEH_Ship:		points = clamp(points,0,25) * 0.8;		break;
++					case VEH_Aircraft:	points = clamp(points,0,15) * 4 / 3;	break;
++					default:			points = clamp(points,0,20);			break;
++				}
++				rating += (20 - clamp(points,0,20));
++			}
++			else
++			{
+ 				(age >= 3) ||
+ 				(rating += 10, age >= 2) ||
+ 				(rating += 10, age >= 1) ||
+ 				(rating += 13, true);
+ 			}
++			rs->last_age = age;
++			rs->ratings[RATING_AGE] = rating - old_rating;
++			old_rating = rating;
+ 
+ 			{
+ 				if (st->owner != OWNER_NONE && !IS_HUMAN_PLAYER(st->owner))
+ 							rating += _rating_boost[_opt.diff.competitor_intelligence];
+ 			}
+ 
+-			if (st->owner < MAX_PLAYERS && HASBIT(st->town->statues, st->owner))
+-				rating += 26;
++			if (_patches.nsr_town_rating)
++			{
++				if (st->owner < MAX_PLAYERS)
++				{
++					if (HASBIT(st->town->statues, st->owner))	rating += 6;
++					// if townratings are not changed this will be within -20..+20
++					rating += st->town->ratings[st->owner] / 50;
++				}
++			}
++			else
++			{
++				if (st->owner < MAX_PLAYERS && HASBIT(st->town->statues, st->owner))
++					rating += 26;
++			}
++			rs->ratings[RATING_OTHER] = rating - old_rating;
++			old_rating = rating;
+ 
++			days = ge->days_since_pickup;
++			if (_patches.nsr_wait_days)
+ 			{
+-				byte days = ge->days_since_pickup;
++				if (ge == &st->goods[CT_PASSENGERS])
++					points = days * 2 - 1; // double wait effect for Passengers
++				else
++					points = days - 1;
++				switch (lv_type)	// scale waitdays to 28 days
++				{
++					case VEH_Train:		points = clamp(points,0,28);		break;
++					case VEH_Road:		points = clamp(points,0,56) / 2;	break;
++					case VEH_Ship:		points = clamp(points,0,112) / 4;	break;
++					case VEH_Aircraft:	points = clamp(points,0,28);		break;
++					default:			points = clamp(points,0,28);		break;
++				}
++				switch (days)
++				{
++					case 0:
++					case 1:	rating += 18;	break;
++					case 2:	rating += 17;	break;
++					case 3:	rating += 16;	break;
++					case 4:	rating += 10;	break;
++					case 5:	rating += 9;	break;
++					case 6:	rating += 8;	break;
++					case 7:	rating += 2;	break;
++					case 8:	rating += 1;	break;
++				}
++				rating += (112 - clamp(points,0,28) *3);
++			}
++			else
++			{
+ 				if (st->last_vehicle != INVALID_VEHICLE &&
+ 						GetVehicle(st->last_vehicle)->type == VEH_Ship)
+ 							days >>= 2;
+@@ -2521,9 +2645,38 @@
+ 				(rating += 45, days > 3) ||
+ 				(rating += 35, true);
+ 			}
++			rs->days_since_pickup = ge->days_since_pickup;
++			rs->ratings[RATING_PICKUP] = rating - old_rating;
++			old_rating = rating;
+ 
++			waiting = ge->waiting_acceptance & 0xFFF;
++			if (_patches.nsr_wait_cargo)
+ 			{
+-				waiting = ge->waiting_acceptance & 0xFFF;
++				if (ge == &st->goods[CT_PASSENGERS])
++					points = waiting * 2;
++				else
++					points = waiting;
++				switch (lv_type)
++				{
++					case VEH_Train:		points = clamp(points,0,1800) / 15;		break;
++					case VEH_Road:		points = clamp(points,0,900) * 2 / 15;	break;
++					case VEH_Ship:		points = clamp(points,0,1500) * 2 / 25;	break;
++					case VEH_Aircraft:	points = clamp(points,0,1200) / 10;		break;
++					default:			points = clamp(points,0,900) * 2 / 15;	break;
++				} // maximum value for points is 120
++				switch (points)
++				{
++					case 0: rating += 10;	break;
++					case 1: rating += 7;	break;
++					case 2: rating += 5;	break;
++					case 3: rating += 3;	break;
++					case 4: rating += 2;	break;
++					case 5: rating += 1;	break;
++				}
++				rating += 30 - clamp(points,0,120);
++			}
++			else
++			{
+ 				(rating -= 90, waiting > 1500) ||
+ 				(rating += 55, waiting > 1000) ||
+ 				(rating += 35, waiting > 600) ||
+@@ -2531,9 +2684,13 @@
+ 				(rating += 20, waiting > 100) ||
+ 				(rating += 10, true);
+ 			}
++			rs->waiting = waiting;
++			rs->ratings[RATING_WAITING] = rating - old_rating;
++			old_rating = rating;
+ 
+ 			{
+ 				int or = ge->rating; // old rating
++				rs->ratings[RATING_TOTAL] = rating;
+ 
+ 				// only modify rating in steps of -2, -1, 0, 1 or 2
+ 				ge->rating = rating = or + clamp(clamp(rating, 0, 255) - or, -2, 2);
+@@ -2559,6 +2716,7 @@
+ 					ge->waiting_acceptance = (ge->waiting_acceptance & ~0xFFF) + waiting;
+ 			}
+ 		}
++		rs++;
+ 	} while (++ge != endof(st->goods));
+ 
+ 	index = st->index;
+@@ -2567,6 +2725,8 @@
+ 		InvalidateWindow(WC_STATION_VIEW, index);
+ 	else
+ 		InvalidateWindowWidget(WC_STATION_VIEW, index, 5);
++
++	InvalidateWindow(WC_STATION_RATING_DETAIL, index);
+ }
+ 
+ /* called for every station each tick */
+@@ -2608,8 +2768,55 @@
+ 
+ }
+ 
++uint32 CalcNewAverage(uint32 average, uint32 lastamount, uint16 times_counted)
++{
++	if (times_counted == 0)
++		return lastamount;
++	average = (uint32)((uint64)(((uint64)average * (uint64)times_counted + (uint64)lastamount) / ((uint64)times_counted + 1)));
++	return average;
++}
++
+ void StationMonthlyLoop(void)
+ {
++	Station *st;
++	StationStats *sts;
++	GoodsEntry *ge;
++
++ 	FOR_ALL_STATIONS(st) {
++		// if we have stats for this station the number of counted months is >0
++		if (st->months_counted > 0)
++		{
++			for (ge = st->goods; ge != endof(st->goods); ge++) {
++				// if we have stats for this good, the number of months counted is >0
++				if (ge->months_counted > 0) 
++				{
++					// set current months stats to 0 after storing value for last month
++					// do this for all stats (currently In/Out/Transfer)
++					// also determine new min/max-values
++					for (sts = ge->cargo_amount; sts != endof(ge->cargo_amount); sts++) {
++						if (sts->month_max == 0) sts->month_min = sts->this_month;
++						sts->month_min = min(sts->month_min, sts->this_month);
++						sts->month_max = max(sts->month_max, sts->this_month);
++						sts->average = CalcNewAverage(sts->average, sts->this_month * STS_MULTIPLIER, ge->months_counted - 1);
++						sts->last_month = sts->this_month;
++						sts->this_month = 0;
++					}
++					ge->months_counted++; // one more month counted
++				}
++			}
++			// update vehicle-counts and min/max
++			for (sts = st->vehicles; sts != endof(st->vehicles); sts++) {
++				if (sts->month_max == 0) sts->month_min = sts->this_month;
++				sts->month_min = min(sts->month_min, sts->this_month);
++				sts->month_max = max(sts->month_max, sts->this_month);
++				sts->average = CalcNewAverage(sts->average, sts->this_month * STS_MULTIPLIER, st->months_counted - 1);
++				sts->last_month = sts->this_month;
++				sts->this_month = 0;
++			}
++			st->months_counted++; // one more month counted
++		}
++		InvalidateWindow(WC_STATION_STATS, st->index);
++	}
+ }
+ 
+ 
+@@ -2641,6 +2848,7 @@
+ 	st->goods[type].enroute_time = 0;
+ 	st->goods[type].enroute_from = st->index;
+ 	InvalidateWindow(WC_STATION_VIEW, st->index);
++	InvalidateWindow(WC_STATION_STATS, st->index);
+ }
+ 
+ /** Rename a station
+@@ -2833,7 +3041,7 @@
+ 			_map2[tile] = st->index;
+ 
+ 			st->owner = OWNER_NONE;
+-      st->airport_flags = 0;
++			st->airport_flags = 0;
+ 			st->airport_type = AT_OILRIG;
+ 			st->xy = tile;
+ 			st->bus_stops = NULL;
+@@ -3029,12 +3237,25 @@
+ 	SLE_CONDREF(Station,bus_stops,					REF_ROADSTOPS, 6, 255),
+ 	SLE_CONDREF(Station,truck_stops,				REF_ROADSTOPS, 6, 255),
+ 
++	// station stats data is stored here since savegame format 14
++	SLE_CONDVAR(Station,months_counted,	SLE_UINT16, 14, 255),
++
+ 	// reserve extra space in savegame here. (currently 28 bytes)
+ 	SLE_CONDARR(NullStruct,null,SLE_FILE_U8 | SLE_VAR_NULL, 32, 2, 255),
+ 
+ 	SLE_END()
+ };
+ 
++// station stats data since savegame format 15
++static const SaveLoad _stats_desc[] = {
++	SLE_CONDVAR(StationStats,this_month,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,last_month,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,month_min,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,month_max,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,average,	SLE_UINT32, 15, 255),
++	SLE_END()
++};
++
+ static const SaveLoad _goods_desc[] = {
+ 	SLE_VAR(GoodsEntry,waiting_acceptance,SLE_UINT16),
+ 	SLE_VAR(GoodsEntry,days_since_pickup,	SLE_UINT8),
+@@ -3046,22 +3267,33 @@
+ 	SLE_VAR(GoodsEntry,last_age,					SLE_UINT8),
+ 	SLE_CONDVAR(GoodsEntry,feeder_profit,			SLE_INT32, 14, 255),
+ 
++	// station stats data is stored here since savegame format 15
++//	SLE_CONDVAR(GoodsEntry,months_counted,	SLE_UINT16, 15, 255),
++
+ 	SLE_END()
+ };
+ 
+ 
+ static void SaveLoad_STNS(Station *st)
+ {
+-	int i;
++	int i; //, j;
+ 
+ 	SlObject(st, _station_desc);
+ 	for (i = 0; i != NUM_CARGO; i++) {
+ 		SlObject(&st->goods[i], _goods_desc);
++//		for (j = 0; j < STS_AMNT_TYPES; j++)
++//			SlObject(&st->goods[i].cargo_amount[j], _stats_desc);
+ 
++		// initialize new station rating values
++		st->goods[i].last_vehicle_speed = st->goods[i].last_speed;
++		st->goods[i].last_vehicle_type = INVALID_VEHICLE;
++
+ 		/* In older versions, enroute_from had 0xFF as INVALID_STATION, is now 0xFFFF */
+ 		if (_sl.full_version < 0x700 && st->goods[i].enroute_from == 0xFF)
+ 			st->goods[i].enroute_from = 0xFFFF;
+ 	}
++//	for (i = 0; i < STS_VEH_TYPES; i++) 
++//		SlObject(&st->vehicles[i], _stats_desc);
+ }
+ 
+ static void Save_STNS(void)
+@@ -3087,6 +3319,7 @@
+ 
+ 		st = GetStation(index);
+ 		SaveLoad_STNS(st);
++		InitializeStationStats(st);
+ 
+ 		// this means it's an oldstyle savegame without support for nonuniform stations
+ 		if (st->train_tile && st->trainst_h == 0) {
+@@ -3153,3 +3386,83 @@
+ 	{ 'ROAD', Save_ROADSTOP,  Load_ROADSTOP,  CH_ARRAY | CH_LAST},
+ };
+ 
++void SearchVehiclesForStation(Station *st)
++{
++	Vehicle *v;
++	int i;
++	Order* ord;
++	
++	ord = NULL;
++	if (st->xy == 0) return;
++	for(i = 0; i < STS_VEH_TYPES; i++) st->veh_scheduled[i] = 0;
++	
++	FOR_ALL_VEHICLES(v) {
++	
++		//Now run this stuff for sane vehicles only
++		if ( (v->num_orders != 0) && (
++			( (v->type == VEH_Train) && (v->subtype == TS_Front_Engine) ) ||       //Trains (first engine, that contains the orders)
++			( (v->type == VEH_Road) && (v->subtype == 0) ) ||       //Road vehicles (subtype should always be 0 anyway)
++			( (v->type == VEH_Ship) && (v->subtype == 0) ) ||       //Ships, subtype should be 0 anyway)
++			( (v->type == VEH_Aircraft) && (
++				(v->subtype == 0) ||                            //Choppers
++				(v->subtype == 2) ) ) ) &&                               //Fixed-wing stuff
++			(v->owner == st->owner) ) 
++//			(v->owner == _local_player) ) 
++		{
++			ord = v->orders;
++			while(ord != NULL) {
++				if (ord->station == st->index && ord->type == OT_GOTO_STATION) {
++					switch (v->type) {
++						case VEH_Train:
++							st->veh_scheduled[STS_VEH_TRAIN]++;
++							break;
++						case VEH_Road:
++							st->veh_scheduled[STS_VEH_ROAD]++;
++                            if (v->cargo_type == CT_PASSENGERS)
++								st->veh_scheduled[STS_VEH_BUS]++;
++							else
++								st->veh_scheduled[STS_VEH_TRUCK]++;
++							break;
++						case VEH_Ship:
++							st->veh_scheduled[STS_VEH_SHIP]++;
++							break;
++						case VEH_Aircraft:
++							st->veh_scheduled[STS_VEH_AIRCRAFT]++;
++							break;
++						default:
++							NOT_REACHED();
++					}
++					break;
++				}
++				ord = ord->next;
++			}
++		}
++	}
++}
++
++
++void InitializeStationStats(Station *st)
++{
++	StationStats *sts;
++	GoodsEntry *ge;
++
++	for (ge = st->goods; ge != endof(st->goods); ge++) {
++		ge->months_counted = 0;
++		for (sts = ge->cargo_amount; sts != endof(ge->cargo_amount); sts++) {
++			sts->average = 0;
++			sts->last_month = 0;
++			sts->month_max = 0;
++			sts->month_min = 65535;
++			sts->this_month = 0;
++		}
++	}
++	st->months_counted = 0;
++	for (sts = st->vehicles; sts != endof(st->vehicles); sts++) {
++		sts->last_month = 0;
++		sts->this_month = 0;
++		sts->month_min = 65535;
++		sts->month_max = 0;
++		sts->average = 0;
++	}
++	SearchVehiclesForStation(st);
++}
+Index: engine.c
+===================================================================
+--- engine.c	(revision 2465)
++++ engine.c	(working copy)
+@@ -1067,3 +1067,15 @@
+ 
+ 	return true;
+ }
++
++CargoID GetGlobalCargoID(byte current_landscape, byte cargo_id)
++{
++	assert(current_landscape < NUM_LANDSCAPE && cargo_id < NUM_CARGO);
++	return _global_cargo_id[current_landscape][cargo_id];
++}
++
++CargoID GetLocalCargoID(byte global_cargo_id)
++{
++	assert(global_cargo_id < NUM_GLOBAL_CID);
++	return _local_cargo_id_ctype[global_cargo_id];
++}
+\ No newline at end of file
+Index: engine.h
+===================================================================
+--- engine.h	(revision 2465)
++++ engine.h	(working copy)
+@@ -163,6 +163,9 @@
+ VARDEF const uint32 _landscape_global_cargo_mask[NUM_LANDSCAPE];
+ VARDEF const CargoID _local_cargo_id_ctype[NUM_GLOBAL_CID];
+ 
++CargoID GetLocalCargoID(byte global_cargo_id);
++CargoID GetGlobalCargoID(byte current_landscape, byte cargo_id);
++
+ VARDEF uint32 _engine_refit_masks[256];
+ VARDEF byte _engine_original_sprites[256];
+ void SetWagonOverrideSprites(byte engine, struct SpriteGroup *group, byte *train_id, int trains);
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 2465)
++++ aircraft_cmd.c	(working copy)
+@@ -1274,7 +1274,16 @@
+ 	if (v->current_order.type == OT_GOTO_DEPOT)
+ 		return;
+ 
++	//Maybe check what happens if we go Terminal => Hangar => Terminal
+ 	st = GetStation(v->u.air.targetairport);
++//	if (v->cargo_type != CT_MAIL) st->this_month_vehicles[5]++;
++	if ((v->subtype == 0) || (v->subtype == 2))
++	{
++		st->vehicles[STS_VEH_AIRCRAFT].this_month++;
++		if (st->months_counted == 0) st->months_counted = 1;
++	}
++	InvalidateWindow(WC_STATION_STATS, st->index);
++	
+ 	v->last_station_visited = v->u.air.targetairport;
+ 
+ 	/* Check if station was ever visited before */
+Index: vehicle_gui.c
+===================================================================
+--- vehicle_gui.c	(revision 2465)
++++ vehicle_gui.c	(working copy)
+@@ -10,6 +10,8 @@
+ #include "gui.h"
+ #include "command.h"
+ #include "gfx.h"
++#include "station.h"
++#include "waypoint.h"
+ 
+ VehicleSortListingTypeFunctions * const _vehicle_sorter[] = {
+ 	&VehicleUnsortedSorter,
+@@ -51,6 +53,7 @@
+ 		switch (w->window_class) {
+ 		case WC_TRAINS_LIST: case WC_ROADVEH_LIST:
+ 		case WC_SHIPS_LIST:  case WC_AIRCRAFT_LIST:
++		case WC_VEHICLES_LIST:
+ 			WP(w, vehiclelist_d).flags |= VL_REBUILD;
+ 			SetWindowDirty(w);
+ 			break;
+@@ -66,6 +69,7 @@
+ 		switch (w->window_class) {
+ 		case WC_TRAINS_LIST: case WC_ROADVEH_LIST:
+ 		case WC_SHIPS_LIST:  case WC_AIRCRAFT_LIST:
++		case WC_VEHICLES_LIST:
+ 			WP(w, vehiclelist_d).flags |= VL_RESORT;
+ 			SetWindowDirty(w);
+ 			break;
+@@ -1061,3 +1065,90 @@
+ {
+ 	memset(&_sorting, 0, sizeof(_sorting));
+ }
++
++void BuildVehicleListMasked(vehiclelist_d *vl, DisplayListOptions *listopt, int owner)
++{
++	int subtype = (HASBIT(listopt->veh_type_mask, 1 << VEH_Aircraft)) ? 2 : TS_Front_Engine;
++	int n = 0;
++	int i;
++	uint32 cmask;
++
++	if (!(vl->flags & VL_REBUILD)) return;
++
++	/* Create array for sorting */
++	_vehicle_sort = realloc(_vehicle_sort, GetVehiclePoolSize() * sizeof(_vehicle_sort[0]));
++	if (_vehicle_sort == NULL)
++		error("Could not allocate memory for the vehicle-sorting-list");
++
++	DEBUG(misc, 1) ("Building vehicle list for player %d station at %d...",
++		owner, listopt->xy);
++	
++	if (listopt->xy < MapSize()) {
++		const Vehicle *v;
++		FOR_ALL_VEHICLES(v) {
++			if (HASBIT(listopt->veh_type_mask, v->type) && v->subtype <= subtype)
++			{
++				const Vehicle *u = v;
++				cmask = 0;
++				for (u = v; u != NULL; u = u->next) {
++					if (u->cargo_cap != 0)
++						cmask |= HASBIT(_landscape_global_cargo_mask[_opt_ptr->landscape], u->cargo_type);
++				}
++				if (listopt->cargo_mask & cmask) {
++					const Order *order;
++
++					FOR_VEHICLE_ORDERS(v, order) {
++						switch (order->type)
++						{
++							case OT_GOTO_STATION:
++								if (GetStation(order->station)->xy == listopt->xy) {
++									_vehicle_sort[n].index = v->index;
++									_vehicle_sort[n].owner = v->owner;
++									++n;
++									break;
++								} break;
++							case OT_GOTO_WAYPOINT:
++								if (GetWaypoint(order->station)->xy == listopt->xy) {
++									_vehicle_sort[n].index = v->index;
++									_vehicle_sort[n].owner = v->owner;
++									++n;
++									break;
++								} break;
++							default: break;
++						}
++					}
++				}
++			}
++		}
++	} else {
++		Vehicle *v;
++		FOR_ALL_VEHICLES(v) {
++			if (HASBIT(listopt->veh_type_mask, v->type) && v->subtype <= subtype && v->owner == owner)
++			{
++				Vehicle *u = v;
++				cmask = HASBIT(_landscape_global_cargo_mask[_opt_ptr->landscape], v->cargo_type);
++				u = v; // search all cargotypes of consist
++				while (u->next != NULL) {
++					cmask |= HASBIT(_landscape_global_cargo_mask[_opt_ptr->landscape], u->cargo_type);
++					u = u->next;
++				}
++				if (listopt->cargo_mask & cmask) {
++					_vehicle_sort[n].index = v->index;
++					_vehicle_sort[n].owner = v->owner;
++					++n;
++				}
++			}
++		}
++	}
++
++	vl->sort_list = realloc(vl->sort_list, n * sizeof(vl->sort_list[0]));
++	if (n!=0 && vl->sort_list == NULL)
++		error("Could not allocate memory for the vehicle-sorting-list");
++	vl->list_length = n;
++
++	for (i = 0; i < n; ++i)
++		vl->sort_list[i] = _vehicle_sort[i];
++
++	vl->flags &= ~VL_REBUILD;
++	vl->flags |= VL_RESORT;
++}
+Index: vehicle_gui.h
+===================================================================
+--- vehicle_gui.h	(revision 2465)
++++ vehicle_gui.h	(working copy)
+@@ -5,6 +5,12 @@
+ 
+ struct vehiclelist_d;
+ 
++typedef struct DisplayListOptions {
++	uint32 cargo_mask;
++	uint32 veh_type_mask;
++	TileIndex xy;
++} DisplayListOptions;
++
+ void DrawVehicleProfitButton(Vehicle *v, int x, int y);
+ CargoID DrawVehicleRefitWindow(const Vehicle *v, int sel);
+ void InitializeVehiclesGuiList(void);
+@@ -15,6 +21,7 @@
+ 
+ void BuildVehicleList(struct vehiclelist_d *vl, int type, int owner, int station);
+ void SortVehicleList(struct vehiclelist_d *vl);
++void BuildVehicleListMasked(struct vehiclelist_d *vl, struct DisplayListOptions *listopt, int owner);
+ 
+ int CDECL GeneralOwnerSorter(const void *a, const void *b);
+ VARDEF uint32	_internal_name_sorter_id;	// internal StringID for default vehicle-names
+@@ -58,6 +65,7 @@
+ 	Listing roadveh;
+ 	Listing ship;
+ 	Listing train;
++	Listing masked;
+ } Sorting;
+ 
+ VARDEF Sorting _sorting;
+@@ -76,5 +84,9 @@
+ void DrawAircraftPurchaseInfo(int x, int y, EngineID engine_number);
+ void DrawShipPurchaseInfo(int x, int y, EngineID engine_number);
+ 
++void DrawTrainImage(const Vehicle *v, int x, int y, int count, int skip, VehicleID selection);
++void DrawShipImage(const Vehicle *v, int x, int y, VehicleID selection);
++void DrawAircraftImage(const Vehicle *v, int x, int y, VehicleID selection);
++void DrawRoadVehImage(const Vehicle *v, int x, int y, VehicleID selection);
+ 
+ #endif /* VEHICLE_GUI_H */
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2465)
++++ misc_gui.c	(working copy)
+@@ -1690,14 +1690,15 @@
+ 	{CE_BOOL, 0, STR_CHEAT_SETUP_PROD,			&_cheats.setup_prod.value,			&_cheats.setup_prod.been_used,			NULL,											0, 0, 0},
+ 	{CE_UINT8, 0, STR_CHEAT_SWITCH_CLIMATE, &_opt.landscape, 								&_cheats.switch_climate.been_used,	&ClickChangeClimateCheat,-1, 4, 1},
+ 	{CE_UINT8, 0, STR_CHEAT_CHANGE_DATE,		&_cur_year,											&_cheats.change_date.been_used,			&ClickChangeDateCheat,	 -1, 1, 1},
++	{CE_BOOL, 0, STR_CHEAT_RESET_STATION,			&_cheats.reset_station.value,			&_cheats.reset_station.been_used,			NULL,											0, 0, 0},
+ };
+ 
+ 
+ static const Widget _cheat_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   399,     0,    13, STR_CHEATS,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{      WWT_PANEL,   RESIZE_NONE,    14,     0,   399,    14,   159, 0x0,					STR_NULL},
+-{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   399,    14,   159, 0x0,					STR_CHEATS_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    14,     0,   399,    14,   173, 0x0,					STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   399,    14,   173, 0x0,					STR_CHEATS_TIP},
+ {   WIDGETS_END},
+ };
+ 
+@@ -1832,7 +1833,7 @@
+ 	}
+ }
+ static const WindowDesc _cheats_desc = {
+-	240, 22, 400, 160,
++	240, 22, 400, 174,
+ 	WC_CHEATS,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
+ 	_cheat_widgets,
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2465)
++++ lang/english.txt	(working copy)
+@@ -1094,6 +1094,12 @@
+ STR_CONFIG_PATCHES_QUERY_CAPT                                   :{WHITE}Change setting value
+ STR_CONFIG_PATCHES_SERVICE_INTERVAL_INCOMPATIBLE                :{WHITE}Some or all of the default service interval(s) below are incompatible with the chosen setting! 5-90% and 30-800 days are valid
+ 
++STR_CONFIG_PATCHES_NSR_SPEED                                    :{LTBLUE}Enable new rating for Vehicle-Speed: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_NSR_AGE                                      :{LTBLUE}Enable new rating for Vehicle-Age: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_NSR_WAIT_DAYS                                :{LTBLUE}Enable new rating for days since last pickup: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_NSR_WAIT_CARGO                               :{LTBLUE}Enable new rating for Cargo/Passengers waiting: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_NSR_TOWN_RATING                              :{LTBLUE}Enable new rating for Local Authority Acceptance: {ORANGE}{STRING}
++
+ STR_TEMPERATE_LANDSCAPE                                         :Temperate landscape
+ STR_SUB_ARCTIC_LANDSCAPE                                        :Sub-arctic landscape
+ STR_SUB_TROPICAL_LANDSCAPE                                      :Sub-tropical landscape
+@@ -1111,6 +1117,7 @@
+ STR_CHEAT_SWITCH_CLIMATE                                        :{LTBLUE}Switch climate: {ORANGE} {STRING}
+ STR_CHEAT_CHANGE_DATE                                           :{LTBLUE}Change date: {ORANGE} {DATE_SHORT}
+ STR_CHEAT_SETUP_PROD                                            :{LTBLUE}Enable modifying production values: {ORANGE}{STRING}
++STR_CHEAT_RESET_STATION                                         :{LTBLUE}Enable Resetting of Stations: {ORANGE}{STRING}
+ 
+ STR_HEADING_FOR_WAYPOINT                                        :{LTBLUE}Heading for {WAYPOINT}
+ STR_HEADING_FOR_WAYPOINT_VEL                                    :{LTBLUE}Heading for {WAYPOINT}, {VELOCITY}
+@@ -2740,6 +2747,48 @@
+ STR_BUILD_DATE                                                  :{BLACK}Built: {LTBLUE}{DATE_LONG}
+ STR_MULTIPLAYER_PAUSED                                          :{WHITE}Game is paused.{}Command cannot be executed
+ 
++STR_RESET_STATION                                               :{BLACK}* RESET *
++STR_STATION_STATS                                               :{BLACK}Statistics
++STR_STATION_GOODS_IN                                            :{BLACK}In
++STR_STATION_GOODS_OUT                                           :{BLACK}Out
++STR_STATION_GOODS_TRANSFER                                      :{BLACK}Transit
++STR_VEHICLES                                                    :{BLACK}Vehicles
++STR_SCHEDULED                                                   :{BLACK}Scheduled
++STR_VEHICLES_MONTH                                              :{BLACK}Last Month
++STR_VEHICLES_CURRENT                                            :{BLACK}Current Month
++STR_TRAINS                                                      :{BLACK}Trains
++STR_RVS                                                         :{BLACK}Road Vehicles
++STR_BUSSES                                                      :{BLACK}Buses
++STR_TRUCKS                                                      :{BLACK}Trucks
++STR_SHIPS                                                       :{BLACK}Ships
++STR_AIRCRAFT                                                    :{BLACK}Aircraft
++STR_NUMBER                                                      :{YELLOW}{COMMA32}
++STR_STATION_MONTHS                                              :{BLACK}Cargo amount [This Month (Last Month) ]
++STR_CNUMBERS                                                    :{WHITE}{COMMA32} {TINYFONT}{BLACK}({YELLOW}{COMMA32}{BLACK})
++STR_VEHICLES_MONTHS_AVERAGE                                     :{BLACK}Average / Min / Max
++STR_MONTHS_COUNTED_NUM                                          :{BLACK}Months Counted: {GOLD}{COMMA32}
++STR_MONTHS_TINY                                                 :{TINYFONT}{BLACK}Months
++STR_STATION_MONTHS_AVERAGE                                      :{BLACK}Cargo amount [Average (Min/Max) per Month]
++STR_TOGGLE_MINMAX                                               :{BLACK}Toggle  -This/Last Month-   or   -Average/Min/Max-   Stats
++STR_RESET_STATISTICS                                            :{BLACK}Reset Statistics
++STR_AVERAGENUMBERS                                              :{SILVER}{COMMA32} {BLACK}{TINYFONT}({ORANGE}{COMMA32}{BLACK}/{LTBLUE}{COMMA32}{BLACK})
++STR_BLACK_SLASH                                                 :{BLACK}/
++STR_TINY_GOLD_NUMBER                                            :{TINYFONT}{GOLD}{COMMA32}
++STR_SILVER_NUMBER                                               :{SILVER}{COMMA32}
++STR_ORANGE_NUMBER                                               :{ORANGE}{COMMA32}
++STR_LTBLUE_NUMBER                                               :{LTBLUE}{COMMA32}
++STR_WHITE_NUMBER                                                :{WHITE}{COMMA32}
++STR_STS_NOT_SCHEDULED                                           :{BLACK}Not Scheduled
++STR_AVERAGE                                                     :{BLACK}Average
++STR_MINIMUM                                                     :{BLACK}Minimum
++STR_MAXIMUM                                                     :{BLACK}Maximum
++STR_STS_VEHICLES_LAST_YEAR                                      :{BLACK}Last Year
++STR_STS_VEHICLES_THIS_YEAR                                      :{BLACK}This Year
++STR_STS_YEARS_COUNTED_NUM                                       :{BLACK}Years Counted: {GOLD}{COMMA32}
++STR_STS_TOGGLE_MONTH_YEAR                                       :{BLACK}Toggle  -Monthly-   or   -Yearly-   Stats
++STR_STATION_COVERAGE                                            :{BLACK}Coverage
++STR_VEHICLE_CARGO_LIST                                          :{BLACK}Show List of Scheduled Vehicles for this Cargo-Type
++
+ STR_PERFORMANCE_DETAIL                                          :{WHITE}Detailed performance rating
+ STR_PERFORMANCE_DETAIL_KEY                                      :{BLACK}Detail
+ STR_PERFORMANCE_DETAIL_AMOUNT_CURRENCY                          :{BLACK}({CURRCOMPACT}/{CURRCOMPACT})
+@@ -2840,3 +2889,26 @@
+ STR_PURCHASE_INFO_COST_SPEED                                    :{BLACK}Cost: {GOLD}{CURRENCY}{BLACK} Speed: {GOLD}{VELOCITY}
+ STR_PURCHASE_INFO_AIRCRAFT_CAPACITY                             :{BLACK}Capacity: {GOLD}{COMMA16} passengers, {COMMA16} bags of mail
+ STR_PURCHASE_INFO_PWAGPOWER_PWAGWEIGHT                          :{BLACK}Powered Wagons: {GOLD}+{COMMA16}hp{BLACK} Weight: {GOLD}+{COMMA8}t
++
++STR_STATION_RATING_DETAIL                                          :{WHITE}Detailed service ratings - {STATION} {STRINL 0x30D1}
++STR_STATION_RATING_DETAIL_KEY                                      :{BLACK}Detail
++STR_STATION_RATING_DETAIL_SCORES                                   :{BLACK}({INT32}/{INT32})
++STR_STATION_RATING_DETAIL_PERCENT                                  :{WHITE}{INT32}%
++STR_STATION_RATING_DETAIL_INT                                      :{BLACK}{INT32}
++STR_STATION_RATING_DETAIL_WAITING                                  :{BLACK}Waiting cargo:
++STR_STATION_RATING_DETAIL_WAITING_EX                               :{BLACK}{STRING}
++STR_STATION_RATING_DETAIL_SPEED                                    :{BLACK}Last speed:
++STR_STATION_RATING_DETAIL_SPEED_EX                                 :{BLACK}{INT32}
++STR_STATION_RATING_DETAIL_AGE                                      :{BLACK}Last age:
++STR_STATION_RATING_DETAIL_AGE_EX                                   :{BLACK}{COMMA16} year(s)
++STR_STATION_RATING_DETAIL_PICKUP                                   :{BLACK}Days since pickup:
++STR_STATION_RATING_DETAIL_PICKUP_EX                                :{BLACK}{COMMA16} day(s)
++STR_STATION_RATING_DETAIL_OTHER                                    :{BLACK}Other ratings:
++STR_STATION_RATING_DETAIL_TOTAL                                    :{BLACK}Total rating:
++STR_STATION_RATING_DETAIL_SPEED_TIP                                :{BLACK}Maximum speed of the last vehicle entering the station (internal value, clipped at 255)
++STR_STATION_RATING_DETAIL_AGE_TIP                                  :{BLACK}Age of the last vehicle entering the station
++STR_STATION_RATING_DETAIL_PICKUP_TIP                               :{BLACK}Number of days since the last cargo pickup
++STR_STATION_RATING_DETAIL_WAITING_TIP                              :{BLACK}Cargo waiting at the station
++STR_STATION_RATING_DETAIL_OTHER_TIP                                :{BLACK}Other ratings are mainly if the town of the station has a statue of the company owner
++STR_STATION_RATING_DETAIL_TOTAL_TIP                                :{BLACK}Total rating - The station rating is updated according to this value in small increments
++STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP                         :{BLACK}Click here to toggle cargo type
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2465)
++++ variables.h	(working copy)
+@@ -218,6 +218,12 @@
+ 	uint32 npf_road_curve_penalty; /* The penalty for curves */
+ 
+ 	bool population_in_label; // Show the population of a town in his label?
++
++	bool nsr_speed;			// new station rating: vehicle speed
++	bool nsr_age;			// new station rating: vehicle age
++	bool nsr_wait_days;		// new station rating: days since last pickup
++	bool nsr_wait_cargo;	// new station rating: amount of cargo waiting
++	bool nsr_town_rating;	// new station rating: include local authority rating
+ } Patches;
+ 
+ VARDEF Patches _patches;
+@@ -243,6 +249,7 @@
+ 	Cheat switch_climate;
+ 	Cheat change_date;				//changes date ingame
+ 	Cheat setup_prod;				//setup raw-material production in game
++	Cheat reset_station;		// allow resetting of Stations
+ } Cheats;
+ 
+ VARDEF Cheats _cheats;
+@@ -342,6 +349,9 @@
+ 
+ VARDEF bool _cache_sprites;
+ 
++VARDEF bool _show_average_stats; // show Average Stats for Station-Stats?
++VARDEF bool _show_yearly_stats; // show Yearly Stats for Waypoints?
++
+ // debug features
+ VARDEF char _savedump_path[64];
+ VARDEF uint _savedump_first, _savedump_freq, _savedump_last;
+Index: gui.h
+===================================================================
+--- gui.h	(revision 2465)
++++ gui.h	(working copy)
+@@ -46,7 +46,7 @@
+ /* road_gui.c */
+ void ShowBuildRoadToolbar(void);
+ void ShowBuildRoadScenToolbar(void);
+-void ShowPlayerRoadVehicles(int player, int station);
++void ShowPlayerRoadVehicles(int player, int station, uint32 cargomask);
+ 
+ /* dock_gui.c */
+ void ShowBuildDocksToolbar(void);
+Index: roadveh_cmd.c
+===================================================================
+--- roadveh_cmd.c	(revision 2465)
++++ roadveh_cmd.c	(working copy)
+@@ -808,6 +808,14 @@
+ 
+ static void RoadVehArrivesAt(Vehicle *v, Station *st)
+ {
++	st->vehicles[STS_VEH_ROAD].this_month++;
++    if (st->months_counted == 0) st->months_counted = 1;
++	if (v->cargo_type == CT_PASSENGERS)
++		st->vehicles[STS_VEH_BUS].this_month++;
++	else
++		st->vehicles[STS_VEH_TRUCK].this_month++;
++	InvalidateWindow(WC_STATION_STATS, st->index);
++
+ 	if (v->engine_type < 123) {
+ 		/* Check if station was ever visited before */
+ 		if (!(st->had_vehicle_of_type & HVOT_BUS)) {
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2465)
++++ openttd.h	(working copy)
+@@ -265,7 +265,7 @@
+ 
+ 	NUM_CARGO = 12,
+ 
+-	CT_INVALID = 0xFF
++	CT_INVALID = 0xFF,
+ };
+ 
+ typedef uint AcceptedCargo[NUM_CARGO];
+@@ -441,6 +441,10 @@
+ 	WC_HIGHSCORE = 0x4D,
+ 	WC_ENDSCREEN = 0x4E,
+ 	WC_SIGN_LIST = 0x4F,
++	WC_STATION_STATS = 0x50,
++	WC_WAYPOINT_STATS = 0x51,
++	WC_STATION_RATING_DETAIL = 0x52,
++	WC_VEHICLES_LIST = 0x53
+ };
+ 
+ 
+@@ -527,6 +531,7 @@
+ #define INVALID_UINT_TILE (uint)0xFFFFFFFF
+ #define INVALID_STRING_ID 0xFFFF
+ 
++
+ enum {
+ 	MAX_SCREEN_WIDTH = 2048,
+ 	MAX_SCREEN_HEIGHT = 1200,
+Index: station_gui.c
+===================================================================
+--- station_gui.c	(revision 2465)
++++ station_gui.c	(working copy)
+@@ -10,7 +10,11 @@
+ #include "player.h"
+ #include "town.h"
+ #include "command.h"
++#include "engine.h"
++#include "depot.h"
+ 
++extern int _traininfo_vehicle_pitch;
++
+ static void StationsWndShowStationRating(int x, int y, int type, uint acceptance, int rating)
+ {
+ 	static const byte _rating_colors[NUM_CARGO] = {152,32,15,174,208,194,191,55,184,10,191,48};
+@@ -286,9 +290,35 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,   198,   209, STR_LORRY, STR_SCHEDULED_ROAD_VEHICLES_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,   198,   209, STR_PLANE, STR_SCHEDULED_AIRCRAFT_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,   198,   209, STR_SHIP, STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,   210,   221, STR_STATION_STATS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,   210,   221, STR_STATION_RATING_DETAIL_KEY,						STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   129,   192,   210,   221, 0x0,					STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   248,   210,   221, STR_STATION_COVERAGE,						STR_NULL},
+ {   WIDGETS_END},
+ };
+ 
++static const Widget _station_view_expanded_cheat_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   237,   248,     0,    13, 0x0,         STR_STICKY_BUTTON},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   236,    14,    65, 0x0,					STR_NULL},
++{  WWT_SCROLLBAR,   RESIZE_NONE,    14,   237,   248,    14,    65, 0x0,					STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{      WWT_EMPTY,   RESIZE_NONE,     0,     0,     0,     0,     0, 0x0,					STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   248,    66,   197, 0x0,					STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,   198,   209, STR_00E4_LOCATION,	STR_3053_CENTER_MAIN_VIEW_ON_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,   198,   209, STR_3033_ACCEPTS,	STR_3056_SHOW_LIST_OF_ACCEPTED_CARGO},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   192,   198,   209, STR_0130_RENAME,		STR_3055_CHANGE_NAME_OF_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   206,   198,   209, STR_TRAIN, STR_SCHEDULED_TRAINS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,   198,   209, STR_LORRY, STR_SCHEDULED_ROAD_VEHICLES_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,   198,   209, STR_PLANE, STR_SCHEDULED_AIRCRAFT_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,   198,   209, STR_SHIP, STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,   210,   221, STR_STATION_STATS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,   210,   221, STR_STATION_RATING_DETAIL_KEY,						STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   192,   210,   221, STR_RESET_STATION, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   248,   210,   221, STR_STATION_COVERAGE,						STR_NULL},
++{   WIDGETS_END},
++};
++
+ static const Widget _station_view_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -304,9 +334,35 @@
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,    98,   109, STR_LORRY, STR_SCHEDULED_ROAD_VEHICLES_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,    98,   109, STR_PLANE, STR_SCHEDULED_AIRCRAFT_TIP },
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,    98,   109, STR_SHIP, STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,   110,   121, STR_STATION_STATS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,   110,   121, STR_STATION_RATING_DETAIL_KEY,						STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   129,   192,   110,   121, 0x0,					STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   248,   110,   121, STR_STATION_COVERAGE,						STR_NULL},
+ {   WIDGETS_END},
+ };
+ 
++static const Widget _station_view_cheat_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,		STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   236,     0,    13, STR_300A_0,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   237,   248,     0,    13, 0x0,         STR_STICKY_BUTTON},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   236,    14,    65, 0x0,					STR_NULL},
++{  WWT_SCROLLBAR,   RESIZE_NONE,    14,   237,   248,    14,    65, 0x0,					STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   248,    66,    97, 0x0,					STR_NULL},
++{      WWT_EMPTY,   RESIZE_NONE,     0,     0,     0,     0,     0, 0x0,					STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,    98,   109, STR_00E4_LOCATION,	STR_3053_CENTER_MAIN_VIEW_ON_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,    98,   109, STR_3032_RATINGS,	STR_3054_SHOW_STATION_RATINGS},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   192,    98,   109, STR_0130_RENAME,		STR_3055_CHANGE_NAME_OF_STATION},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   206,    98,   109, STR_TRAIN, STR_SCHEDULED_TRAINS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   207,   220,    98,   109, STR_LORRY, STR_SCHEDULED_ROAD_VEHICLES_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   221,   234,    98,   109, STR_PLANE, STR_SCHEDULED_AIRCRAFT_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   235,   248,    98,   109, STR_SHIP, STR_SCHEDULED_SHIPS_TIP },
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    63,   110,   121, STR_STATION_STATS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    64,   128,   110,   121, STR_STATION_RATING_DETAIL_KEY,						STR_NULL},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   129,   192,   110,   121, STR_RESET_STATION, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   193,   248,   110,   121, STR_STATION_COVERAGE,						STR_NULL},
++{   WIDGETS_END},
++};
++
+ static void DrawStationViewWindow(Window *w)
+ {
+ 	Station *st;
+@@ -331,7 +387,10 @@
+ 	}
+ 	SetVScrollCount(w, num);
+ 
+-	w->disabled_state = st->owner == _local_player ? 0 : (1 << 9);
++	if (_cheats.reset_station.value)
++        w->disabled_state = st->owner == _local_player ? 0 : (1 << 9) | (1 << 14) | (1 << 15);
++	else
++		w->disabled_state = st->owner == _local_player ? 0 : (1 << 9) | (1 << 14);
+ 
+ 	if (!(st->facilities & FACIL_TRAIN)) SETBIT(w->disabled_state,  10);
+ 	if (!(st->facilities & FACIL_TRUCK_STOP) &&
+@@ -446,62 +505,105 @@
+ 
+ 	case WE_CLICK:
+ 		switch(e->click.widget) {
+-		case 7:
+-			ScrollMainWindowToTile(GetStation(w->window_number)->xy);
+-			break;
++			case 7: {
++				ScrollMainWindowToTile(GetStation(w->window_number)->xy);
++				break;
++			}
++			case 8: {
++				SetWindowDirty(w);
+ 
+-		case 8:
+-			SetWindowDirty(w);
++				/* toggle height/widget set */
++				if (IsWindowOfPrototype(w, _station_view_expanded_widgets)
++					|| IsWindowOfPrototype(w, _station_view_expanded_cheat_widgets)) {
++					if (_cheats.reset_station.value)
++						AssignWidgetToWindow(w, _station_view_cheat_widgets);
++					else
++						AssignWidgetToWindow(w, _station_view_widgets);
++					w->height = 122;
++				} else {
++					if (_cheats.reset_station.value)
++						AssignWidgetToWindow(w, _station_view_expanded_cheat_widgets);
++					else
++						AssignWidgetToWindow(w, _station_view_expanded_widgets);
++					w->height = 222;
++				}
+ 
+-			/* toggle height/widget set */
+-			if (IsWindowOfPrototype(w, _station_view_expanded_widgets)) {
+-				AssignWidgetToWindow(w, _station_view_widgets);
+-				w->height = 110;
+-			} else {
+-				AssignWidgetToWindow(w, _station_view_expanded_widgets);
+-				w->height = 210;
++				SetWindowDirty(w);
++				break;
+ 			}
+ 
+-			SetWindowDirty(w);
+-			break;
++			case 9: {
++				Station *st = GetStation(w->window_number);
++				SetDParam(0, st->town->townnametype);
++				SetDParam(1, st->town->townnameparts);
++				ShowQueryString(st->string_id, STR_3030_RENAME_STATION_LOADING, 31, 180, w->window_class, w->window_number);
++			}	break;
++			case 10: { /* Show a list of scheduled trains to this station */
++				const Station *st = GetStation(w->window_number);
++				ShowPlayerTrains(st->owner, w->window_number);
++				break;
++			}
+ 
+-		case 9: {
+-			Station *st = GetStation(w->window_number);
+-			SetDParam(0, st->town->townnametype);
+-			SetDParam(1, st->town->townnameparts);
+-			ShowQueryString(st->string_id, STR_3030_RENAME_STATION_LOADING, 31, 180, w->window_class, w->window_number);
+-		}	break;
++			case 11: { /* Show a list of scheduled road-vehicles to this station */
++				const Station *st = GetStation(w->window_number);
++				ShowPlayerRoadVehicles(st->owner, w->window_number, CARGO_MASK_ALL);
++				break;
++			}
++			case 12: { /* Show a list of scheduled aircraft to this station */
++				const Station *st = GetStation(w->window_number);
++				/* Since oilrigs have no owners, show the scheduled aircraft of current player */
++				PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
++				ShowPlayerAircraft(owner, w->window_number);
++				break;
++			}
+ 
+-		case 10: { /* Show a list of scheduled trains to this station */
+-			const Station *st = GetStation(w->window_number);
+-			ShowPlayerTrains(st->owner, w->window_number);
+-			break;
+-		}
++			case 13: { /* Show a list of scheduled ships to this station */
++				const Station *st = GetStation(w->window_number);
++				/* Since oilrigs/bouys have no owners, show the scheduled ships of current player */
++				PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
++				ShowPlayerShips(owner, w->window_number);
++				break;
++			}
+ 
+-		case 11: { /* Show a list of scheduled road-vehicles to this station */
+-			const Station *st = GetStation(w->window_number);
+-			ShowPlayerRoadVehicles(st->owner, w->window_number);
+-			break;
+-		}
++			case 14: { // Show Statistics for Station
++				ShowStationStatsWindow(w->window_number);
++				break;
++			}
++			case 15: { // Show Details for Station Rating
++				const Station *st = GetStation(w->window_number);
++				ShowStationRatingDetail(st->index);
++				break;
++			}
++			case 16: { // Reset Station
++				if (_cheats.reset_station.value) {
++					Station *st = GetStation(w->window_number);
++					GoodsEntry *ge;
+ 
+-		case 12: { /* Show a list of scheduled aircraft to this station */
+-			const Station *st = GetStation(w->window_number);
+-			/* Since oilrigs have no owners, show the scheduled aircraft of current player */
+-			PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
+-			ShowPlayerAircraft(owner, w->window_number);
+-			break;
+-		}
++					for(ge = st->goods; ge != endof(st->goods); ge++) {
++						ge->last_speed = 0;
++						ge->waiting_acceptance = 0;
++						ge->days_since_pickup = 0;
++						ge->enroute_from = 0xFFFF;
++						ge->rating = 175;
++						ge->last_speed = 0;
++						ge->last_age = 0xFF;
++						ge->feeder_profit = 0;
++					}
++					InitializeStationStats(st);
++					st->had_vehicle_of_type = 0;
++					st->time_since_load = 255;
++					st->time_since_unload = 255;
++					st->last_vehicle = INVALID_VEHICLE;
+ 
+-		case 13: { /* Show a list of scheduled ships to this station */
+-			const Station *st = GetStation(w->window_number);
+-			/* Since oilrigs/bouys have no owners, show the scheduled ships of current player */
+-			PlayerID owner = (st->owner == OWNER_NONE) ? _current_player : st->owner;
+-			ShowPlayerShips(owner, w->window_number);
+-			break;
++					SetWindowDirty(w);
++				}
++				break;
++ 			}
++			case 17: { //ToDo: show station coverage
++				break;
++			}
+ 		}
+-		}
+ 		break;
+-
+ 	case WE_ON_EDIT_TEXT: {
+ 		if (e->edittext.str[0] != '\0') {
+ 			Station* st = GetStation(w->window_number);
+@@ -520,6 +622,7 @@
+ 		DeleteWindowById(WC_ROADVEH_LIST, wno);
+ 		DeleteWindowById(WC_SHIPS_LIST, wno);
+ 		DeleteWindowById(WC_AIRCRAFT_LIST, wno);
++		DeleteWindowById(WC_STATION_STATS, w->window_number);
+ 		break;
+ 	}
+ 	}
+@@ -527,19 +630,30 @@
+ 
+ 
+ static const WindowDesc _station_view_desc = {
+-	-1, -1, 249, 110,
++	-1, -1, 249, 122,
+ 	WC_STATION_VIEW,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
+ 	_station_view_widgets,
+ 	StationViewWndProc
+ };
+ 
++static const WindowDesc _station_view_cheat_desc = {
++	-1, -1, 249, 122,
++	WC_STATION_VIEW,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_station_view_cheat_widgets,
++	StationViewWndProc
++};
++
+ void ShowStationViewWindow(int station)
+ {
+ 	Window *w;
+ 	byte color;
+ 
+-	w = AllocateWindowDescFront(&_station_view_desc, station);
++	if (_cheats.reset_station.value)
++		w = AllocateWindowDescFront(&_station_view_cheat_desc, station);
++	else
++		w = AllocateWindowDescFront(&_station_view_desc, station);
+ 	if (w) {
+ 		color = GetStation(w->window_number)->owner;
+ 		if (color != 0x10)
+@@ -547,3 +661,740 @@
+ 		w->vscroll.cap = 5;
+ 	}
+ }
++
++void StationStatsWndProc(Window *w, WindowEvent *e);
++
++Widget _station_stats_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5, STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   398,     0,    13, STR_300A_0, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   399,   410,     0,    13, 0x0,         STR_STICKY_BUTTON},
++{      WWT_EMPTY,   RESIZE_NONE,     0,     0,     0,     0,     0, 0x0, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    14,    25, STR_RESET_STATISTICS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,    91,   410,    14,    25, STR_TOGGLE_MINMAX, 0x0},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   410,    26,    37, 0x0, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    38,    49, STR_TRAINS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    50,    61, STR_RVS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    62,    73, STR_BUSSES, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    74,    85, STR_TRUCKS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    85,    97, STR_SHIPS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    90,    98,   109, STR_AIRCRAFT, 0x0},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,    91,   410,    38,   109, 0x0,0x0},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   410,   110,   135, 0x0,0x0},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   398,   136,   191, 0x0,0x0},
++{  WWT_SCROLLBAR,   RESIZE_NONE,    14,   399,   410,   136,   191, 0x0, STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{      WIDGETS_END},
++};
++
++WindowDesc _station_view_stats = {
++	-1, -1, 411, 192,
++	WC_STATION_STATS, 0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_station_stats_widgets,
++	StationStatsWndProc
++};
++
++void DrawStationStatWindow(Window *w, Station *st)
++{
++	int i, y, numcargo=0, pos;
++	GoodsEntry *ge;
++	
++	// count number of goods at station (months_counted will be 0 if good not delivered/picked up)
++	for (ge = st->goods; ge != endof(st->goods); ge++) {
++		if (ge->months_counted != 0) numcargo++;
++	}
++	SetVScrollCount(w, numcargo);
++		
++	//Get the Station name
++	SetDParam(0, st->index);
++	
++	//and the little carrier type images
++	SetDParam(1, st->facilities);
++	//First draw the widgets
++	DrawWindowWidgets(w);
++
++	DrawStringCentered(45, 28, STR_VEHICLES, 0);
++
++	//Part 1:       Find the number of carriers on the station
++	y = 27;
++	if (_show_average_stats) {
++		DrawStringRightAligned(150, y, STR_SCHEDULED, 0);
++		DrawStringRightAligned(275, y, STR_VEHICLES_MONTHS_AVERAGE, 0);
++		SetDParam(0, max(st->months_counted - 1,0));
++		DrawStringRightAligned(405, y, STR_MONTHS_COUNTED_NUM, 0);
++	} else {
++		DrawStringRightAligned(150, y, STR_SCHEDULED, 0);
++		DrawStringRightAligned(295, y, STR_VEHICLES_MONTH, 0);
++		DrawStringRightAligned(395, y, STR_VEHICLES_CURRENT, 0);	
++	}
++
++	y = 38;
++	for (i = 0; i < STS_VEH_TYPES; i++) {
++		if (w->custom[i] != 0) {
++			SetDParam(0, w->custom[i]);
++			DrawStringRightAligned(150, y+i*12, STR_NUMBER, 0);
++			CLRBIT(w->disabled_state, i+7);
++		} else {
++			SETBIT(w->disabled_state, i+7);
++		}
++		if (_show_average_stats) {
++			if (st->vehicles[i].average != 0 || st->vehicles[i].month_max !=0) {
++				SetDParam(0, st->vehicles[i].average / STS_MULTIPLIER);
++				DrawStringRightAligned(235, y+i*12, STR_SILVER_NUMBER, 0);
++				DrawStringRightAligned(245, y+i*12, STR_BLACK_SLASH, 0);
++				SetDParam(0, st->vehicles[i].month_min);
++				DrawStringRightAligned(290, y+i*12, STR_ORANGE_NUMBER, 0);
++				DrawStringRightAligned(300, y+i*12, STR_BLACK_SLASH, 0);
++				SetDParam(0, st->vehicles[i].month_max);
++				DrawStringRightAligned(350, y+i*12, STR_LTBLUE_NUMBER, 0);
++			}
++		} else {
++			if (st->vehicles[i].last_month != 0) {
++				SetDParam(0, st->vehicles[i].last_month);
++				DrawStringRightAligned(295, y+i*12, STR_NUMBER, 0);
++			}
++			if (st->vehicles[i].this_month) {
++				SetDParam(0, st->vehicles[i].this_month);
++				DrawStringRightAligned(395, y+i*12, STR_WHITE_NUMBER, 0);
++			}
++		}
++	}
++	
++	y = 124;
++	if (_show_average_stats) {
++		DrawString(5, y-10, STR_STATION_MONTHS_AVERAGE, 0);
++		DrawStringRightAligned(100, y+2, STR_MONTHS_TINY, 0);
++	} else {
++        DrawString(5, y-10, STR_STATION_MONTHS, 0);
++	}
++	DrawStringRightAligned(200, y, STR_STATION_GOODS_IN, 0);
++	DrawStringRightAligned(305, y, STR_STATION_GOODS_OUT, 0);
++	DrawStringRightAligned(395, y, STR_STATION_GOODS_TRANSFER, 0);
++	
++	y += 5;
++	pos = w->vscroll.pos;
++	for (i = 0; i < NUM_CARGO; i++) {
++		ge = &st->goods[i];
++		if (ge->months_counted != 0 && ((--pos < 0) && (pos >= -4)) )
++		{
++			StationStats *sts = ge->cargo_amount;
++			//Print the cargo name
++			y += 12;
++			SetDParam(0, _cargoc.names_p[i]);
++			DrawString(3, y, STR_02BD, 0);
++			if (_show_average_stats) {
++				SetDParam(0, ge->months_counted - 1);
++				DrawStringRightAligned(100, y, STR_TINY_GOLD_NUMBER, 0);
++				if (sts[STS_AMOUNT_IN].average != 0 || sts[STS_AMOUNT_IN].month_max != 0) {
++					SetDParam(0, sts[STS_AMOUNT_IN].average / STS_MULTIPLIER);
++					SetDParam(1, sts[STS_AMOUNT_IN].month_min);
++					SetDParam(2, sts[STS_AMOUNT_IN].month_max);
++					DrawStringRightAligned(200, y, STR_AVERAGENUMBERS, 0);
++				}
++				if (sts[STS_AMOUNT_OUT].average != 0 || sts[STS_AMOUNT_OUT].month_max != 0) {
++					SetDParam(0, sts[STS_AMOUNT_OUT].average / STS_MULTIPLIER);
++					SetDParam(1, sts[STS_AMOUNT_OUT].month_min);
++					SetDParam(2, sts[STS_AMOUNT_OUT].month_max);
++					DrawStringRightAligned(305, y, STR_AVERAGENUMBERS, 0);
++				}
++				if (sts[STS_AMOUNT_TRANSFER].average != 0 || sts[STS_AMOUNT_TRANSFER].month_max != 0) {
++					SetDParam(0, sts[STS_AMOUNT_TRANSFER].average / STS_MULTIPLIER);
++					SetDParam(1, sts[STS_AMOUNT_TRANSFER].month_min);
++					SetDParam(2, sts[STS_AMOUNT_TRANSFER].month_max);
++					DrawStringRightAligned(395, y, STR_AVERAGENUMBERS, 0);
++				}
++			} else {
++				if (sts[STS_AMOUNT_IN].this_month != 0 || sts[STS_AMOUNT_IN].last_month != 0) {
++					SetDParam(0, sts[STS_AMOUNT_IN].this_month);
++					SetDParam(1, sts[STS_AMOUNT_IN].last_month);
++					DrawStringRightAligned(200, y, STR_CNUMBERS, 0);
++				}
++				if (sts[STS_AMOUNT_OUT].this_month != 0 || sts[STS_AMOUNT_OUT].last_month != 0) {
++					SetDParam(0, sts[STS_AMOUNT_OUT].this_month);
++					SetDParam(1, sts[STS_AMOUNT_OUT].last_month);
++					DrawStringRightAligned(305, y, STR_CNUMBERS, 0);
++				}
++				if (sts[STS_AMOUNT_TRANSFER].this_month != 0 || sts[STS_AMOUNT_TRANSFER].last_month != 0) {
++					SetDParam(0, sts[STS_AMOUNT_TRANSFER].this_month);
++					SetDParam(1, sts[STS_AMOUNT_TRANSFER].last_month);
++					DrawStringRightAligned(395, y, STR_CNUMBERS, 0);
++				}
++			}
++		}
++	}
++}
++
++void StationStatsWndProc(Window *w, WindowEvent *e)
++{
++	Station *st = GetStation(w->window_number);
++	switch(e->event)
++	{
++	case WE_TICK: {
++//		static int counter = 0;
++//		if (++counter % 40) return;
++		int i;
++		
++		for (i = 0; i < STS_VEH_TYPES; i++)
++			w->custom[i] = st->veh_scheduled[i];
++		InvalidateWindow(WC_STATION_STATS, w->window_number);
++		break;
++	}
++	case WE_PAINT: {
++		DrawStationStatWindow(w, st);
++		break;
++		}
++	case WE_CLICK: {
++		switch (e->click.widget)
++		{
++			case 4:			// Reset Statistics
++				if (st->owner == _current_player) {
++					InitializeStationStats(st);
++					InvalidateWindow(WC_STATION_STATS, w->window_number);
++				}
++				break;
++			case 5:			// Toggle Average and This Month
++				_show_average_stats ^= 1;
++				InvalidateWindow(WC_STATION_STATS, w->window_number);
++				break;
++			case 7:			//Trains
++				ShowPlayerTrains(st->owner, st->index);
++				break;
++			case 8: 		//Road Vehicles
++				ShowPlayerRoadVehicles(st->owner, st->index, CARGO_MASK_ALL);
++				break;
++			case 9:			// Buses
++				ShowPlayerRoadVehicles(st->owner, st->index, 1 << GC_PASSENGERS);
++				break;
++			case 10:		// Trucks
++				ShowPlayerRoadVehicles(st->owner, st->index, CARGO_MASK_ALL &~(1 << GC_PASSENGERS));
++				break;
++			case 11: 		//Ships
++				ShowPlayerShips(st->owner, st->index);
++				break;
++			case 12: 		//Aircraft
++				ShowPlayerAircraft(st->owner, st->index);
++				break;
++		}
++	} break;
++	case WE_DESTROY: {
++//		DeleteWindowById(WC_TRAINS_LIST, st->owner + ( (st->index + 1) << 8));
++//		DeleteWindowById(WC_ROADVEH_LIST, st->owner + ( (st->index + 1) << 8) + 64 + 128);
++//		DeleteWindowById(WC_SHIPS_LIST, st->owner + ( (st->index + 1) << 8));
++//		DeleteWindowById(WC_AIRCRAFT_LIST, st->owner + ( (st->index + 1) << 8));
++	} break;
++	}
++}
++
++void ShowStationStatsWindow(int station)
++{
++	Window *w;
++	byte color;
++
++	Station *st = GetStation(station);
++		
++	w = AllocateWindowDescFront(&_station_view_stats, st->index);
++	if (w) {
++		int i;
++		color = st->owner;
++		if (color != 0x10)
++			w->caption_color = color;
++		w->vscroll.cap = 4;
++		for (i = 0; i < STS_VEH_TYPES; i++)
++			w->custom[i] = st->veh_scheduled[i];
++	}
++}
++
++static void StationRatingDetailWndProc(Window *w, WindowEvent *e)
++{
++	// String IDs to display
++	static const uint16 rating_str[] = {
++		STR_STATION_RATING_DETAIL_WAITING,
++		STR_STATION_RATING_DETAIL_SPEED,
++		STR_STATION_RATING_DETAIL_AGE,
++		STR_STATION_RATING_DETAIL_PICKUP,
++		STR_STATION_RATING_DETAIL_OTHER,
++		STR_STATION_RATING_DETAIL_TOTAL
++	};
++	// More string IDs to display
++	static const uint16 rating_str_ex[] = {
++		STR_STATION_RATING_DETAIL_WAITING_EX,
++		STR_STATION_RATING_DETAIL_SPEED_EX,
++		STR_STATION_RATING_DETAIL_AGE_EX,
++		STR_STATION_RATING_DETAIL_PICKUP_EX,
++		STR_NULL,
++		STR_NULL
++	};
++	static const int rating_max_score[] = {40, 42, 33, 130, 26, 255};
++
++	switch(e->event) {
++	case WE_PAINT: {
++		int i, x, cur_x, val;
++		byte cargo;
++		uint16 y = 16;
++		int color_done, color_notdone;
++		int max_score;
++		Station *st = GetStation(w->window_number);
++		RatingStats *rs;
++
++		// Disable cargo types that don't have ratings and click first cargo
++		w->disabled_state = 0;
++		for (i=0; i!=NUM_CARGO; i++) {
++			if(st->goods[i].enroute_from == INVALID_STATION) {
++				SETBIT(w->disabled_state, i + 9);
++				CLRBIT(w->click_state, i + 9);
++			} else if(w->click_state == 0) {
++				SETBIT(w->click_state, i + 9);
++			}
++		}
++		if(w->click_state == 0)
++			SETBIT(w->disabled_state, 21);
++
++		// Draw standard stuff
++		SetDParam(0, st->index);
++		SetDParam(1, st->facilities);
++		DrawWindowWidgets(w);
++
++		// Paint the cargo icons
++		cur_x = 9;
++		for (i = 0; i != NUM_CARGO; i++) {
++			if(st->goods[i].enroute_from != INVALID_STATION)
++				DrawSprite(_cargoc.sprites[i], cur_x, y);
++			cur_x += 28;
++		}
++
++		// The colors used to show how the progress is going
++		color_done = _color_list[6].window_color_1b;
++		color_notdone = _color_list[4].window_color_1b;
++
++		// No cargo type selected
++		if(w->click_state == 0)
++			break;
++
++		// The type of cargo of which we check the detail service rating
++		cargo = FindFirstBit(w->click_state) - 9;
++		
++		if (cargo < NUM_CARGO) 
++			w->listopt.cargo_mask = 1 << GetGlobalCargoID(_opt_ptr->landscape, cargo);
++		else
++			w->listopt.cargo_mask = CARGO_MASK_ALL;
++		w->listopt.veh_type_mask = VEHICLE_MASK_ALL;
++		w->listopt.xy = st->xy;
++
++		rs = &st->rating_stats[cargo];
++
++		y += 18;
++
++		for(i=0; i<NUM_RATINGS; i++) {
++			DrawString(7, y, rating_str[i], 0);
++
++			// Draw the raw values
++			switch(i) {
++				case RATING_WAITING:
++					SetDParam(1, rs->waiting);
++					SetDParam(0, _cargoc.names_long_s[cargo] + (rs->waiting == 1 ? 0 : 32));
++					break;
++				case RATING_SPEED:
++					SetDParam(0, rs->last_speed);
++					break;
++				case RATING_AGE:
++					SetDParam(0, rs->last_age);
++					break;
++				case RATING_PICKUP:
++					SetDParam(0, rs->days_since_pickup);
++					break;
++				default:
++					break;
++			}
++
++			if(rating_str_ex[i] != STR_NULL)
++				DrawStringRightAligned(205, y, rating_str_ex[i], 0);
++
++			// Calculate the %-bar
++			val = rs->ratings[i];
++
++			max_score = rating_max_score[i];
++			if (val > max_score) x = 50;
++			else if (val <= 0) x = 0;
++			else x = ((val * 50) / max_score);
++
++			// Draw the bar
++			if (x != 0)
++				GfxFillRect(210, y-2, x + 210, y+10, color_done);
++			if (x != 50)
++				GfxFillRect(x + 210, y-2, 50 + 210, y+10, color_notdone);
++
++			// Calculate the %
++			if (val > max_score) x = 100;
++			else x = ((val * 100) / max_score);
++
++			// Draw it
++			SetDParam(0, x);
++			DrawStringCentered(235, y, STR_STATION_RATING_DETAIL_PERCENT, 0);
++
++			// Draw the score and max_score
++			SetDParam(0, val);
++			SetDParam(1, max_score);
++			DrawString(265, y, STR_STATION_RATING_DETAIL_SCORES, 0);
++
++			y += 20;
++		}
++
++		break;
++	}
++
++	case WE_CLICK:
++		// Check which button is clicked
++		if (IS_INT_INSIDE(e->click.widget, 9, 21)) {
++			// Is it no on disable?
++			if ((w->disabled_state & (1 << e->click.widget)) == 0) {
++				Station *st = GetStation(w->window_number);
++				Window *w2 = FindWindowById(WC_VEHICLES_LIST, (st->index << 16) | st->owner);
++				vehiclelist_d *vl;
++				w->click_state = 1 << e->click.widget;
++				w->listopt.cargo_mask = 1 << GetGlobalCargoID(_opt_ptr->landscape, FindFirstBit(w->click_state) - 9);
++				SetWindowDirty(w);
++				if (w2) {
++					vl = &WP(w2, vehiclelist_d);
++					vl->flags |= VL_REBUILD;
++					w2->listopt.cargo_mask = w->listopt.cargo_mask;
++					SetWindowDirty(w2);
++				}
++			}
++		} else if (e->click.widget == 21) {
++			Station *st = GetStation(w->window_number);
++			ShowPlayerVehicles(st->owner, st->index, w->listopt.veh_type_mask, w->listopt.cargo_mask, w->listopt.xy);
++			w->click_state = 1 << (GetLocalCargoID(FindFirstBit(w->listopt.cargo_mask)) + 9);
++			SetWindowDirty(w);
++		}
++		break;
++
++	case WE_CREATE:
++		{
++			w->hidden_state = 0;
++			w->disabled_state = 0;
++			w->click_state = 0;
++
++			SetWindowDirty(w);
++		}
++		break;
++	}
++}
++
++static const Widget _station_rating_detail_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   325,     0,    13, STR_STATION_RATING_DETAIL,	STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   326,   337,     0,    13, 0x0, STR_STICKY_BUTTON},
++
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   337,    28,    47, 0x0,STR_STATION_RATING_DETAIL_WAITING_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   337,    48,    67, 0x0,STR_STATION_RATING_DETAIL_SPEED_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   337,    68,    87, 0x0,STR_STATION_RATING_DETAIL_AGE_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   337,    88,   107, 0x0,STR_STATION_RATING_DETAIL_PICKUP_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   337,   108,   127, 0x0,STR_STATION_RATING_DETAIL_OTHER_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   337,   128,   147, 0x0,STR_STATION_RATING_DETAIL_TOTAL_TIP},
++
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     1,    28,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,    29,    56,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,    57,    84,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,    85,   112,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   113,   140,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   141,   168,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   169,   196,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   197,   224,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   225,   252,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   253,   280,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   281,   308,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,   309,   336,    14,    27, 0x0,STR_STATION_RATING_DETAIL_TOGGLE_CARGO_TIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   336,    148,   160, STR_VEHICLE_CARGO_LIST, 0x0},
++{   WIDGETS_END},
++};
++
++static const WindowDesc _station_rating_detail_desc = {
++	-1, -1, 338, 161,
++	WC_STATION_RATING_DETAIL,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_station_rating_detail_widgets,
++	StationRatingDetailWndProc
++};
++
++void ShowStationRatingDetail(int station)
++{
++	Window *w;
++	byte color;
++
++	w = AllocateWindowDescFront(&_station_rating_detail_desc, station);
++	if (w) {
++		color = GetStation(w->window_number)->owner;
++		if (color != 0x10)
++			w->caption_color = color;
++		w->vscroll.cap = 5;
++	}
++}
++
++static void PlayerVehiclesWndProc(Window *w, WindowEvent *e)
++{
++	int station = (int)w->window_number >> 16;
++	int owner = w->window_number & 0xff;
++	vehiclelist_d *vl = &WP(w, vehiclelist_d);
++
++	switch(e->event) {
++	case WE_PAINT: {
++		int x = 2;
++		int y = PLY_WND_PRC__OFFSET_TOP_WIDGET;
++		int max;
++		int i;
++
++		BuildVehicleListMasked(vl, &w->listopt, owner);
++		SortVehicleList(vl);
++
++		SetVScrollCount(w, vl->list_length);
++		// disable 'Sort By' tooltip on Unsorted sorting criteria
++		if (vl->sort_type == SORT_BY_UNSORTED)
++			w->disabled_state |= (1 << 3);
++
++		/* draw the widgets */
++		{
++			const Player *p = DEREF_PLAYER(owner);
++			if (station == -1) {
++				/* Company Name -- (###) Trains */
++				SetDParam(0, p->name_1);
++				SetDParam(1, p->name_2);
++				SetDParam(2, w->vscroll.count);
++				w->widget[1].unkA = STR_VEHICLES;
++			} else {
++				/* Station Name -- (###) Trains */
++				SetDParam(0, station);
++				SetDParam(1, w->vscroll.count);
++				w->widget[1].unkA = STR_SCHEDULED;
++			}
++			DrawWindowWidgets(w);
++		}
++		/* draw sorting criteria string */
++		DrawString(85, 15, _vehicle_sort_listing[vl->sort_type], 0x10);
++		/* draw arrow pointing up/down for ascending/descending sorting */
++		DoDrawString(vl->flags & VL_DESC ? "\xAA" : "\xA0", 69, 15, 0x10);
++
++		max = min(w->vscroll.pos + w->vscroll.cap, vl->list_length);
++		for (i = w->vscroll.pos; i < max; ++i) {
++			Vehicle *v = GetVehicle(vl->sort_list[i].index);
++			StringID str;
++
++			assert(v->owner == owner);
++
++			switch (v->type) {
++				case VEH_Train:
++				{
++					DrawTrainImage(
++						v, x + 21, y + 6 + _traininfo_vehicle_pitch, w->hscroll.cap, 0, INVALID_VEHICLE);
++
++					SetDParam(0, v->unitnumber);
++					if (IsTileDepotType(v->tile, TRANSPORT_RAIL) && (v->vehstatus & VS_HIDDEN))
++						str = STR_021F;
++					else
++						str = v->age > v->max_age - 366 ? STR_00E3 : STR_00E2;
++					DrawString(x, y + 2, str, 0);
++					if (v->string_id != STR_SV_TRAIN_NAME) {
++						SetDParam(0, v->string_id);
++						DrawString(x + 21, y, STR_01AB, 0);
++					}
++					break;
++				}
++				case VEH_Road:
++				{
++					DrawRoadVehImage(v, x + 22, y + 6, INVALID_VEHICLE);
++					SetDParam(0, v->unitnumber);
++					if (IsTileDepotType(v->tile, TRANSPORT_ROAD) && (v->vehstatus & VS_HIDDEN))
++						str = STR_021F;
++					else
++						str = v->age > v->max_age - 366 ? STR_00E3 : STR_00E2;
++					DrawString(x, y + 2, str, 0);
++					if (v->string_id != STR_SV_ROADVEH_NAME) {
++						SetDParam(0, v->string_id);
++						DrawString(x + 24, y, STR_01AB, 0);
++					}
++					break;
++				}
++				case VEH_Aircraft:
++				{
++					DrawAircraftImage(v, x + 19, y + 6, INVALID_VEHICLE);
++					SetDParam(0, v->unitnumber);
++					if (IsAircraftHangarTile(v->tile) && (v->vehstatus & VS_HIDDEN))
++						str = STR_021F;
++					else
++						str = v->age > v->max_age - 366 ? STR_00E3 : STR_00E2;
++					DrawString(x, y + 2, str, 0);
++					if (v->string_id != STR_SV_AIRCRAFT_NAME) {
++						SetDParam(0, v->string_id);
++						DrawString(x + 19, y, STR_01AB, 0);
++					}
++					break;
++				}
++				case VEH_Ship:
++				{
++					DrawShipImage(v, x + 19, y + 6, INVALID_VEHICLE);
++					SetDParam(0, v->unitnumber);
++					if (IsTileDepotType(v->tile, TRANSPORT_WATER) && (v->vehstatus & VS_HIDDEN))
++						str = STR_021F;
++					else
++						str = v->age > v->max_age - 366 ? STR_00E3 : STR_00E2;
++					DrawString(x, y + 2, str, 0);
++					if (v->string_id != STR_SV_SHIP_NAME) {
++						SetDParam(0, v->string_id);
++						DrawString(x + 12, y, STR_01AB, 0);
++					}
++					break;
++				}
++				default:
++					continue;
++			}
++			DrawVehicleProfitButton(v, x, y + 13);
++			SetDParam(0, v->profit_this_year);
++			SetDParam(1, v->profit_last_year);
++			DrawString(x + 21, y + 18, STR_0198_PROFIT_THIS_YEAR_LAST_YEAR, 0);
++
++			y += PLY_WND_PRC__SIZE_OF_ROW_BIG;
++		}
++		break;
++	}
++
++	case WE_CLICK: {
++		switch(e->click.widget) {
++		case 3: /* Flip sorting method ascending/descending */
++			vl->flags ^= VL_DESC;
++			vl->flags |= VL_RESORT;
++			_sorting.masked.order = !!(vl->flags & VL_DESC);
++			SetWindowDirty(w);
++			break;
++
++		case 4: case 5:/* Select sorting criteria dropdown menu */
++			ShowDropDownMenu(w, _vehicle_sort_listing, vl->sort_type, 5, 0, 0);
++			return;
++
++		case 7: { /* Matrix to show vehicles */
++			uint32 id_v = (e->click.pt.y - PLY_WND_PRC__OFFSET_TOP_WIDGET) / PLY_WND_PRC__SIZE_OF_ROW_BIG;
++
++			if (id_v >= w->vscroll.cap) { return;} // click out of bounds
++
++			id_v += w->vscroll.pos;
++			{
++				Vehicle *v;
++				if (id_v >= vl->list_length) return; // click out of list bound
++				v = GetVehicle(vl->sort_list[id_v].index);
++
++				assert(v->owner == owner);
++				
++				switch (v->type)
++				{
++				case VEH_Train:
++                    ShowTrainViewWindow(v);
++					break;
++				case VEH_Ship:
++					ShowShipViewWindow(v);
++					break;
++				case VEH_Road:
++					ShowRoadVehViewWindow(v);
++					break;
++				case VEH_Aircraft:
++					ShowAircraftViewWindow(v);
++					break;
++				}
++			}
++		} break;
++		}
++	}	break;
++
++	case WE_DROPDOWN_SELECT: /* we have selected a dropdown item in the list */
++		if (vl->sort_type != e->dropdown.index) {
++			// value has changed -> resort
++			vl->flags |= VL_RESORT;
++			vl->sort_type = e->dropdown.index;
++			_sorting.masked.criteria = vl->sort_type;
++
++			// enable 'Sort By' if a sorter criteria is chosen
++			if (vl->sort_type != SORT_BY_UNSORTED)
++				CLRBIT(w->disabled_state, 3);
++		}
++		SetWindowDirty(w);
++		break;
++
++	case WE_CREATE: /* set up resort timer */
++		vl->sort_list = NULL;
++		vl->flags = VL_REBUILD | (_sorting.train.order << (VL_DESC - 1));
++		vl->sort_type = _sorting.masked.criteria;
++		vl->resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++		break;
++
++	case WE_DESTROY:
++		free(vl->sort_list);
++		break;
++
++	case WE_TICK: /* resort the list every 20 seconds orso (10 days) */
++		if (--vl->resort_timer == 0) {
++			DEBUG(misc, 1) ("Periodic resort trains list player %d station %d",
++				owner, station);
++			vl->resort_timer = DAY_TICKS * PERIODIC_RESORT_DAYS;
++			vl->flags |= VL_RESORT;
++			SetWindowDirty(w);
++		}
++		break;
++
++	case WE_RESIZE:
++		/* Update the scroll + matrix */
++		w->hscroll.cap += e->sizing.diff.x / 29;
++		w->vscroll.cap += e->sizing.diff.y / PLY_WND_PRC__SIZE_OF_ROW_BIG;
++		w->widget[7].unkA = (w->vscroll.cap << 8) + 1;
++		break;
++	}
++}
++
++static const Widget _player_vehicles_widgets[] = {
++{   WWT_CLOSEBOX,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,							STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,  RESIZE_RIGHT,    14,    11,   312,     0,    13, STR_VEHICLES,				STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,     RESIZE_LR,    14,   313,   324,     0,    13, 0x0,										STR_STICKY_BUTTON},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,    80,    14,    25, SRT_SORT_BY,						STR_SORT_ORDER_TIP},
++{      WWT_PANEL,   RESIZE_NONE,    14,    81,   232,    14,    25, 0x0,										STR_SORT_CRITERIA_TIP},
++{   WWT_CLOSEBOX,   RESIZE_NONE,    14,   233,   243,    14,    25, STR_0225,							STR_SORT_CRITERIA_TIP},
++{      WWT_PANEL,  RESIZE_RIGHT,    14,   244,   324,    14,    25, 0x0,										STR_NULL},
++{     WWT_MATRIX,     RESIZE_RB,    14,     0,   312,    26,   207, 0x701,									STR_883D_TRAINS_CLICK_ON_TRAIN_FOR},
++{  WWT_SCROLLBAR,    RESIZE_LRB,    14,   313,   324,    26,   207, 0x0,										STR_0190_SCROLL_BAR_SCROLLS_LIST},
++{      WWT_PANEL,    RESIZE_RTB,    14,     0,   312,   208,   219, 0x0,										STR_NULL},
++{  WWT_RESIZEBOX,   RESIZE_LRTB,    14,   313,   324,   208,   219, 0x0,										STR_RESIZE_BUTTON},
++{   WIDGETS_END},
++};
++
++static const WindowDesc _player_vehicles_desc = {
++	-1, -1, 325, 220,
++	WC_VEHICLES_LIST,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON | WDF_RESIZABLE,
++	_player_vehicles_widgets,
++	PlayerVehiclesWndProc
++};
++
++void ShowPlayerVehicles(int player, int station, uint32 type_mask, uint32 cargo_mask, TileIndex xy)
++{
++	Window *w;
++
++	w = AllocateWindowDescFront(&_player_vehicles_desc, (station << 16) | player);
++	if (w) {
++		w->listopt.cargo_mask = cargo_mask;
++		w->listopt.veh_type_mask = type_mask;
++		w->listopt.xy = xy;
++
++		w->caption_color = player;
++		w->hscroll.cap = 10;
++		w->vscroll.cap = 5; // maximum number of vehicles shown
++		w->widget[7].unkA = (w->vscroll.cap << 8) + 1;
++		w->resize.step_height = PLY_WND_PRC__SIZE_OF_ROW_BIG;
++		w->resize.step_width = 29;
++		w->resize.height = 220 - (PLY_WND_PRC__SIZE_OF_ROW_BIG * 3); /* Minimum of 4 vehicles */
++	} else {
++		w = FindWindowById(WC_VEHICLES_LIST, (station << 16) | player);
++		if (w) {
++			vehiclelist_d *vl;
++			vl = &WP(w, vehiclelist_d);
++			vl->flags |= VL_REBUILD;
++			w->listopt.cargo_mask = cargo_mask;
++			w->listopt.veh_type_mask = type_mask;
++			w->listopt.xy = xy;
++			SetWindowDirty(w);
++		}
++	}
++}
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 2465)
++++ aircraft_gui.c	(working copy)
+@@ -57,7 +57,7 @@
+ 	y += 10;
+ }
+ 
+-static void DrawAircraftImage(const Vehicle *v, int x, int y, VehicleID selection)
++void DrawAircraftImage(const Vehicle *v, int x, int y, VehicleID selection)
+ {
+ 	int image = GetAircraftImage(v, 6);
+ 	uint32 ormod = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(v->owner));
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2465)
++++ train_cmd.c	(working copy)
+@@ -2153,7 +2153,7 @@
+ 	// check if we've reached the waypoint?
+ 	if (v->current_order.type == OT_GOTO_WAYPOINT && v->tile == v->dest_tile) {
+ 		v->cur_order_index++;
+-	}
++	}	
+ 
+ 	// check if we've reached a non-stop station while TTDPatch nonstop is enabled..
+ 	if (_patches.new_nonstop && v->current_order.flags & OF_NON_STOP &&
+@@ -2322,6 +2322,9 @@
+ 			v->index,
+ 			0);
+ 	}
++	if (v->subtype == TS_Front_Engine) st->vehicles[STS_VEH_TRAIN].this_month++;
++	if (st->months_counted == 0) st->months_counted = 1;
++	InvalidateWindow(WC_STATION_STATS, st->index);
+ 
+ 	// Did we reach the final destination?
+ 	if (v->current_order.type == OT_GOTO_STATION &&
+@@ -2761,8 +2764,20 @@
+ 					assert(v->u.rail.track);
+ 				}
+ 
+-				if (v->subtype == TS_Front_Engine)
+- 				TrainMovedChangeSignals(gp.new_tile, enterdir);
++				if (v->subtype == TS_Front_Engine) {
++ 					TrainMovedChangeSignals(gp.new_tile, enterdir);
++					if (v->current_order.type == OT_GOTO_WAYPOINT && v->tile == v->dest_tile) {
++						Waypoint *wp = GetWaypointByTile(v->tile);
++						if (wp->months_counted == 0) wp->months_counted = 1;
++						wp->vehicles[STS_WP_ORDER].this_month++;
++						wp->vehicles[STS_WP_ORDER_YEAR].this_month++;
++					} else if (IsRailWaypoint(_map5[v->tile])) {
++						Waypoint *wp = GetWaypointByTile(v->tile);
++						if (wp->months_counted == 0) wp->months_counted = 1;
++						wp->vehicles[STS_WP_PATHFIND].this_month++;
++						wp->vehicles[STS_WP_PATHFIND_YEAR].this_month++;
++					}
++				}	
+ 
+ 				/* Signals can only change when the first
+ 				 * (above) or the last vehicle moves. */
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2465)
++++ rail_cmd.c	(working copy)
+@@ -1978,8 +1978,7 @@
+ 	if (IsTileDepotType(tile, TRANSPORT_RAIL))
+ 		ShowTrainDepotWindow(tile);
+ 	else if (IsRailWaypoint(_map5[tile]))
+-		ShowRenameWaypointWindow(GetWaypointByTile(tile));
+-
++		ShowWaypointStatsWindow(GetWaypointByTile(tile));
+ }
+ 
+ static void GetTileDesc_Track(TileIndex tile, TileDesc *td)
+Index: vehicle.h
+===================================================================
+--- vehicle.h	(revision 2465)
++++ vehicle.h	(working copy)
+@@ -141,7 +141,7 @@
+ 
+ struct Vehicle {
+ 	byte type;	// type, ie roadven,train,ship,aircraft,special
+-	byte subtype;     // subtype (Filled with values from EffectVehicles or TrainSubTypes)(Filled with values from EffectVehicles or TrainSubTypes)
++	byte subtype;     // subtype (Filled with values from EffectVehicles or TrainSubTypes)
+ 
+ 	VehicleID index;	// NOSAVE: Index in vehicle array
+ 
+Index: misc.c
+===================================================================
+--- misc.c	(revision 2465)
++++ misc.c	(working copy)
+@@ -547,6 +547,7 @@
+ void TownsMonthlyLoop(void);
+ void IndustryMonthlyLoop(void);
+ void StationMonthlyLoop(void);
++void WaypointMonthlyLoop(void);
+ 
+ void PlayersYearlyLoop(void);
+ void TrainsYearlyLoop(void);
+@@ -655,6 +656,7 @@
+ 		TownsMonthlyLoop();
+ 		IndustryMonthlyLoop();
+ 		StationMonthlyLoop();
++		WaypointMonthlyLoop();
+ #ifdef ENABLE_NETWORK
+ 		if (_network_server)
+ 			NetworkServerMonthlyLoop();
+Index: economy.c
+===================================================================
+--- economy.c	(revision 2465)
++++ economy.c	(working copy)
+@@ -1362,6 +1362,9 @@
+ 				unloading_time += v->cargo_count; /* TTDBUG: bug in original TTD */
+ 				profit += DeliverGoods(v->cargo_count, v->cargo_type, v->cargo_source, last_visited, v->cargo_days);
+ 				result |= 1;
++				ge->cargo_amount[STS_AMOUNT_IN].this_month += v->cargo_count;
++                if (ge->months_counted == 0) ge->months_counted = 1;
++				InvalidateWindow(WC_STATION_STATS, st->index);
+ 				v->cargo_count = 0;
+ 			} else if (u->current_order.flags & ( OF_UNLOAD | OF_TRANSFER) ) {
+ 				/* unload goods and let it wait at the station */
+@@ -1375,6 +1378,9 @@
+ 
+ 				v_profit_total += v_profit;
+ 
++				ge->cargo_amount[STS_AMOUNT_TRANSFER].this_month += v->cargo_count;
++                if (ge->months_counted == 0) ge->months_counted = 1;
++				InvalidateWindow(WC_STATION_STATS, st->index);
+ 
+ 				unloading_time += v->cargo_count;
+ 				if ((t=ge->waiting_acceptance & 0xFFF) == 0) {
+@@ -1405,14 +1411,21 @@
+ 
+ 		/* update stats */
+ 		ge->days_since_pickup = 0;
++		ge->last_vehicle_type = u->type;
++
++		// TODO: use max-speed of whole consist for trains
+ 		t = u->max_speed;
+ 		if (u->type == VEH_Road) t >>=1;
+ 		if (u->type == VEH_Train) t = u->u.rail.cached_max_speed;
+ 
++		
++		ge->last_vehicle_speed = t;
+ 		// if last speed is 0, we treat that as if no vehicle has ever visited the station.
+ 		ge->last_speed = t < 255 ? t : 255;
++		// TODO: use age of oldest wagon of this type
+ 		ge->last_age = _cur_year - v->build_year;
+ 
++
+ 		// If there's goods waiting at the station, and the vehicle
+ 		//  has capacity for it, load it on the vehicle.
+ 		if ((count=ge->waiting_acceptance & 0xFFF) != 0 &&
+@@ -1443,6 +1456,11 @@
+ 			ge->waiting_acceptance -= cap;
+ 			v->profit_this_year -= feeder_profit_share;
+ 			ge->feeder_profit -= feeder_profit_share;
++
++			ge->cargo_amount[STS_AMOUNT_OUT].this_month += cap;
++			if (ge->months_counted == 0) ge->months_counted = 1;
++			InvalidateWindow(WC_STATION_STATS, st->index);
++
+ 			unloading_time += cap;
+ 			st->time_since_load = 0;
+ 
+@@ -1456,6 +1474,9 @@
+ 
+ 
+ 	v = u;
++	
++	if (v_profit_total > 0)
++		ShowFeederIncomeAnimation(v->x_pos, v->y_pos, v->z_pos, v_profit_total);
+ 
+ 	if (v_profit_total > 0)
+ 		ShowFeederIncomeAnimation(v->x_pos, v->y_pos, v->z_pos, v_profit_total);
+Index: ship_cmd.c
+===================================================================
+--- ship_cmd.c	(revision 2465)
++++ ship_cmd.c	(working copy)
+@@ -451,6 +451,10 @@
+ 
+ static void ShipArrivesAt(Vehicle *v, Station *st)
+ {
++	st->vehicles[STS_VEH_SHIP].this_month++;
++	if (st->months_counted == 0) st->months_counted = 1;
++	InvalidateWindow(WC_STATION_STATS, st->index);
++
+ 	/* Check if station was ever visited before */
+ 	if (!(st->had_vehicle_of_type & HVOT_SHIP)) {
+ 		uint32 flags;
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2465)
++++ main_gui.c	(working copy)
+@@ -314,7 +314,7 @@
+ 
+ static void MenuClickShowRoad(int index)
+ {
+-	ShowPlayerRoadVehicles(index, -1);
++	ShowPlayerRoadVehicles(index, -1, CARGO_MASK_ALL);
+ }
+ 
+ static void MenuClickShowShips(int index)
+@@ -1898,7 +1898,7 @@
+ 		case WKC_F11: ShowCompanyLeagueTable(); break;
+ 		case WKC_F12: ShowBuildIndustryWindow(); break;
+ 		case WKC_SHIFT | WKC_F1: ShowPlayerTrains(local, -1); break;
+-		case WKC_SHIFT | WKC_F2: ShowPlayerRoadVehicles(local, -1); break;
++		case WKC_SHIFT | WKC_F2: ShowPlayerRoadVehicles(local, -1, CARGO_MASK_ALL); break;
+ 		case WKC_SHIFT | WKC_F3: ShowPlayerShips(local, -1); break;
+ 		case WKC_SHIFT | WKC_F4: ShowPlayerAircraft(local, -1); break;
+ 		case WKC_SHIFT | WKC_F5: ToolbarZoomInClick(w); break;
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 2465)
++++ roadveh_gui.c	(working copy)
+@@ -57,7 +57,7 @@
+ 	y += 10;
+ }
+ 
+-static void DrawRoadVehImage(const Vehicle *v, int x, int y, VehicleID selection)
++void DrawRoadVehImage(const Vehicle *v, int x, int y, VehicleID selection)
+ {
+ 	int image = GetRoadVehImage(v, 6);
+ 	uint32 ormod = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(v->owner));
+@@ -815,7 +815,8 @@
+ 		int max;
+ 		int i;
+ 
+-		BuildVehicleList(vl, VEH_Road, owner, station);
++//		BuildVehicleList(vl, VEH_Road, owner, station);
++		BuildVehicleListMasked(vl, &w->listopt, owner);
+ 		SortVehicleList(vl);
+ 
+ 		SetVScrollCount(w, vl->list_length);
+@@ -997,7 +998,7 @@
+ };
+ 
+ 
+-void ShowPlayerRoadVehicles(int player, int station)
++void ShowPlayerRoadVehicles(int player, int station, uint32 cargo_mask)
+ {
+ 	Window *w;
+ 
+@@ -1007,10 +1008,24 @@
+ 		w = AllocateWindowDescFront(&_other_player_roadveh_desc, (station << 16) | player);
+ 	}
+ 	if (w) {
++		w->listopt.cargo_mask = cargo_mask;
++		w->listopt.veh_type_mask = 1 << VEH_Road;
++		w->listopt.xy = GetStation(station)->xy;
++
+ 		w->caption_color = player;
+ 		w->vscroll.cap = 7; // maximum number of vehicles shown
+ 		w->widget[7].unkA = (w->vscroll.cap << 8) + 1;
+ 		w->resize.step_height = PLY_WND_PRC__SIZE_OF_ROW_SMALL;
+ 		w->resize.height = 220 - (PLY_WND_PRC__SIZE_OF_ROW_SMALL * 3); /* Minimum of 4 vehicles */
++	} else {
++		w = FindWindowById(WC_ROADVEH_LIST, (station << 16) | player);
++		if (w) {
++			vehiclelist_d *vl = &WP(w, vehiclelist_d);
++			vl->flags |= VL_REBUILD;
++			w->listopt.cargo_mask = cargo_mask;
++			w->listopt.veh_type_mask = 1 << VEH_Road;
++			w->listopt.xy = GetStation(station)->xy;
++			SetWindowDirty(w);
++		}
+ 	}
+ }
+Index: order_cmd.c
+===================================================================
+--- order_cmd.c	(revision 2465)
++++ order_cmd.c	(working copy)
+@@ -348,6 +348,25 @@
+ 			/* Increase amount of orders */
+ 			u->num_orders++;
+ 
++			// count vehicles scheduled for station
++			if (new_order.type == OT_GOTO_WAYPOINT) {
++				GetWaypoint(new_order.station)->veh_scheduled++;
++			} else {
++				Station *st = GetStation(new_order.station);
++				switch (u->type)
++				{
++					case VEH_Train:		st->veh_scheduled[STS_VEH_TRAIN]++;	break;
++					case VEH_Ship:		st->veh_scheduled[STS_VEH_SHIP]++;	break;
++					case VEH_Aircraft:	st->veh_scheduled[STS_VEH_AIRCRAFT]++;	break;
++					case VEH_Road:		st->veh_scheduled[STS_VEH_ROAD]++;
++						if (u->cargo_type == CT_PASSENGERS)
++							st->veh_scheduled[STS_VEH_BUS]++;
++						else
++							st->veh_scheduled[STS_VEH_TRUCK]++;
++						break;
++				}
++			}
++
+ 			/* If the orderlist was empty, assign it */
+ 			if (u->orders == NULL) u->orders = v->orders;
+ 
+@@ -429,12 +448,25 @@
+ 			GetVehicleOrder(v, sel_ord - 1)->next = order->next;
+ 		}
+ 
+-		/* Give the item free */
+-		order->type = OT_NOTHING;
+-		order->next = NULL;
+-
+ 		u = GetFirstVehicleFromSharedList(v);
+ 		while (u != NULL) {
++			if (order->type == OT_GOTO_WAYPOINT) {
++				GetWaypoint(order->station)->veh_scheduled--;
++			} else {
++				Station *st = GetStation(order->station);
++				switch (u->type)
++				{
++					case VEH_Train:		st->veh_scheduled[STS_VEH_TRAIN]--;	break;
++					case VEH_Ship:		st->veh_scheduled[STS_VEH_SHIP]--;	break;
++					case VEH_Aircraft:	st->veh_scheduled[STS_VEH_AIRCRAFT]--;	break;
++					case VEH_Road:		st->veh_scheduled[STS_VEH_ROAD]--;
++						if (u->cargo_type == CT_PASSENGERS)
++							st->veh_scheduled[STS_VEH_BUS]--;
++						else
++							st->veh_scheduled[STS_VEH_TRUCK]--;
++						break;
++				}
++			}
+ 			u->num_orders--;
+ 
+ 			if (sel_ord < u->cur_order_index)
+@@ -459,6 +491,10 @@
+ 			u = u->next_shared;
+ 		}
+ 
++		/* Give the item free */
++		order->type = OT_NOTHING;
++		order->next = NULL;
++
+ 		RebuildVehicleLists();
+ 	}
+ 
+@@ -1033,6 +1069,24 @@
+ 
+ 	order = NULL;
+ 	while (cur != NULL) {
++		// decrease vehicles scheduled for station
++		if (cur->type == OT_GOTO_WAYPOINT) {
++			GetWaypoint(cur->station)->veh_scheduled--;
++		} else {
++			Station *st = GetStation(cur->station);
++			switch (v->type)
++			{
++				case VEH_Train:		st->veh_scheduled[STS_VEH_TRAIN]--;	break;
++				case VEH_Ship:		st->veh_scheduled[STS_VEH_SHIP]--;	break;
++				case VEH_Aircraft:	st->veh_scheduled[STS_VEH_AIRCRAFT]--;	break;
++				case VEH_Road:		st->veh_scheduled[STS_VEH_ROAD]--;
++					if (v->cargo_type == CT_PASSENGERS)
++						st->veh_scheduled[STS_VEH_BUS]--;
++					else
++						st->veh_scheduled[STS_VEH_TRUCK]--;
++					break;
++			}
++		}
+ 		if (order != NULL) {
+ 			order->type = OT_NOTHING;
+ 			order->next = NULL;
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2465)
++++ settings.c	(working copy)
+@@ -851,6 +851,11 @@
+ 	{"full_load_any",				SDT_BOOL,		(void*)true,	&_patches.full_load_any,				NULL},
+ 	{"modified_catchment", 	SDT_BOOL,		(void*)true,	&_patches.modified_catchment,		NULL},
+ 
++	{"nsr_speed",	SDT_BOOL,	(void*)true,	&_patches.nsr_speed,	NULL},
++	{"nsr_age",	SDT_BOOL,	(void*)true,	&_patches.nsr_age,	NULL},
++	{"nsr_wait_days",	SDT_BOOL,	(void*)true,	&_patches.nsr_wait_days,	NULL},
++	{"nsr_wait_cargo",	SDT_BOOL,	(void*)true,	&_patches.nsr_wait_cargo,	NULL},
++	{"nsr_town_rating",	SDT_BOOL,	(void*)true,	&_patches.nsr_town_rating,	NULL},
+ 
+ 	{"inflation",						SDT_BOOL,		(void*)true,	&_patches.inflation,						NULL},
+ 	{"selectgoods",					SDT_BOOL,		(void*)true,	&_patches.selectgoods,					NULL},
+Index: waypoint.c
+===================================================================
+--- waypoint.c	(revision 2465)
++++ waypoint.c	(working copy)
+@@ -13,6 +13,7 @@
+ #include "table/sprites.h"
+ #include "table/strings.h"
+ #include "table/track_land.h"
++#include "gui.h"
+ 
+ enum {
+ 	/* Max waypoints: 64000 (8 * 8000) */
+@@ -201,6 +202,7 @@
+ 		wp->deleted = 0;
+ 		wp->xy = tile;
+ 		wp->build_date = _date;
++		InitializeWaypointStats(wp);
+ 
+ 		if (wp->town_index == STR_NULL)
+ 			MakeDefaultWaypointName(wp);
+@@ -440,18 +442,33 @@
+ 	SLE_CONDVAR(Waypoint, build_date, SLE_UINT16, 3, 255),
+ 	SLE_CONDVAR(Waypoint, stat_id, SLE_UINT8, 3, 255),
+ 
++//	SLE_CONDVAR(Waypoint,months_counted,	SLE_UINT16, 15, 255),
++
+ 	SLE_END()
+ };
+ 
++static const SaveLoad _stats_desc[] = {
++	SLE_CONDVAR(StationStats,this_month,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,last_month,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,month_min,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,month_max,	SLE_UINT16, 15, 255),
++	SLE_CONDVAR(StationStats,average,	SLE_UINT32, 15, 255),
++	SLE_END()
++};
++
+ static void Save_WAYP(void)
+ {
+ 	Waypoint *wp;
++//	int i;
+ 
+ 	FOR_ALL_WAYPOINTS(wp) {
+ 		if (wp->xy != 0) {
+ 			SlSetArrayIndex(wp->index);
+ 			SlObject(wp, _waypoint_desc);
+ 		}
++//		for (i = 0; i < STS_VEH_TYPES; i++) 
++//			SlObject(&wp->vehicles[i], _stats_desc);
++
+ 	}
+ }
+ 
+@@ -467,9 +484,222 @@
+ 
+ 		wp = GetWaypoint(index);
+ 		SlObject(wp, _waypoint_desc);
++		InitializeWaypointStats(wp);
+ 	}
+ }
+ 
+ const ChunkHandler _waypoint_chunk_handlers[] = {
+ 	{ 'CHKP', Save_WAYP, Load_WAYP, CH_ARRAY | CH_LAST},
+ };
++
++void WaypointMonthlyLoop(void)
++{
++	Waypoint *wp;
++	StationStats *sts;
++	int i;
++
++ 	FOR_ALL_WAYPOINTS(wp) {
++		// if we have stats for this station the number of counted months is >0
++		if (wp->months_counted > 0)
++		{
++			// update vehicle-counts and min/max
++			for (i = 0; i < STS_WP_TYPES / 2; i++) {
++				sts = &wp->vehicles[i];
++				if (sts->month_max == 0) sts->month_min = sts->this_month;
++				sts->month_min = min(sts->month_min, sts->this_month);
++				sts->month_max = max(sts->month_max, sts->this_month);
++				sts->average = CalcNewAverage(sts->average, sts->this_month * STS_MULTIPLIER, wp->months_counted - 1);
++				sts->last_month = sts->this_month;
++				sts->this_month = 0;
++			}
++			if (wp->months_counted == (wp->months_counted /12) * 12)
++			{ // do this once a year to have yearly stats
++				for (i = STS_WP_TYPES / 2; i < STS_WP_TYPES; i++) {
++					sts = &wp->vehicles[i];
++					if (sts->month_max == 0) sts->month_min = sts->this_month;
++					sts->month_min = min(sts->month_min, sts->this_month);
++					sts->month_max = max(sts->month_max, sts->this_month);
++					sts->average = CalcNewAverage(sts->average, sts->this_month * STS_MULTIPLIER, (wp->months_counted / 12) - 1);
++					sts->last_month = sts->this_month;
++					sts->this_month = 0;
++				}
++			}
++			wp->months_counted++; // one more month counted
++		}
++		InvalidateWindow(WC_STATION_STATS, wp->index);
++	}
++}
++
++void SearchVehiclesForWaypoint(Waypoint *wp)
++{
++	Vehicle *v;
++	Order* ord;
++	
++	ord = NULL;
++	if (wp->xy == 0) return;
++	wp->veh_scheduled = 0;
++	
++	FOR_ALL_VEHICLES(v) {
++	
++		//Now run this stuff for sane vehicles only
++		if ( (v->num_orders != 0) && (v->owner == GetTileOwner(wp->xy)) &&
++			( (v->type == VEH_Train) && (v->subtype == TS_Front_Engine) ) )       //Trains (first engine, that contains the orders)
++		{
++			ord = v->orders;
++			while(ord != NULL) {
++				if (ord->station == wp->index && ord->type == OT_GOTO_WAYPOINT) {
++					wp->veh_scheduled++;
++					break;
++				}
++				ord = ord->next;
++			}
++		}
++	} 
++}
++
++void InitializeWaypointStats(Waypoint *wp)
++{
++	StationStats *sts;
++
++	wp->months_counted = 0;
++	for (sts = wp->vehicles; sts != endof(wp->vehicles); sts++) {
++		sts->last_month = 0;
++		sts->this_month = 0;
++		sts->month_min = 65535;
++		sts->month_max = 0;
++		sts->average = 0;
++	}
++	SearchVehiclesForWaypoint(wp);
++}
++
++void WaypointStatsWndProc(Window *w, WindowEvent *e);
++
++Widget _waypoint_stats_widgets[] = {
++{    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5, STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,   RESIZE_NONE,    14,    11,   288,     0,    13, STR_WAYPOINT_VIEWPORT, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,    14,   289,   300,     0,    13, 0x0,         STR_STICKY_BUTTON},
++{      WWT_EMPTY,   RESIZE_NONE,     0,     0,     0,     0,     0, 0x0, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   150,    14,    25, STR_RESET_STATISTICS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   151,   300,    14,    25, STR_TRAINS, 0x0},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,    14,     0,   300,    26,    37, STR_STS_TOGGLE_MONTH_YEAR, 0x0},
++{     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   300,    38,   140, 0x0, 0x0},
++{      WIDGETS_END},
++};
++
++WindowDesc _waypoint_view_stats = {
++	-1, -1, 301, 141,
++	WC_WAYPOINT_STATS, 0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS | WDF_STICKY_BUTTON,
++	_waypoint_stats_widgets,
++	WaypointStatsWndProc
++};
++
++void DrawWaypointStatWindow(Window *w, Waypoint *wp)
++{
++	int i, j, x, y;
++	
++	//Get the Station name
++	SetDParam(0, wp->index);
++	//First draw the widgets
++	DrawWindowWidgets(w);
++
++	x = 10;
++	y = 40;
++	DrawString(x, y,	STR_SCHEDULED, 0);
++	if (_show_yearly_stats) {
++		DrawString(x, y + 20,	STR_STS_VEHICLES_LAST_YEAR, 0);
++		DrawString(x, y + 32,	STR_STS_VEHICLES_THIS_YEAR, 0);
++		SetDParam(0, max((wp->months_counted - 1) / 12 ,0));
++		DrawString(x, y + 90,	STR_STS_YEARS_COUNTED_NUM, 0);
++	} else {
++		DrawString(x, y + 20,	STR_VEHICLES_MONTH, 0);
++		DrawString(x, y + 32,	STR_VEHICLES_CURRENT, 0);
++		SetDParam(0, max(wp->months_counted - 1,0));
++		DrawString(x, y + 90,	STR_MONTHS_COUNTED_NUM, 0);
++	}
++	DrawString(x, y + 50,	STR_AVERAGE, 0);
++	DrawString(x, y + 62,	STR_MINIMUM, 0);
++	DrawString(x, y + 74,	STR_MAXIMUM, 0);
++
++	x = 170;
++	SetDParam(0, wp->veh_scheduled);
++	DrawStringRightAligned(x, y, STR_NUMBER, 0);
++	DrawStringRightAligned(290, y, STR_STS_NOT_SCHEDULED, 0);
++	if (wp->veh_scheduled != 0) {
++		CLRBIT(w->disabled_state, 5);
++	} else {
++		SETBIT(w->disabled_state, 5);
++	}
++
++	j = _show_yearly_stats ? 2 : 0;
++	for (i = 0; i < STS_WP_TYPES / 2; i++)
++	{
++		SetDParam(0, wp->vehicles[i+j].last_month);
++		DrawStringRightAligned(x + i * 120, y + 20, STR_NUMBER, 0);
++		SetDParam(0, wp->vehicles[i+j].this_month);
++		DrawStringRightAligned(x + i * 120, y + 32, STR_WHITE_NUMBER, 0);
++
++		if (wp->months_counted > (_show_yearly_stats ? 12 : 1)) {
++			SetDParam(0, wp->vehicles[i+j].average / STS_MULTIPLIER);
++			DrawStringRightAligned(x + i * 120, y + 50, STR_SILVER_NUMBER, 0);
++			SetDParam(0, wp->vehicles[i+j].month_min);
++			DrawStringRightAligned(x + i * 120, y + 62, STR_ORANGE_NUMBER, 0);
++			SetDParam(0, wp->vehicles[i+j].month_max);
++			DrawStringRightAligned(x + i * 120, y + 74, STR_LTBLUE_NUMBER, 0);
++		}
++	}
++}
++
++void WaypointStatsWndProc(Window *w, WindowEvent *e)
++{
++	Waypoint *wp = GetWaypoint(w->window_number);
++	switch(e->event)
++	{
++		case WE_TICK: {
++//			static int counter = 0;
++//			if (++counter % 40) return;
++//			SearchVehiclesForWaypoint(wp, &w->custom[0]);
++			w->custom[0] = wp->veh_scheduled;
++			InvalidateWindow(WC_WAYPOINT_STATS, w->window_number);
++			break;
++		}
++		case WE_PAINT: {
++			DrawWaypointStatWindow(w, wp);
++			break;
++			}
++		case WE_CLICK: {
++			switch (e->click.widget)
++			{
++				case 4:			// Reset Statistics
++					if (GetTileOwner(wp->xy) == _current_player) {
++						InitializeWaypointStats(wp);
++						InvalidateWindow(WC_WAYPOINT_STATS, w->window_number);
++					}
++					break;
++				case 5:			//Trains
++					ShowWaypointTrains(_current_player, wp->index, CARGO_MASK_ALL);
++					break;
++				case 6:
++				_show_yearly_stats ^= 1;
++				InvalidateWindow(WC_WAYPOINT_STATS, w->window_number);
++				break;
++			}
++		} break;
++		case WE_DESTROY: {
++			DeleteWindowById(WC_TRAINS_LIST, GetTileOwner(wp->xy) + ( (wp->index + 1) << 8));
++		} break;
++	}
++}
++
++void ShowWaypointStatsWindow(Waypoint *wp)
++{
++	Window *w;
++	byte color;
++
++	w = AllocateWindowDescFront(&_waypoint_view_stats, wp->index);
++	if (w) {
++		color = GetTileOwner(wp->xy);
++		if (color != 0x10)
++			w->caption_color = color;
++	}
++}
+Index: waypoint.h
+===================================================================
+--- waypoint.h	(revision 2465)
++++ waypoint.h	(working copy)
+@@ -2,6 +2,7 @@
+ #define WAYPOINT_H
+ 
+ #include "pool.h"
++#include "station.h"
+ 
+ struct Waypoint {
+ 	TileIndex xy;
+@@ -11,12 +12,20 @@
+ 	byte town_cn;          // The Nth waypoint for this town (consecutive number)
+ 	StringID string;       // If this is zero, town + town_cn is used for naming
+ 
++	StationStats vehicles[STS_WP_TYPES];
++	uint16 veh_scheduled;
++	uint16 months_counted;
++
+ 	ViewportSign sign;
+ 	uint16 build_date;
+ 	byte stat_id;
+ 	byte deleted;          // this is a delete counter. when it reaches 0, the waypoint struct is deleted.
+ };
+ 
++void InitializeWaypointStats(Waypoint *wp);
++void ShowWaypointStatsWindow(Waypoint *wp);
++void ShowWaypointTrains(int player, int waypoint, uint32 cargomask);
++
+ enum {
+ 	RAIL_TYPE_WAYPOINT = 0xC4,
+ 	RAIL_WAYPOINT_TRACK_MASK = 1,
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2465)
++++ train_gui.c	(working copy)
+@@ -15,6 +15,7 @@
+ #include "engine.h"
+ #include "vehicle_gui.h"
+ #include "depot.h"
++#include "waypoint.h"
+ 
+ int _traininfo_vehicle_pitch = 0;
+ 
+@@ -327,7 +328,7 @@
+ 	}
+ }
+ 
+-static void DrawTrainImage(const Vehicle *v, int x, int y, int count, int skip, VehicleID selection)
++void DrawTrainImage(const Vehicle *v, int x, int y, int count, int skip, VehicleID selection)
+ {
+ 	int max_x = x + count * 29;
+ 
+@@ -1294,7 +1295,8 @@
+ 		int max;
+ 		int i;
+ 
+-		BuildVehicleList(vl, VEH_Train, owner, station);
++//		BuildVehicleList(vl, VEH_Train, owner, station);
++		BuildVehicleListMasked(vl, &w->listopt, owner);
+ 		SortVehicleList(vl);
+ 
+ 		SetVScrollCount(w, vl->list_length);
+@@ -1490,6 +1492,10 @@
+ 		w = AllocateWindowDescFront(&_other_player_trains_desc, (station << 16) | player);
+ 	}
+ 	if (w) {
++		w->listopt.cargo_mask = CARGO_MASK_ALL;
++		w->listopt.veh_type_mask = 1 << VEH_Train;
++		w->listopt.xy = GetStation(station)->xy;
++
+ 		w->caption_color = player;
+ 		w->hscroll.cap = 10;
+ 		w->vscroll.cap = 7; // maximum number of vehicles shown
+@@ -1499,3 +1505,27 @@
+ 		w->resize.height = 220 - (PLY_WND_PRC__SIZE_OF_ROW_SMALL * 3); /* Minimum of 4 vehicles */
+ 	}
+ }
++
++void ShowWaypointTrains(int player, int waypoint, uint32 cargomask)
++{
++	Window *w;
++
++	if (player == _local_player) {
++		w = AllocateWindowDescFront(&_player_trains_desc, (waypoint << 16) | player);
++	} else {
++		w = AllocateWindowDescFront(&_other_player_trains_desc, (waypoint << 16) | player);
++	}
++	if (w) {
++		w->listopt.cargo_mask = cargomask;
++		w->listopt.veh_type_mask = 1 << VEH_Train;
++		w->listopt.xy = GetWaypoint(waypoint)->xy;
++
++		w->caption_color = player;
++		w->hscroll.cap = 10;
++		w->vscroll.cap = 7; // maximum number of vehicles shown
++		w->widget[7].unkA = (w->vscroll.cap << 8) + 1;
++		w->resize.step_height = PLY_WND_PRC__SIZE_OF_ROW_SMALL;
++		w->resize.step_width = 29;
++		w->resize.height = 220 - (PLY_WND_PRC__SIZE_OF_ROW_SMALL * 3); /* Minimum of 4 vehicles */
++	}
++}
+Index: station.h
+===================================================================
+--- station.h	(revision 2465)
++++ station.h	(working copy)
+@@ -6,6 +6,34 @@
+ #include "tile.h"
+ #include "vehicle.h"
+ 
++enum {
++	STS_AMOUNT_IN = 0,
++    STS_AMOUNT_OUT = 1,
++	STS_AMOUNT_TRANSFER = 2,
++	STS_VEH_TRAIN = 0,
++	STS_VEH_ROAD = 1,
++	STS_VEH_BUS = 2,
++	STS_VEH_TRUCK = 3,
++	STS_VEH_SHIP = 4,
++	STS_VEH_AIRCRAFT = 5,
++	STS_MULTIPLIER = 10000, // controls how much digits behind comma are stored for average
++	STS_VEH_TYPES = 6,
++	STS_AMNT_TYPES = 3,
++	STS_WP_TYPES = 4,
++	STS_WP_ORDER = 0, // reached WP by order
++	STS_WP_PATHFIND = 1, // reached WP by normal pathfinding
++	STS_WP_ORDER_YEAR = 2, // yearly stats by order
++	STS_WP_PATHFIND_YEAR =3 , // yearly stats by pathfinding
++};
++
++typedef struct StationStats {
++	uint16 this_month;
++	uint16 last_month;
++	uint16 month_min;
++	uint16 month_max;
++	uint32 average;
++} StationStats;
++
+ typedef struct GoodsEntry {
+ 	uint16 waiting_acceptance;
+ 	byte days_since_pickup;
+@@ -14,7 +42,12 @@
+ 	byte enroute_time;
+ 	byte last_speed;
+ 	byte last_age;
++
++	StationStats cargo_amount[STS_AMNT_TYPES];
++	uint16 months_counted;
+ 	int32 feeder_profit;
++	int last_vehicle_type;
++	uint16 last_vehicle_speed;
+ } GoodsEntry;
+ 
+ typedef enum RoadStopType {
+@@ -43,6 +76,24 @@
+ 	struct RoadStop *prev;
+ } RoadStop;
+ 
++enum {
++	RATING_WAITING = 0,
++	RATING_SPEED = 1,
++	RATING_AGE = 2,
++	RATING_PICKUP = 3,
++	RATING_OTHER = 4,
++	RATING_TOTAL = 5,
++	NUM_RATINGS = 6
++};
++
++typedef struct RatingStats {
++	uint16 last_speed;
++	byte last_age;
++	byte days_since_pickup;
++	uint16 waiting;
++	int16 ratings[NUM_RATINGS];
++} RatingStats;
++
+ struct Station {
+ 	TileIndex xy;
+ 	RoadStop *bus_stops;
+@@ -77,7 +128,12 @@
+ 
+ 	VehicleID last_vehicle;
+ 	GoodsEntry goods[NUM_CARGO];
++	RatingStats rating_stats[NUM_CARGO];
+ 
++	StationStats vehicles[STS_VEH_TYPES];
++	uint16 veh_scheduled[STS_VEH_TYPES];
++	uint16 months_counted;
++
+ 	/* Stuff that is no longer used, but needed for conversion */
+ 	TileIndex bus_tile_obsolete;
+ 	TileIndex lorry_tile_obsolete;
+@@ -122,9 +178,16 @@
+ 
+ void ModifyStationRatingAround(TileIndex tile, byte owner, int amount, uint radius);
+ 
++void SearchVehiclesForStation(Station *st);
++void ShowStationStatsWindow(int station);
++void InitializeStationStats(Station *st);
++uint32 CalcNewAverage(uint32 average, uint32 lastamount, uint16 times_counted);
++void ShowPlayerVehicles(int player, int station, uint32 type_mask, uint32 cargo_mask, TileIndex xy);
++
+ TileIndex GetStationTileForVehicle(const Vehicle *v, const Station *st);
+ 
+ void ShowStationViewWindow(int station);
++void ShowStationRatingDetail(int station);
+ void UpdateAllStationVirtCoord(void);
+ 
+ VARDEF SortStruct *_station_sort;
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2465)
++++ settings_gui.c	(working copy)
+@@ -715,6 +715,12 @@
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_SERVICEATHELIPAD, "service_at_helipad", &_patches.serviceathelipad,					0,  0,  0, NULL},
+ 	{PE_BOOL, 0, STR_CONFIG_PATCHES_CATCHMENT, "modified_catchment", &_patches.modified_catchment, 0, 0, 0, NULL},
+ 
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_NSR_SPEED, "nsr_speed", &_patches.nsr_speed,					0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_NSR_AGE, "nsr_age", &_patches.nsr_age,					0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_NSR_TOWN_RATING, "nsr_town_rating", &_patches.nsr_town_rating,					0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_NSR_WAIT_DAYS, "nsr_wait_days", &_patches.nsr_wait_days,					0,  0,  0, NULL},
++	{PE_BOOL,		0, STR_CONFIG_PATCHES_NSR_WAIT_CARGO, "nsr_wait_cargo", &_patches.nsr_wait_cargo,					0,  0,  0, NULL},
++
+ };
+ 
+ static const PatchEntry _patches_economy[] = {
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 2465)
++++ ship_gui.c	(working copy)
+@@ -57,7 +57,7 @@
+ 	y += 10;
+ }
+ 
+-static void DrawShipImage(const Vehicle *v, int x, int y, VehicleID selection)
++void DrawShipImage(const Vehicle *v, int x, int y, VehicleID selection)
+ {
+ 	int image = GetShipImage(v, 6);
+ 	uint32 ormod = SPRITE_PALETTE(PLAYER_SPRITE_COLOR(v->owner));
+Index: window.h
+===================================================================
+--- window.h	(revision 2465)
++++ window.h	(working copy)
+@@ -5,6 +5,11 @@
+ 
+ typedef union WindowEvent WindowEvent;
+ 
++enum {
++	CARGO_MASK_ALL = 0xFFFFFFFF,
++	VEHICLE_MASK_ALL = 0xFFFFFFFF
++};
++
+ //typedef void WindowProc(Window *w, int event, int wparam, long lparam);
+ 
+ typedef void WindowProc(Window *w, WindowEvent *e);
+@@ -307,6 +312,8 @@
+ 
+ 	Message message;
+ 	byte custom[WINDOW_CUSTOM_SIZE];
++	
++	DisplayListOptions listopt; // Options for displaying vehicle-lists
+ };
+ 
+ typedef struct {

@@ -1,0 +1,470 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2438)
++++ station_cmd.c	(working copy)
+@@ -60,8 +60,8 @@
+ 
+ // FIXME -- need to be embedded into Airport variable. Is dynamically
+ // deducteable from graphics-tile array, so will not be needed
+-const byte _airport_size_x[] = {4, 6, 1, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+-const byte _airport_size_y[] = {3, 6, 1, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
++const byte _airport_size_x[] = {4, 6, 1, 6, 7, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 1};
++const byte _airport_size_y[] = {3, 6, 1, 6, 7, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+ 
+ void ShowAircraftDepotWindow(uint tile);
+ extern void UpdateAirplanesOnNewStation(Station *st);
+@@ -165,6 +165,8 @@
+ 			case AT_LARGE:         ret = max(ret, CA_AIR_LARGE);    break;
+ 			case AT_METROPOLITAN:  ret = max(ret, CA_AIR_METRO);    break;
+ 			case AT_INTERNATIONAL: ret = max(ret, CA_AIR_INTER);    break;
++			case AT_HELIDEPOT:      ret = max(ret, CA_AIR_HELIPORT); break;
++			case AT_HELIDEPOT_LARGE:      ret = max(ret, CA_AIR_HELIPORT); break;
+ 		}
+ 	}
+ 
+@@ -310,6 +312,7 @@
+ 		1 << M(STR_SV_STNAME_DOCKS),            /* 3 */
+ 		0x1FF << M(STR_SV_STNAME_BUOY_1),       /* 4 */
+ 		1 << M(STR_SV_STNAME_HELIPORT),         /* 5 */
++		1 << M(STR_SV_STNAME_HELIPORT),         /* 6 */
+ 	};
+ 
+ 	Town *t = st->town;
+@@ -1647,12 +1650,28 @@
+ 	66,
+ };
+ 
++// Helidepot (2x2)
++static const byte _airport_map5_tiles_helidepot[] = {
++	116, 32,
++	115, 117,
++};
++
++// Helidepot (3x3)
++static const byte _airport_map5_tiles_helidepot_large[] = {
++	116, 122, 123,
++	121, 124, 120,
++	115, 118, 119,
++
++};
++
+ static const byte * const _airport_map5_tiles[] = {
+ 	_airport_map5_tiles_country,				// Country Airfield (small)
+ 	_airport_map5_tiles_town,						// City Airport (large)
+ 	_airport_map5_tiles_heliport,				// Heliport
+ 	_airport_map5_tiles_metropolitan,   // Metropolitain Airport (large)
+ 	_airport_map5_tiles_international,	// International Airport (xlarge)
++	_airport_map5_tiles_helidepot,				// Helidepot (2x2)
++	_airport_map5_tiles_helidepot_large,				// Helidepot (3x3)
+ };
+ 
+ /** Place an Airport.
+@@ -1672,6 +1691,7 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+ 	/* Check if a valid, buildable airport was chosen for construction */
++	DEBUG(misc,0)("%d) %d %d", p1, p1 > lengthof(_airport_map5_tiles), !HASBIT(GetValidAirports(), p1));
+ 	if (p1 > lengthof(_airport_map5_tiles) || !HASBIT(GetValidAirports(), p1)) return CMD_ERROR;
+ 
+ 	tile = TILE_FROM_XY(x,y);
+@@ -1690,7 +1710,7 @@
+ 		}
+ 		if (num >= 2) {
+ 			SetDParam(0, t->index);
+-			return_cmd_error(STR_2035_LOCAL_AUTHORITY_REFUSES);
++	//		return_cmd_error(STR_2035_LOCAL_AUTHORITY_REFUSES);
+ 		}
+ 	}
+ 
+@@ -1733,7 +1753,7 @@
+ 
+ 		// if airport type equals Heliport then generate
+ 		// type 5 name, which is heliport, otherwise airport names (1)
+-		if (!GenerateStationName(st, tile, (p1 == AT_HELIPORT) ? 5 : 1))
++		if (!GenerateStationName(st, tile, (p1 == AT_HELIPORT || p1 == AT_HELIDEPOT || p1 == AT_HELIDEPOT_LARGE) ? 5 : 1))
+ 			return CMD_ERROR;
+ 
+ 		if (flags & DC_EXEC)
+Index: airport_gui.c
+===================================================================
+--- airport_gui.c	(revision 2438)
++++ airport_gui.c	(working copy)
+@@ -150,13 +150,13 @@
+ 		if (!HASBIT(avail_airports, 1) && sel == AT_LARGE) sel = AT_SMALL;
+ 
+ 		/* 'Country Airport' starts at widget 3, and if its bit is set, it is available,
+-		 * so take its opposite value to set the disabled_state. There are only 5 available
+-		 * airports, so XOr with 0x1F (1 1111) */
+-		w->disabled_state = (avail_airports ^ 0x1F) << 3;
++		 * so take its opposite value to set the disabled_state. There are only 6 available
++		 * airports, so XOr with 0x7F (111 1111) */
++		w->disabled_state = (avail_airports ^ 0x7F) << 3;
+ 
+ 		_selected_airport_type = sel;
+-		// select default the coverage area to 'Off' (8)
+-		w->click_state = ((1<<3) << sel) | ((1<<8) << _station_show_coverage);
++		// select default the coverage area to 'Off' (10)
++		w->click_state = ((1<<3) << sel) | ((1<<10) << _station_show_coverage);
+ 		SetTileSelectSize(_airport_size_x[sel],_airport_size_y[sel]);
+ 
+      if (_patches.modified_catchment) {
+@@ -167,6 +167,8 @@
+          case AT_LARGE:    rad = CA_AIR_LARGE; break;
+          case AT_METROPOLITAN: rad = CA_AIR_METRO; break;
+          case AT_INTERNATIONAL: rad = CA_AIR_INTER; break;
++         case AT_HELIDEPOT: rad = CA_AIR_HELIPORT; break;
++         case AT_HELIDEPOT_LARGE: rad = CA_AIR_HELIPORT; break;
+        }
+ 		 }
+ 
+@@ -175,19 +177,19 @@
+ 		DrawWindowWidgets(w);
+     // strings such as 'Size' and 'Coverage Area'
+ 		DrawStringCentered(74, 16, STR_305B_SIZE, 0);
+-		DrawStringCentered(74, 78, STR_3066_COVERAGE_AREA_HIGHLIGHT, 0);
+-		DrawStationCoverageAreaText(2, 104, (uint)-1, rad);
++		DrawStringCentered(74, 102, STR_3066_COVERAGE_AREA_HIGHLIGHT, 0);
++		DrawStationCoverageAreaText(2, 128, (uint)-1, rad);
+ 		break;
+ 	}
+ 
+ 	case WE_CLICK: {
+ 		switch(e->click.widget) {
+-		case 3: case 4: case 5: case 6: case 7:
++		case 3: case 4: case 5: case 6: case 7: case 8: case 9:
+ 			_selected_airport_type = e->click.widget - 3;
+ 			SndPlayFx(SND_15_BEEP);
+ 			SetWindowDirty(w);
+ 			break;
+-		case 8: case 9:
++		case 10: case 11:
+ 			_station_show_coverage = e->click.widget - 8;
+ 			SndPlayFx(SND_15_BEEP);
+ 			SetWindowDirty(w);
+@@ -214,19 +216,21 @@
+ static const Widget _build_airport_picker_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5,										STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,     7,    11,   147,     0,    13, STR_3001_AIRPORT_SELECTION,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{      WWT_PANEL,   RESIZE_NONE,     7,     0,   147,    14,   130, 0x0,													STR_NULL},
++{      WWT_PANEL,   RESIZE_NONE,     7,     0,   147,    14,   160, 0x0,													STR_NULL},
+ {WWT_NODISTXTBTN,   RESIZE_NONE,    14,     2,    73,    27,    38, STR_3059_SMALL,							STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT},
+ {WWT_NODISTXTBTN,   RESIZE_NONE,    14,    74,   145,    27,    38, STR_305A_LARGE,							STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT},
+ {WWT_NODISTXTBTN,   RESIZE_NONE,    14,     2,   145,    63,    74, STR_306B_HELIPORT,						STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT},
+ {WWT_NODISTXTBTN,   RESIZE_NONE,    14,     2,   145,    39,    50, STR_305AA_LARGE,	  					STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT},
+ {WWT_NODISTXTBTN,   RESIZE_NONE,    14,     2,   145,    51,    62, STR_305AB_LARGE,	  					STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT},
+-{   WWT_CLOSEBOX,   RESIZE_NONE,    14,    14,    73,    88,    98, STR_02DB_OFF,								STR_3065_DON_T_HIGHLIGHT_COVERAGE},
+-{   WWT_CLOSEBOX,   RESIZE_NONE,    14,    74,   133,    88,    98, STR_02DA_ON,									STR_3064_HIGHLIGHT_COVERAGE_AREA},
++{WWT_NODISTXTBTN,   RESIZE_NONE,    14,     2,   145,    75,    86, STR_306B_HELIPORT,						STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT}, // Helidepot (2x2)
++{WWT_NODISTXTBTN,   RESIZE_NONE,    14,     2,   145,    87,    98, STR_306B_HELIPORT,						STR_3058_SELECT_SIZE_TYPE_OF_AIRPORT}, // Helidepot (3x3)
++{   WWT_CLOSEBOX,   RESIZE_NONE,    14,    14,    73,    112,    122, STR_02DB_OFF,								STR_3065_DON_T_HIGHLIGHT_COVERAGE},
++{   WWT_CLOSEBOX,   RESIZE_NONE,    14,    74,   133,    112,    122, STR_02DA_ON,									STR_3064_HIGHLIGHT_COVERAGE_AREA},
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _build_airport_desc = {
+-	-1, -1, 148, 131, // height, 130+1
++	-1, -1, 148, 161, // height, 160+1
+ 	WC_BUILD_STATION,WC_BUILD_TOOLBAR,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
+ 	_build_airport_picker_widgets,
+Index: airport_movement.h
+===================================================================
+--- airport_movement.h	(revision 2438)
++++ airport_movement.h	(working copy)
+@@ -259,6 +259,21 @@
+ 	{ 70,  9,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 8 - circle #4 (south)
+ };
+ 
++// Helidepot
++static const AirportMovingData _airport_moving_data_helidepot[11] = {
++	{  5,  23,AMED_EXACTPOS,1},						// 00 - At heliport terminal
++	{  2,  23,AMED_HELI_RAISE,0},						// 01 - Take off (play sound)
++	{ -3,  23,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 02 - In position above landing spot helicopter
++	{ -3,  23,AMED_HELI_LOWER,0},					// 03 - Land
++	{  2,  23,0,0},									// 04 - Goto terminal on ground
++	{-31, 73,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 05 - Circle #1 (north-east)
++	{-31,-43,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 06 - Circle #2 (north-west)
++	{ 49,-43,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 07 - Circle #3 (south-west)
++	{ 70, 23,AMED_NOSPDCLAMP | AMED_SLOWTURN,0},	// 08 - Circle #4 (south)
++	{23, 23,AMED_NOSPDCLAMP | AMED_SLOWTURN,3},	// 09 Go to position for Hangarentrance in air
++	{23, 8,AMED_EXACTPOS,3},						// 10 In Hangar 1
++};
++
+ ///////////////////////////////////////////////////////////////////////
+ /////**********Movement Machine on Airports*********************///////
+ // first element of depots array tells us how many depots there are (to know size of array)
+@@ -446,12 +461,32 @@
+ 	{MAX_ELEMENTS,0,0,0} // end marker. DO NOT REMOVE
+ };
+ 
++// heliports
++static const TileIndexDiffC _airport_depots_helidepot[] = {{10, 0}};
++static const byte _airport_helipad_helidepot[] = {1, 1};
++static const AirportFTAbuildup _airport_fta_helidepot[] = {
++	{0,HELIPAD1,HELIPAD1_block,4},
++	{1,HELITAKEOFF,NOTHING_block,0}, // takeoff
++	{2,255,AIRPORT_BUSY_block,0}, {2,HELILANDING,0,3}, {2,HELITAKEOFF,0,1},
++	{3,HELILANDING,AIRPORT_BUSY_block,4},
++	{4,HELIENDLANDING,AIRPORT_BUSY_block,4}, {4,HELIPAD1,HELIPAD1_block,0}, {4,HANGAR,0,9},  {4,HELITAKEOFF,0,1},
++	// In Air
++	{5,0,NOTHING_block,6},
++	{6,0,NOTHING_block,7},
++	{7,0,NOTHING_block,8},
++	{8,FLYING,NOTHING_block,4}, {8,HELILANDING,HELIPAD1_block,2}, // landing
++	{9,255,HANGAR2_AREA_block,4}, {9,HANGAR,0,10}, {9,0,0,4},
++	{10,HANGAR,NOTHING_block,9},
++	{MAX_ELEMENTS,0,0,0} // end marker. DO NOT REMOVE
++};
++
+ static const AirportMovingData * const _airport_moving_datas[] = {
+ 	_airport_moving_data_country,				// Country Airfield (small) 4x3
+ 	_airport_moving_data_town,					// City Airport (large) 6x6
+ 	_airport_moving_data_heliport,			// Heliport
+ 	_airport_moving_data_metropolitan,	// Metropolitain Airport (large) - 2 runways
+ 	_airport_moving_data_international,	// International Airport (xlarge) - 2 runways
++	_airport_moving_data_helidepot,
+ 	NULL,
+ 	NULL,
+ 	NULL,
+@@ -461,7 +496,6 @@
+ 	NULL,
+ 	NULL,
+ 	NULL,
+-	NULL,
+ 	_airport_moving_data_oilrig					// Oilrig
+ };
+ 
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2438)
++++ table/sprites.h	(working copy)
+@@ -45,7 +45,7 @@
+ 	SPR_CANALS_BASE		= 5126,
+ 	SPR_SLOPES_BASE		= SPR_CANALS_BASE + 70,
+ 	SPR_AUTORAIL_BASE		= SPR_SLOPES_BASE + 78,
+-	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized
++	SPR_OPENTTD_BASE	= SPR_AUTORAIL_BASE + 55, // can be lowered once autorail.grf is finalized (currently 5329)
+ 
+ 	SPR_BLOT = SPR_OPENTTD_BASE + 32, // colored circle (mainly used as vehicle profit marker and for sever compatibility)
+ 
+@@ -221,6 +221,14 @@
+ 	SPR_AIRPORT_RADAR_C							= 2691,
+ 	SPR_AIRPORT_HELIPAD							= SPR_OPENTTD_BASE + 31,
+ 
++	/* New heliports */
++	SPR_HELIPORT_TERM = SPR_OPENTTD_BASE + 99,
++	SPR_HELIPORT_TOWER = SPR_OPENTTD_BASE + 100,
++	SPR_HELIPORT_HANGAR = SPR_OPENTTD_BASE + 101,
++	SPR_HELIPORT_HANGAR_END = SPR_OPENTTD_BASE + 102,
++	SPR_HELIPORT_PAD = SPR_OPENTTD_BASE + 103,
++	SPR_HELIPORT_CONCRETE = SPR_OPENTTD_BASE + 104,
++
+ 	/* Road Stops */
+ 	/* Road stops have a ground tile and 3 buildings, one on each side
+ 			(except the side where the entry is). These are marked _A _B and _C
+Index: table/station_land.h
+===================================================================
+--- table/station_land.h	(revision 2438)
++++ table/station_land.h	(working copy)
+@@ -676,6 +676,73 @@
+ 	TILE_SEQ_END()
+ };
+ 
++// new heliport stuff
++const DrawTileSeqStruct _station_display_datas_0115[] = {
++	// helipad is base
++	{ 0,  0,  0,  1, 16,  6, 0x8A67 },  // fences top
++	{ 0, 15,  0, 16,  1,  6, 0x8A68 }, // fences right
++	TILE_SEQ_END()
++};
++
++static const DrawTileSeqStruct _station_display_datas_0116[] = {
++	// ground tile is base
++	//{ 0, 0,  0, 16,  1,  6, 0x8A68 }, // fences left
++	{ 0,  0,  0,  1, 16,  6, 0x8A67 },  // fences top
++	{ 0,  0,  0,  2, 16, 28, SPR_OPENTTD_BASE + 99 }, // building
++	TILE_SEQ_END()
++};
++
++static const DrawTileSeqStruct _station_display_datas_0117[] = {
++	// ground tile is base
++	{ 15,  0,  0,  1, 16,  6, 0x8A67 },  // fences bottom
++	{ 0, 15,  0, 16,  1,  6, 0x8A68 }, // fences right
++	TILE_SEQ_END()
++};
++
++const DrawTileSeqStruct _station_display_datas_0118[] = {
++	// helipad is base
++	{ 0, 15,  0, 16,  1,  6, 0x8A68 }, // fences right
++	TILE_SEQ_END()
++};
++
++const DrawTileSeqStruct _station_display_datas_0119[] = {
++	// helipad is base
++	{ 0, 15,  0, 16,  1,  6, 0x8A68 }, // fences right
++	{ 15,  0,  0,  1, 16,  6, 0x8A67 },  // fences bottom
++	TILE_SEQ_END()
++};
++
++const DrawTileSeqStruct _station_display_datas_0120[] = {
++	// ground tile is base
++	{ 15,  0,  0,  1, 16,  6, 0x8A67 },  // fences bottom
++	TILE_SEQ_END()
++};
++
++static const DrawTileSeqStruct _station_display_datas_0121[] = {
++	// ground tile is base
++	{ 0,  0,  0,  1, 16,  6, 0x8A67 },  // fences top
++	TILE_SEQ_END()
++};
++
++static const DrawTileSeqStruct _station_display_datas_0122[] = {
++	// ground tile is base
++	{ 0, 0,  0, 16,  1,  6, 0x8A68 }, // fences left
++	{ 0,  0,  0,  2, 16, 28, SPR_OPENTTD_BASE + 100 },	// building
++	TILE_SEQ_END()
++};
++
++static const DrawTileSeqStruct _station_display_datas_0123[] = {
++	// ground tile is base
++	{ 0,  0,  0,  2, 16, 28, SPR_OPENTTD_BASE + 101 }, // hangar
++	{ 0,  0,  0,  2, 16, 28, SPR_OPENTTD_BASE + 102 },
++	TILE_SEQ_END()
++};
++
++static const DrawTileSeqStruct _station_display_datas_0124[] = {
++	// ground tile is base
++	TILE_SEQ_END()
++};
++
+ static const DrawTileSprites _station_display_datas[] = {
+ 	{ 0x3F4, _station_display_datas_0 },
+ 	{ 0x3F3, _station_display_datas_1 },
+@@ -792,4 +859,14 @@
+ 	{ 0xA4A, _station_display_datas_0112 },
+ 	{ 0xA4A, _station_display_datas_0113 },
+ 	{ 0xA4A, _station_display_datas_0114 },
++	{ SPR_OPENTTD_BASE + 103, _station_display_datas_0115 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0116 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0117 },
++	{ SPR_OPENTTD_BASE + 103, _station_display_datas_0118 },
++	{ SPR_OPENTTD_BASE + 103, _station_display_datas_0119 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0120 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0121 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0122 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0123 },
++	{ SPR_OPENTTD_BASE + 104, _station_display_datas_0124 },
+ };
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream
+Index: airport.c
+===================================================================
+--- airport.c	(revision 2438)
++++ airport.c	(working copy)
+@@ -7,6 +7,7 @@
+ AirportFTAClass *CountryAirport;
+ AirportFTAClass *CityAirport;
+ AirportFTAClass *Heliport, *Oilrig;
++AirportFTAClass *Helidepot, *Helidepot_Large;
+ AirportFTAClass *MetropolitanAirport;
+ AirportFTAClass *InternationalAirport;
+ 
+@@ -96,6 +97,34 @@
+ 	);
+ 
+ 	Oilrig = Heliport;  // exactly the same structure for heliport/oilrig, so share state machine
++
++	// Helidepot (2x2)
++	Helidepot = (AirportFTAClass *)malloc(sizeof(AirportFTAClass));
++
++	AirportFTAClass_Constructor(
++		Helidepot,
++		NULL,
++		_airport_helipad_helidepot,
++		8,
++		HELICOPTERS_ONLY,
++		_airport_fta_helidepot,
++		_airport_depots_helidepot,
++		lengthof(_airport_depots_helidepot)
++	);
++
++	// Helidepot (3x3)
++	Helidepot_Large = (AirportFTAClass *)malloc(sizeof(AirportFTAClass));
++
++	AirportFTAClass_Constructor(
++		Helidepot_Large,
++		NULL,
++		_airport_helipad_helidepot,
++		8,
++		HELICOPTERS_ONLY,
++		_airport_fta_helidepot,
++		_airport_depots_helidepot,
++		lengthof(_airport_depots_helidepot)
++	);
+ }
+ 
+ void UnInitializeAirports(void)
+@@ -105,6 +134,8 @@
+ 	AirportFTAClass_Destructor(Heliport);
+ 	AirportFTAClass_Destructor(MetropolitanAirport);
+ 	AirportFTAClass_Destructor(InternationalAirport);
++	AirportFTAClass_Destructor(Helidepot);
++	AirportFTAClass_Destructor(Helidepot_Large);
+ }
+ 
+ static void AirportFTAClass_Constructor(AirportFTAClass *Airport,
+@@ -298,7 +329,7 @@
+ 	"DUMMY"	// extra heading for 255
+ };
+ 
+-/*
++/* 
+ static void AirportPrintOut(const AirportFTAClass *Airport, const bool full_report)
+ {
+ 	AirportFTA *temp;
+@@ -351,6 +382,8 @@
+ 		case AT_HELIPORT: Airport = Heliport; break;
+ 		case AT_OILRIG: Airport = Oilrig; break;
+ 		case AT_INTERNATIONAL: Airport = InternationalAirport; break;
++		case AT_HELIDEPOT: Airport = Helidepot; break;
++		case AT_HELIDEPOT_LARGE: Airport = Helidepot_Large; break;
+ 		default:
+ 			#ifdef DEBUG__
+ 				printf("Airport AircraftNextAirportPos_and_Order not yet implemented\n");
+Index: airport.h
+===================================================================
+--- airport.h	(revision 2438)
++++ airport.h	(working copy)
+@@ -13,6 +13,8 @@
+ 	AT_HELIPORT = 2,
+ 	AT_METROPOLITAN = 3,
+ 	AT_INTERNATIONAL = 4,
++	AT_HELIDEPOT = 5,
++	AT_HELIDEPOT_LARGE = 6,
+ 	AT_OILRIG = 15
+ };
+ 
+@@ -61,6 +63,8 @@
+ 	// 1990-1-1 is --> 25568
+ 	if (_date >= 21915) {SETBIT(bytemask, 3);}	// metropilitan airport 1980
+ 	if (_date >= 25568) {SETBIT(bytemask, 4);}	// international airport 1990
++	if (_date >= 15706) {SETBIT(bytemask, 5);}	// Helidepot (2x2)
++	if (_date >= 15706) {SETBIT(bytemask, 6);}	// Helidepot (3x3)
+ 	return bytemask;
+ }
+ 
+Index: spritecache.c
+===================================================================
+--- spritecache.c	(revision 2438)
++++ spritecache.c	(working copy)
+@@ -730,7 +730,7 @@
+ 	"cached_sprites.xx3",
+ };
+ 
+-#define OPENTTD_SPRITES_COUNT 98
++#define OPENTTD_SPRITES_COUNT 104
+ static const uint16 _openttd_grf_indexes[] = {
+ 	SPR_OPENTTD_BASE+0,	SPR_OPENTTD_BASE+7, // icons etc
+ 	134, 134,  // euro symbol medium size

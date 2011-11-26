@@ -1,0 +1,240 @@
+Index: viewport.c
+===================================================================
+--- viewport.c	(revision 2484)
++++ viewport.c	(working copy)
+@@ -599,10 +599,65 @@
+ 
+ #endif
+ 
++// [direction][side]
++static const int AutorailType[6][2] = {
++	{ HT_DIR_X,  HT_DIR_X },
++	{ HT_DIR_Y,  HT_DIR_Y },
++	{ HT_DIR_HU, HT_DIR_HL },
++	{ HT_DIR_HL, HT_DIR_HU },
++	{ HT_DIR_VL, HT_DIR_VR },
++	{ HT_DIR_VR, HT_DIR_VL }
++};
++
++#include "table/autorail.h"
++
+ static void DrawSelectionSprite(uint32 image, const TileInfo *ti)
+ {
++	uint dir;
++	uint32 i;
++	uint height;
++	TileIndex end = TILE_FROM_XY(_thd.selend.x, _thd.selend.y);
++	bool en = 0;
++	
+ 	if (_added_tile_sprite && !(_thd.drawstyle & HT_LINE)) { // draw on real ground
+-		DrawGroundSpriteAt(image, ti->x, ti->y, ti->z + 7);
++		if ((_thd.userdata == VPM_X_OR_Y) && _thd.height_follow > 0 && (TileHeight(ti->tile) * 8) <= _thd.height_follow + 8)
++		{
++			if (_thd.selstart.x - _thd.selend.x > 0)
++				dir = 0;
++			else if (_thd.selstart.y - _thd.selend.y < 0)
++				dir = 1;
++			else if (_thd.selstart.x - _thd.selend.x < 0)
++				dir = 2;
++			else
++				dir = 3;
++				
++			height = _thd.height_follow;
++			if (height < (GetTileZ(ti->tile))) height = GetTileZ(ti->tile);
++			
++			// check end tile to make sure it is valid	
++			if ((GetTileSlope(end, NULL) == 0 && (TileHeight(end) * 8) == height - 8) || (GetTileSlope(end, NULL) != 0 && GetTileZ(end) + 8 == height))
++				en = 1;
++			
++			if ((GetTileZ(ti->tile)) + 8 > height || !en)
++					i = PALETTE_TILE_RED_PULSATING;
++			else
++					i = 0;
++				
++			if (TILE_FROM_XY(_thd.selstart.x, _thd.selstart.y) == ti->tile && GetTileSlope(ti->tile, NULL) == 0 && (TileHeight(ti->tile) * 8) == height - 8) {
++				i |= SPR_AUTORAIL_BASE + AutorailTilehSprite[GetTileSlopeToHeight(height, height + 8, dir)][ AutorailType[dir & 1][0] ];
++				AddSortableSpriteToDraw(i,ti->x, ti->y, 0x10, 0x10, 1, height);
++			} else if (TILE_FROM_XY(_thd.selend.x, _thd.selend.y) == ti->tile && GetTileSlope(ti->tile, NULL) == 0 && (TileHeight(ti->tile) * 8) == height - 8) {
++				i |= SPR_AUTORAIL_BASE + AutorailTilehSprite[GetTileSlopeToHeight(height, height + 8, (dir + 2) % 4)][ AutorailType[(dir + 2) & 1][0] ];
++				AddSortableSpriteToDraw(i,ti->x, ti->y, 0x10, 0x10, 1, height);
++			} else {
++				i |= SPR_AUTORAIL_BASE + AutorailTilehSprite[GetTileSlopeAtHeight(ti->tile, height + 7)][ AutorailType[dir & 1][0] ];
++				AddSortableSpriteToDraw(i,ti->x, ti->y, 0x10, 0x10, 1, height + 8);
++			}
++		}
++		if (_thd.userdata == VPM_X_OR_Y && _thd.height_follow > 0)
++			DrawGroundSpriteAt(0x3228000 | image, ti->x, ti->y, ti->z + 7);
++		else
++			DrawGroundSpriteAt(image, ti->x, ti->y, ti->z + 7);
+ 	} else { // draw on top of foundation
+ 		AddSortableSpriteToDraw(image, ti->x, ti->y, 0x10, 0x10, 1, ti->z + 7);
+ 	}
+@@ -628,18 +683,6 @@
+ 	return 0;
+ }
+ 
+-// [direction][side]
+-static const int AutorailType[6][2] = {
+-	{ HT_DIR_X,  HT_DIR_X },
+-	{ HT_DIR_Y,  HT_DIR_Y },
+-	{ HT_DIR_HU, HT_DIR_HL },
+-	{ HT_DIR_HL, HT_DIR_HU },
+-	{ HT_DIR_VL, HT_DIR_VR },
+-	{ HT_DIR_VR, HT_DIR_VL }
+-};
+-
+-#include "table/autorail.h"
+-
+ static void DrawTileSelection(const TileInfo *ti)
+ {
+ 	uint32 image;
+@@ -1942,6 +1985,7 @@
+ // highlighting tiles while only going over them with the mouse
+ void VpStartPlaceSizing(TileIndex tile, int user)
+ {
++	_thd.height_follow = (TileHeight(tile) + 1) * 8;	
+ 	_thd.userdata = user;
+ 	_thd.selend.x = TileX(tile) * 16;
+ 	_thd.selstart.x = TileX(tile) * 16;
+@@ -2112,7 +2156,7 @@
+ 	if (_thd.next_drawstyle == HT_POINT) { x += 8; y += 8; }
+ 
+ 	sx = _thd.selstart.x;
+-	sy = _thd.selstart.y;
++	sy = _thd.selstart.y;		
+ 
+ 	switch(method) {
+ 	case VPM_FIX_X:
+Index: viewport.h
+===================================================================
+--- viewport.h	(revision 2484)
++++ viewport.h	(working copy)
+@@ -115,6 +115,8 @@
+ 
+ 	int userdata;
+ 	TileIndex redsq;
++	
++	uint height_follow;
+ } TileHighlightData;
+ 
+ 
+Index: rail_gui.c
+===================================================================
+--- rail_gui.c	(revision 2484)
++++ rail_gui.c	(working copy)
+@@ -436,6 +436,7 @@
+ 	}
+ 
+ 	case WE_PLACE_MOUSEUP:
++		_thd.height_follow = 0;
+ 		if (e->click.pt.x != -1) {
+ 			TileIndex start_tile = e->place.starttile;
+ 			TileIndex end_tile = e->place.tile;
+Index: tile.c
+===================================================================
+--- tile.c	(revision 2484)
++++ tile.c	(working copy)
+@@ -13,7 +13,90 @@
+ 	return GB(_map_extra_bits[tile >> 2], (tile & 3) * 2, 2);
+ }
+ 
++uint GetTileSlopeAtHeight(TileIndex tile, uint h)
++{
++	uint a;
++	uint b;
++	uint c;
++	uint d;
++	uint min;
++	uint r;
+ 
++	assert(tile < MapSize());
++
++	if (TileX(tile) == MapMaxX() || TileY(tile) == MapMaxY()) {
++		return 0;
++	}
++	
++	h /= 8;	
++	
++	min = a = max(TileHeight(tile), h);
++	b = max(TileHeight(tile + TILE_XY(1,0)), h);
++	if (min >= b) min = b;
++	c = max(TileHeight(tile + TILE_XY(0,1)), h);
++	if (min >= c) min = c;
++	d = max(TileHeight(tile + TILE_XY(1,1)), h);
++	if (min >= d) min = d;
++	
++	r = 0;
++	if ((a -= min) != 0) { r += (--a << 4) + 8; }
++	if ((c -= min) != 0) { r += (--c << 4) + 4; }
++	if ((d -= min) != 0) { r += (--d << 4) + 2; }
++	if ((b -= min) != 0) { r += (--b << 4) + 1; }
++
++	return r;
++}
++
++uint GetTileSlopeToHeight(uint h1, uint h2, uint dir)
++{
++	uint a;
++	uint b;
++	uint c;
++	uint d;
++	uint min;
++	uint r;
++	
++	h1 /= 8;
++	h2 /= 8;
++	
++	if (h1 >= h2)
++		return 0;
++	
++	if (dir == 0) {
++		min = a = h2;
++		b = h1;
++		c = h2;
++		d = h1;
++	} else if (dir == 1) {
++		min = a = h1;
++		b = h1;
++		c = h2;
++		d = h2;
++	} else if (dir == 2) {
++		min = a = h1;
++		b = h2;
++		c = h1;
++		d = h2;	
++	} else {
++		min = a = h2;
++		b = h2;
++		c = h1;
++		d = h1;	
++	}
++
++	if (min >= b) min = b;
++	if (min >= c) min = c;
++	if (min >= d) min = d;
++	
++	r = 0;
++	if ((a -= min) != 0) { r += (--a << 4) + 8; }
++	if ((c -= min) != 0) { r += (--c << 4) + 4; }
++	if ((d -= min) != 0) { r += (--d << 4) + 2; }
++	if ((b -= min) != 0) { r += (--b << 4) + 1; }
++
++	return r;
++}
++
+ uint GetTileSlope(TileIndex tile, uint *h)
+ {
+ 	uint a;
+Index: tile.h
+===================================================================
+--- tile.h	(revision 2484)
++++ tile.h	(working copy)
+@@ -46,6 +46,8 @@
+ uint GetMapExtraBits(TileIndex tile);
+ 
+ uint GetTileSlope(TileIndex tile, uint *h);
++uint GetTileSlopeAtHeight(TileIndex tile, uint h);
++uint GetTileSlopeToHeight(uint h1, uint h2, uint dir);
+ uint GetTileZ(TileIndex tile);
+ 
+ static inline bool CorrectZ(uint tileh)

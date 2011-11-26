@@ -1,0 +1,14 @@
+Index: misc_gui.c
+===================================================================
+--- misc_gui.c	(revision 2673)
++++ misc_gui.c	(working copy)
+@@ -1317,7 +1317,8 @@
+ 	case WE_KEYPRESS:
+ 		switch (HandleEditBoxKey(w, 9, e)) {
+ 		case 1:
+-			HandleButtonClick(w, 11);
++			if (_saveload_mode == SLD_SAVE_GAME || _saveload_mode == SLD_SAVE_SCENARIO)
++				HandleButtonClick(w, 11);
+ 			break;
+ 		}
+ 		break;

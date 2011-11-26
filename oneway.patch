@@ -1,0 +1,560 @@
+Index: npf.c
+===================================================================
+--- npf.c	(revision 2876)
++++ npf.c	(working copy)
+@@ -653,6 +653,24 @@
+ 	return true; /* no need to check */
+ }
+ 
++static const uint16 _road_veh_fp_ax_or[4] = {
++	0x100,0x200,1,2,
++};
++
++/* Find whether we can go through a one way road, and if so provide us with a bitmask of directions
++*
++* @param tile The tile we want to know about
++* @param owner The owner of a vehicle we are pathfinding for
++*/
++static uint32 GetOneWayRoadStatus(TileIndex tile, Owner owner)
++{
++	assert(IsOneWayRoadTile(tile));
++	if (GetTileOwner(tile) == owner) /* We are the owner so follow the tile */
++		return _road_veh_fp_ax_or[GB(_m[tile].m3, 1, 2)];
++	else /* We are not the owner so ignore it */
++		return 0;
++}
++
+ /* Will just follow the results of GetTileTrackStatus concerning where we can
+  * go and where not. Uses AyStar.user_data[NPF_TYPE] as the transport type and
+  * an argument to GetTileTrackStatus. Will skip tunnels, meaning that the
+@@ -751,6 +769,8 @@
+ 		ts = TrackdirToTrackdirBits(DiagdirToDiagTrackdir(ReverseDiagdir(exitdir)));
+ 	} else {
+ 		ts = GetTileTrackStatus(dst_tile, type);
++		if (IsOneWayRoadTile(dst_tile))
++			ts ^= GetOneWayRoadStatus(dst_tile, aystar->user_data[NPF_OWNER]);
+ 	}
+ 	trackdirbits = ts & TRACKDIR_BIT_MASK; /* Filter out signal status and the unused bits */
+ 
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2876)
++++ openttd.h	(working copy)
+@@ -151,7 +151,7 @@
+ };
+ 
+ enum {
+-	NUM_PRICES = 49,
++	NUM_PRICES = 50,
+ };
+ 
+ typedef struct Prices {
+@@ -202,6 +202,7 @@
+ 	int32 roadveh_running;
+ 	int32 ship_running;
+ 	int32 build_industry;
++	int32 build_one_way_road;
+ } Prices;
+ 
+ #define GAME_DIFFICULTY_NUM 18
+Index: saveload.c
+===================================================================
+--- saveload.c	(revision 2876)
++++ saveload.c	(working copy)
+@@ -29,7 +29,7 @@
+ #include <setjmp.h>
+ 
+ enum {
+-	SAVEGAME_MAJOR_VERSION = 16,
++	SAVEGAME_MAJOR_VERSION = 17,
+ 	SAVEGAME_MINOR_VERSION = 0,
+ 
+ 	SAVEGAME_LOADABLE_VERSION = (SAVEGAME_MAJOR_VERSION << 8) + SAVEGAME_MINOR_VERSION
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2876)
++++ table/sprites.h	(working copy)
+@@ -128,11 +128,11 @@
+ 	SPR_MGLV_SNOW_OFFSET             = 26,
+ 
+ 	SPR_RAIL_SINGLE_Y           = 1005,
+-  SPR_RAIL_SINGLE_X           = 1006,
+-  SPR_RAIL_SINGLE_NORTH       = 1007,
+-  SPR_RAIL_SINGLE_SOUTH       = 1008,
+-  SPR_RAIL_SINGLE_EAST        = 1009,
+-  SPR_RAIL_SINGLE_WEST        = 1010,
++	SPR_RAIL_SINGLE_X           = 1006,
++	SPR_RAIL_SINGLE_NORTH       = 1007,
++	SPR_RAIL_SINGLE_SOUTH       = 1008,
++	SPR_RAIL_SINGLE_EAST        = 1009,
++	SPR_RAIL_SINGLE_WEST        = 1010,
+ 	SPR_RAIL_TRACK_Y						= 1011,
+ 	SPR_RAIL_TRACK_X						= 1012,
+ 	SPR_RAIL_TRACK_BASE         = 1018,
+@@ -164,23 +164,23 @@
+ 	SPR_RAIL_ROOF_GLASS_X_TILE_B			= 1085,	//second half of the roof glass
+ 	SPR_RAIL_ROOF_GLASS_Y_TILE_B			= 1086,
+ 	SPR_MONO_SINGLE_Y                 = 1087,
+-  SPR_MONO_SINGLE_X                 = 1088,
+-  SPR_MONO_SINGLE_NORTH             = 1089,
+-  SPR_MONO_SINGLE_SOUTH             = 1090,
+-  SPR_MONO_SINGLE_EAST              = 1091,
+-  SPR_MONO_SINGLE_WEST              = 1092,
++	SPR_MONO_SINGLE_X                 = 1088,
++	SPR_MONO_SINGLE_NORTH             = 1089,
++	SPR_MONO_SINGLE_SOUTH             = 1090,
++	SPR_MONO_SINGLE_EAST              = 1091,
++	SPR_MONO_SINGLE_WEST              = 1092,
+ 	SPR_MONO_TRACK_Y                  = 1093,
+ 	SPR_MONO_TRACK_BASE               = 1100,
+-  SPR_MONO_TRACK_N_S                = 1117,
++	SPR_MONO_TRACK_N_S                = 1117,
+ 	SPR_MGLV_SINGLE_Y                 = 1169,
+-  SPR_MGLV_SINGLE_X                 = 1170,
+-  SPR_MGLV_SINGLE_NORTH             = 1171,
+-  SPR_MGLV_SINGLE_SOUTH             = 1172,
+-  SPR_MGLV_SINGLE_EAST              = 1173,
+-  SPR_MGLV_SINGLE_WEST              = 1174,
++	SPR_MGLV_SINGLE_X                 = 1170,
++	SPR_MGLV_SINGLE_NORTH             = 1171,
++	SPR_MGLV_SINGLE_SOUTH             = 1172,
++	SPR_MGLV_SINGLE_EAST              = 1173,
++	SPR_MGLV_SINGLE_WEST              = 1174,
+ 	SPR_MGLV_TRACK_Y                  = 1175,
+ 	SPR_MGLV_TRACK_BASE               = 1182,
+-  SPR_MGLV_TRACK_N_S                = 1199,
++	SPR_MGLV_TRACK_N_S                = 1199,
+ 	SPR_WAYPOINT_X_1						= SPR_OPENTTD_BASE + 18,
+ 	SPR_WAYPOINT_X_2						= SPR_OPENTTD_BASE + 19,
+ 	SPR_WAYPOINT_Y_1						= SPR_OPENTTD_BASE + 20,
+@@ -875,7 +875,15 @@
+ 	SPR_IMG_TRUCK_BAY			= 750,
+ 	SPR_IMG_BRIDGE				= 2594,
+ 	SPR_IMG_ROAD_TUNNEL		= 2429,
+-	SPR_IMG_REMOVE				= 714
++	SPR_IMG_REMOVE				= 714,
++	
++	/* One way roads */
++	SPR_ONE_WAY_NE = SPR_OPENTTD_BASE + 104,
++	SPR_ONE_WAY_SE = SPR_OPENTTD_BASE + 101,
++	SPR_ONE_WAY_SW = SPR_OPENTTD_BASE + 102,
++	SPR_ONE_WAY_NW = SPR_OPENTTD_BASE + 103,
++	
++	SPR_ONE_WAY_ICO = SPR_OPENTTD_BASE + 105,
+ };
+ 
+ /** Cursor sprite numbers */
+@@ -948,7 +956,10 @@
+ 	SPR_CURSOR_TRUCK_STATION  = 2726,
+ 	SPR_CURSOR_ROAD_TUNNEL    = 2433,
+ 
++	SPR_CURSOR_ROAD_ONE_WAY = SPR_OPENTTD_BASE + 106,
++
+ 	SPR_CURSOR_CLONE = SPR_OPENTTD_BASE + 100,
++	
+ } CursorSprite;
+ 
+ /// Animation macro in table/animcursors.h (_animcursors[])
+Index: road_cmd.c
+===================================================================
+--- road_cmd.c	(revision 2876)
++++ road_cmd.c	(working copy)
+@@ -226,16 +226,19 @@
+ 			do {
+ 				if (t2&1) cost += _price.remove_road;
+ 			} while(t2>>=1);
+-
++	
++			if (HASBIT(_m[ti.tile].m3, 0))
++				cost += _price.build_one_way_road;
++	
+ 			if (flags & DC_EXEC) {
+ 				ChangeTownRating(t, -road_remove_cost[(byte)edge_road], RATING_ROAD_MINIMUM);
+-
++	
+ 				_m[tile].m5 ^= c;
++				_m[tile].m3 = 0;
+ 				if ((_m[tile].m5&0xF) == 0)
+ 					DoClearSquare(tile);
+ 				else
+ 					MarkTileDirtyByTile(tile);
+-
+ 			}
+ 			return cost;
+ 		} else if ((ti.map5 & 0xE0) == 0) { // railroad crossing
+@@ -385,6 +388,8 @@
+ 				return_cmd_error(STR_1007_ALREADY_BUILT);
+ 			goto do_clear;
+ 		}
++		if (HASBIT(_m[tile].m3, 0))
++			 	return CMD_ERROR;
+ 	} else if (ti.type == MP_RAILWAY) {
+ 		byte m5;
+ 
+@@ -480,6 +485,7 @@
+ 			SetTileType(tile, MP_STREET);
+ 			_m[tile].m5 = 0;
+ 			_m[tile].m2 = p2;
++			_m[tile].m3 = 0;
+ 			SetTileOwner(tile, _current_player);
+ 		}
+ 
+@@ -692,6 +698,71 @@
+ 	return _price.remove_road_depot;
+ }
+ 
++/** Set a one way road
++ * @param x,y tile coordinates of the tile to set one way
++ * @param p1 0 - build 1 - remove
++ * @param p2 unused
++ *
++ */
++int32 CmdBuildOneWayRoad(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++{
++	TileInfo ti;
++	int32 cost;
++	TileIndex tile;
++	int dir;
++
++	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
++	
++	if (p1 > 4) return CMD_ERROR; // check direction
++	
++	FindLandscapeHeight(&ti, x, y);
++
++	tile = ti.tile;
++
++	if (!IsTileType(tile, MP_STREET) || IsLevelCrossing(tile))
++ 		return CMD_ERROR;
++
++	if (ti.tileh != 0)
++		return_cmd_error(STR_0007_FLAT_LAND_REQUIRED);
++
++	if (!CheckOwnership(GetTileOwner(tile)))
++		return CMD_ERROR;
++
++	if (!EnsureNoVehicle(tile))
++		return CMD_ERROR;
++
++	 if (HASBIT(_m[tile].m3, 0) && !p1) { // we are changing something that is already built
++	 	dir = (GB(_m[tile].m3, 1, 2) + 2) % 4;
++		cost = 0;
++		 	
++		if (flags & DC_EXEC)
++			SB(_m[tile].m3, 1, 2, dir); // update the direction
++	} else if (HASBIT(_m[tile].m3, 0) && p1) { // we are removing it
++		cost = -_price.build_one_way_road;
++		
++		if (flags & DC_EXEC)
++			CLRBIT(_m[tile].m3, 0);
++	} else { // we are building something new
++		if (_m[tile].m5 == 0x0A)
++			dir = 0;
++		else if (_m[tile].m5 == 0x05)
++			dir = 1;
++		else
++			return CMD_ERROR;
++		
++		cost = _price.build_one_way_road;
++		
++		if (flags & DC_EXEC) {
++			SETBIT(_m[tile].m3, 0); // set the bit to enable one way roads
++			SB(_m[tile].m3, 1, 2, dir); // set the direction
++		}
++	}
++
++	MarkTileDirtyByTile(tile);
++
++	return cost;
++}
++
+ #define M(x) (1<<(x))
+ 
+ static int32 ClearTile_Road(TileIndex tile, byte flags)
+@@ -770,6 +841,13 @@
+ 	0,  0
+ };
+ 
++const uint _one_way_road_sprites[4] = {
++	SPR_ONE_WAY_NE,
++	SPR_ONE_WAY_SE,
++	SPR_ONE_WAY_SW,
++	SPR_ONE_WAY_NW,
++};
++
+ static void DrawTile_Road(TileInfo *ti)
+ {
+ 	uint32 image;
+@@ -823,6 +901,9 @@
+ 			AddSortableSpriteToDraw(image, x, y, 2, 2, 0x10, z);
+ 			drts++;
+ 		}
++
++		if (HASBIT(_m[ti->tile].m3, 0))
++			DrawGroundSprite(_one_way_road_sprites[GB(_m[ti->tile].m3, 1, 2)] | PALETTE_MODIFIER_COLOR | PLAYER_SPRITE_COLOR(GetTileOwner(ti->tile)));
+ 	} else if ( (ti->map5 & 0xE0) == 0) { // railroad crossing
+ 		int f = GetRoadFoundation(ti->tileh, ti->map5 & 0xF);
+ 		if (f) DrawFoundation(ti, f);
+@@ -910,6 +991,16 @@
+ 	}
+ }
+ 
++void DrawOneWayRoadSprite(int x, int y, int image)
++{
++	x+=33;
++	y+=17;
++	
++	DrawSprite(0x535 - (image % 2), x, y);
++	
++	DrawSprite(_one_way_road_sprites[image], x, y);
++}
++
+ static uint GetSlopeZ_Road(TileInfo *ti)
+ {
+ 	uint z = ti->z;
+Index: gfxinit.c
+===================================================================
+--- gfxinit.c	(revision 2876)
++++ gfxinit.c	(working copy)
+@@ -88,7 +88,7 @@
+ }
+ 
+ 
+-#define OPENTTD_SPRITES_COUNT 100
++#define OPENTTD_SPRITES_COUNT 106
+ static const SpriteID _openttd_grf_indexes[] = {
+ 	SPR_OPENTTD_BASE + 0, SPR_OPENTTD_BASE + 7, // icons etc
+ 	134, 134,  // euro symbol medium size
+Index: economy.c
+===================================================================
+--- economy.c	(revision 2876)
++++ economy.c	(working copy)
+@@ -761,6 +761,7 @@
+ 	1600,		// roadveh_running
+ 	5600,		// ship_running
+ 	1000000, // build_industry
++	20,		// build_one_way_road
+ };
+ 
+ void StartupEconomy(void)
+@@ -1639,8 +1640,13 @@
+ // Prices
+ static void SaveLoad_PRIC(void)
+ {
+-	SlArray(&_price, NUM_PRICES, SLE_INT32);
+-	SlArray(&_price_frac, NUM_PRICES, SLE_UINT16);
++	if (_sl_version < 17) {
++		SlArray(&_price, 49, SLE_INT32);
++		SlArray(&_price_frac, 49, SLE_UINT16);
++	} else {
++		SlArray(&_price, NUM_PRICES, SLE_INT32);
++		SlArray(&_price_frac, NUM_PRICES, SLE_UINT16);
++	}
+ }
+ 
+ // Cargo payment rates
+Index: station.h
+===================================================================
+--- station.h	(revision 2876)
++++ station.h	(working copy)
+@@ -324,4 +324,8 @@
+ 	return (_m[tile].m5 - 0x43) & 3;
+ }
+ 
++static inline bool IsOneWayRoadTile(TileIndex tile) {
++	return (IsTileType(tile, MP_STREET) && ((_m[tile].m5 & 0xF0) == 0) && (HASBIT(_m[tile].m3, 0)));
++}
++
+ #endif /* STATION_H */
+Index: road_gui.c
+===================================================================
+--- road_gui.c	(revision 2876)
++++ road_gui.c	(working copy)
+@@ -21,7 +21,6 @@
+ static void ShowBusStationPicker(void);
+ static void ShowTruckStationPicker(void);
+ static void ShowRoadDepotPicker(void);
+-
+ static bool _remove_button_clicked;
+ static bool _build_road_flag;
+ 
+@@ -107,6 +106,11 @@
+ 	VpStartPlaceSizing(tile, 4);
+ }
+ 
++static void PlaceRoad_OneWay(TileIndex tile)
++{
++	DoCommandP(tile, _remove_button_clicked, 0, CcPlaySound1D, CMD_BUILD_ONE_WAY_ROAD | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_1807_CAN_T_BUILD_ROAD_VEHICLE));
++}
++
+ typedef void OnButtonClick(Window *w);
+ 
+ static void BuildRoadClick_NE(Window *w)
+@@ -121,50 +125,54 @@
+ 	HandlePlacePushButton(w, 4, SPR_CURSOR_ROAD_NWSE, 1, PlaceRoad_NW);
+ }
+ 
++static void BuildRoadClick_OneWay(Window *w)
++{
++	HandlePlacePushButton(w, 5, SPR_CURSOR_ROAD_ONE_WAY, 1, PlaceRoad_OneWay);
++}
+ 
+ static void BuildRoadClick_Demolish(Window *w)
+ {
+-	HandlePlacePushButton(w, 5, ANIMCURSOR_DEMOLISH, 1, PlaceRoad_DemolishArea);
++	HandlePlacePushButton(w, 6, ANIMCURSOR_DEMOLISH, 1, PlaceRoad_DemolishArea);
+ }
+ 
+ static void BuildRoadClick_Depot(Window *w)
+ {
+ 	if (_game_mode == GM_EDITOR) return;
+-	if (HandlePlacePushButton(w, 6, SPR_CURSOR_ROAD_DEPOT, 1, PlaceRoad_Depot)) ShowRoadDepotPicker();
++	if (HandlePlacePushButton(w, 7, SPR_CURSOR_ROAD_DEPOT, 1, PlaceRoad_Depot)) ShowRoadDepotPicker();
+ }
+ 
+ static void BuildRoadClick_BusStation(Window *w)
+ {
+ 	if (_game_mode == GM_EDITOR) return;
+-	if (HandlePlacePushButton(w, 7, SPR_CURSOR_BUS_STATION, 1, PlaceRoad_BusStation)) ShowBusStationPicker();
++	if (HandlePlacePushButton(w, 8, SPR_CURSOR_BUS_STATION, 1, PlaceRoad_BusStation)) ShowBusStationPicker();
+ }
+ 
+ static void BuildRoadClick_TruckStation(Window *w)
+ {
+ 	if (_game_mode == GM_EDITOR) return;
+-	if (HandlePlacePushButton(w, 8, SPR_CURSOR_TRUCK_STATION, 1, PlaceRoad_TruckStation)) ShowTruckStationPicker();
++	if (HandlePlacePushButton(w, 9, SPR_CURSOR_TRUCK_STATION, 1, PlaceRoad_TruckStation)) ShowTruckStationPicker();
+ }
+ 
+ static void BuildRoadClick_Bridge(Window *w)
+ {
+ 	_build_road_flag = 0;
+-	HandlePlacePushButton(w, 9, SPR_CURSOR_BRIDGE, 1, PlaceRoad_Bridge);
++	HandlePlacePushButton(w, 10, SPR_CURSOR_BRIDGE, 1, PlaceRoad_Bridge);
+ }
+ 
+ static void BuildRoadClick_Tunnel(Window *w)
+ {
+ 	_build_road_flag = 0;
+-	HandlePlacePushButton(w, 10, SPR_CURSOR_ROAD_TUNNEL, 3, PlaceRoad_Tunnel);
++	HandlePlacePushButton(w, 11, SPR_CURSOR_ROAD_TUNNEL, 3, PlaceRoad_Tunnel);
+ }
+ 
+ static void BuildRoadClick_Remove(Window *w)
+ {
+-	if (w->disabled_state & (1<<11))
++	if (w->disabled_state & (1<<12))
+ 		return;
+ 	SetWindowDirty(w);
+ 	SndPlayFx(SND_15_BEEP);
+-	w->click_state ^= (1 << 11);
+-	SetSelectionRed((w->click_state & (1 << 11)) != 0);
++	w->click_state ^= (1 << 12);
++	SetSelectionRed((w->click_state & (1 << 12)) != 0);
+ }
+ 
+ static void BuildRoadClick_Landscaping(Window *w)
+@@ -175,6 +183,7 @@
+ static OnButtonClick * const _build_road_button_proc[] = {
+ 	BuildRoadClick_NE,
+ 	BuildRoadClick_NW,
++	BuildRoadClick_OneWay,	
+ 	BuildRoadClick_Demolish,
+ 	BuildRoadClick_Depot,
+ 	BuildRoadClick_BusStation,
+@@ -188,10 +197,10 @@
+ static void BuildRoadToolbWndProc(Window *w, WindowEvent *e) {
+ 	switch(e->event) {
+ 	case WE_PAINT:
+-		w->disabled_state &= ~(1 << 11);
+-		if (!(w->click_state & ((1<<3)|(1<<4)))) {
+-			w->disabled_state |= (1 << 11);
+-			w->click_state &= ~(1<<11);
++		w->disabled_state &= ~(1 << 12);
++		if (!(w->click_state & ((1<<3)|(1<<4)|(1 << 5)))) {
++			w->disabled_state |= (1 << 12);
++			w->click_state &= ~(1<<12);
+ 		}
+ 		DrawWindowWidgets(w);
+ 		break;
+@@ -221,7 +230,7 @@
+ 		break;
+ 
+ 	case WE_PLACE_OBJ:
+-		_remove_button_clicked = (w->click_state & (1 << 11)) != 0;
++		_remove_button_clicked = (w->click_state & (1 << 12)) != 0;
+ 		_place_proc(e->place.tile);
+ 		break;
+ 
+@@ -286,24 +295,25 @@
+ 
+ static const Widget _build_road_widgets[] = {
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     7,     0,    10,     0,    13, STR_00C5, STR_018B_CLOSE_WINDOW},
+-{    WWT_CAPTION,   RESIZE_NONE,     7,    11,   227,     0,    13, STR_1802_ROAD_CONSTRUCTION, STR_018C_WINDOW_TITLE_DRAG_THIS},
+-{  WWT_STICKYBOX,   RESIZE_NONE,     7,   228,   239,     0,    13, 0x0,                   STR_STICKY_BUTTON},
++{    WWT_CAPTION,   RESIZE_NONE,     7,    11,   249,     0,    13, STR_1802_ROAD_CONSTRUCTION, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{  WWT_STICKYBOX,   RESIZE_NONE,     7,   250,   261,     0,    13, 0x0,                   STR_STICKY_BUTTON},
+ 
+ {      WWT_PANEL,   RESIZE_NONE,     7,     0,    21,    14,    35, SPR_IMG_ROAD_NW,				STR_180B_BUILD_ROAD_SECTION},
+ {      WWT_PANEL,   RESIZE_NONE,     7,    22,    43,    14,    35, SPR_IMG_ROAD_NE,				STR_180B_BUILD_ROAD_SECTION},
+-{      WWT_PANEL,   RESIZE_NONE,     7,    44,    65,    14,    35, SPR_IMG_DYNAMITE,			STR_018D_DEMOLISH_BUILDINGS_ETC},
+-{      WWT_PANEL,   RESIZE_NONE,     7,    66,    87,    14,    35, SPR_IMG_ROAD_DEPOT,		STR_180C_BUILD_ROAD_VEHICLE_DEPOT},
+-{      WWT_PANEL,   RESIZE_NONE,     7,    88,   109,    14,    35, SPR_IMG_BUS_STATION,		STR_180D_BUILD_BUS_STATION},
+-{      WWT_PANEL,   RESIZE_NONE,     7,   110,   131,    14,    35, SPR_IMG_TRUCK_BAY,			STR_180E_BUILD_TRUCK_LOADING_BAY},
+-{      WWT_PANEL,   RESIZE_NONE,     7,   132,   173,    14,    35, SPR_IMG_BRIDGE,				STR_180F_BUILD_ROAD_BRIDGE},
+-{      WWT_PANEL,   RESIZE_NONE,     7,   174,   195,    14,    35, SPR_IMG_ROAD_TUNNEL,		STR_1810_BUILD_ROAD_TUNNEL},
+-{      WWT_PANEL,   RESIZE_NONE,     7,   196,   217,    14,    35, SPR_IMG_REMOVE, 				STR_1811_TOGGLE_BUILD_REMOVE_FOR},
+-{      WWT_PANEL,   RESIZE_NONE,     7,   218,   239,    14,    35, SPR_IMG_LANDSCAPING, STR_LANDSCAPING_TOOLBAR_TIP},
++{      WWT_PANEL,   RESIZE_NONE,     7,   44,   65,    14,    35, SPR_ONE_WAY_ICO,		STR_101B_BUILD_RAILROAD_SIGNALS},
++{      WWT_PANEL,   RESIZE_NONE,     7,    66,    87,    14,    35, SPR_IMG_DYNAMITE,			STR_018D_DEMOLISH_BUILDINGS_ETC},
++{      WWT_PANEL,   RESIZE_NONE,     7,    88,    109,    14,    35, SPR_IMG_ROAD_DEPOT,		STR_180C_BUILD_ROAD_VEHICLE_DEPOT},
++{      WWT_PANEL,   RESIZE_NONE,     7,    110,   131,    14,    35, SPR_IMG_BUS_STATION,		STR_180D_BUILD_BUS_STATION},
++{      WWT_PANEL,   RESIZE_NONE,     7,   132,   153,    14,    35, SPR_IMG_TRUCK_BAY,			STR_180E_BUILD_TRUCK_LOADING_BAY},
++{      WWT_PANEL,   RESIZE_NONE,     7,   154,   195,    14,    35, SPR_IMG_BRIDGE,				STR_180F_BUILD_ROAD_BRIDGE},
++{      WWT_PANEL,   RESIZE_NONE,     7,   196,   217,    14,    35, SPR_IMG_ROAD_TUNNEL,		STR_1810_BUILD_ROAD_TUNNEL},
++{      WWT_PANEL,   RESIZE_NONE,     7,   218,   239,    14,    35, SPR_IMG_REMOVE, 				STR_1811_TOGGLE_BUILD_REMOVE_FOR},
++{      WWT_PANEL,   RESIZE_NONE,     7,   240,   261,    14,    35, SPR_IMG_LANDSCAPING, STR_LANDSCAPING_TOOLBAR_TIP},
+ {   WIDGETS_END},
+ };
+ 
+ static const WindowDesc _build_road_desc = {
+-	640-240, 22, 240, 36,
++	640-240, 22, 262, 36,
+ 	WC_BUILD_TOOLBAR,0,
+ 	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_STICKY_BUTTON,
+ 	_build_road_widgets,
+Index: command.c
+===================================================================
+--- command.c	(revision 2876)
++++ command.c	(working copy)
+@@ -161,7 +161,9 @@
+ 
+ DEF_COMMAND(CmdCloneVehicle);
+ 
++DEF_COMMAND(CmdBuildOneWayRoad);
+ 
++
+ /* The master command table */
+ static const Command _command_proc_table[] = {
+ 	{CmdBuildRailroadTrack,                  0}, /*   0 */
+@@ -304,6 +306,7 @@
+ 	{CmdChangePatchSetting,         CMD_SERVER}, /* 114 */
+ 	{CmdReplaceVehicle,                      0}, /* 115 */
+ 	{CmdCloneVehicle,						 0}, /* 116 */
++	{CmdBuildOneWayRoad,						 0}, /* 117 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: command.h
+===================================================================
+--- command.h	(revision 2876)
++++ command.h	(working copy)
+@@ -138,6 +138,8 @@
+ 	CMD_REPLACE_VEHICLE = 115,
+ 
+ 	CMD_CLONE_VEHICLE = 116,
++	
++	CMD_BUILD_ONE_WAY_ROAD = 117,
+ 
+ };
+ 

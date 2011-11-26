@@ -1,0 +1,602 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2858)
++++ station_cmd.c	(working copy)
+@@ -1470,31 +1470,208 @@
+  * @param x,y coordinates to build bus station at
+  * @param p1 busstop entrance direction (0 through 3), where 0 is NW, 1 is NE, etc.
+  * @param p2 0 for Bus stops, 1 for truck stops
++/// */
++///
++///	Station *st;
++///	RoadStop *road_stop;
++///	RoadStop **currstop;
++///	RoadStop *prev = NULL;
++///	TileIndex tile;
++///	int32 cost;
++///	bool type = !!p2;
++///
++///	/* Saveguard the parameters */
++///	if (p1 > 3) return CMD_ERROR;
++///
++///	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
++///
++///	tile = TileVirtXY(x, y);
++///
++///	if (!(flags & DC_NO_TOWN_RATING) && !CheckIfAuthorityAllows(tile))
++///		return CMD_ERROR;
++///
++///	cost = CheckFlatLandBelow(tile, 1, 1, flags, 1 << p1, NULL);
++///	if (cost == CMD_ERROR)
++///		return CMD_ERROR;
++///
++///	st = GetStationAround(tile, 1, 1, -1);
++///	if (st == CHECK_STATIONS_ERR)
++///		return CMD_ERROR;
++///
++///	/* Find a station close to us */
++///	if (st == NULL) {
++///		st = GetClosestStationFromTile(tile, 8, _current_player);
++///		if (st!=NULL && st->facilities) st = NULL;
++///	}
++///
++///	//give us a road stop in the list, and check if something went wrong
++///	road_stop = AllocateRoadStop();
++///	if (road_stop == NULL)
++///		return_cmd_error( (type) ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
++///
++///	if ( st != NULL && (GetNumRoadStops(st, RS_BUS) + GetNumRoadStops(st, RS_TRUCK) >= ROAD_STOP_LIMIT))
++///		return_cmd_error( (type) ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
++///
++///	if (st != NULL) {
++///		if (st->owner != OWNER_NONE && st->owner != _current_player)
++///			return_cmd_error(STR_3009_TOO_CLOSE_TO_ANOTHER_STATION);
++///
++///		if (!CheckStationSpreadOut(st, tile, 1, 1))
++///			return CMD_ERROR;
++///
++///		FindRoadStationSpot(type, st, &currstop, &prev);
++///	} else {
++///		Town *t;
++///
++///		st = AllocateStation();
++///		if (st == NULL)
++///			return CMD_ERROR;
++///
++///		st->town = t = ClosestTownFromTile(tile, (uint)-1);
++///
++///		FindRoadStationSpot(type, st, &currstop, &prev);
++///
++///		if (_current_player < MAX_PLAYERS && flags&DC_EXEC)
++///			SETBIT(t->have_ratings, _current_player);
++///
++///		st->sign.width_1 = 0;
++///
++///		if (!GenerateStationName(st, tile, 0))
++///			return CMD_ERROR;
++///
++///		if (flags & DC_EXEC)
++///			StationInitialize(st, tile);
++///	}
++///
++///	cost += (type) ? _price.build_truck_station : _price.build_bus_station;
++///
++///	if (flags & DC_EXEC) {
++///		//point to the correct item in the _busstops or _truckstops array
++///		*currstop = road_stop;
++///
++///		//initialize an empty station
++///		InitializeRoadStop(road_stop, prev, tile, st->index);
++///		(*currstop)->type = type;
++///		if (!st->facilities) st->xy = tile;
++///		st->facilities |= (type) ? FACIL_TRUCK_STOP : FACIL_BUS_STOP;
++///		st->owner = _current_player;
++///
++///		st->build_date = _date;
++///
++///		ModifyTile(tile,
++///			MP_SETTYPE(MP_STATION) | MP_MAPOWNER_CURRENT |
++///			MP_MAP2 | MP_MAP5 | MP_MAP3LO_CLEAR | MP_MAP3HI_CLEAR,
++///			st->index,                       /* map2 parameter */
++///			/* XXX - Truck stops have 0x43 _m[].m5 value + direction
++///			 * XXX - Bus stops have a _map5 value of 0x47 + direction */
++///			((type) ? 0x43 : 0x47) + p1 /* map5 parameter */
++///		);
++///
++///		UpdateStationVirtCoordDirty(st);
++///		UpdateStationAcceptance(st, false);
++///		InvalidateWindow(WC_STATION_LIST, st->owner);
++///	}
++///	return cost;
++///}
++
++// Remove a bus station
++static int32 RemoveRoadStop(Station *st, uint32 flags, TileIndex tile)
++{
++	RoadStop **primary_stop;
++	RoadStop *cur_stop;
++	bool is_truck = _m[tile].m5 < 0x47;
++
++	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner))
++		return CMD_ERROR;
++
++	if (is_truck) {	//truck stop
++		primary_stop = &st->truck_stops;
++		cur_stop = GetRoadStopByTile(tile, RS_TRUCK);
++	} else {
++		primary_stop = &st->bus_stops;
++		cur_stop = GetRoadStopByTile(tile, RS_BUS);
++	}
++
++	assert(cur_stop != NULL);
++
++	if (!EnsureNoVehicle(tile))
++		return CMD_ERROR;
++
++	if (flags & DC_EXEC) {
++		int i;
++		DoClearSquare(tile);
++
++		/* Clear all vehicles destined for this station */
++		for (i = 0; i != NUM_SLOTS; i++) {
++			if (cur_stop->slot[i] != INVALID_SLOT) {
++				Vehicle *v = GetVehicle(cur_stop->slot[i]);
++				ClearSlot(v, v->u.road.slot);
++			}
++		}
++
++		cur_stop->used = false;
++		if (cur_stop->prev != NULL)	//alter previous stop
++			cur_stop->prev->next = cur_stop->next;
++
++		if (cur_stop->next != NULL)	//alter next stop
++			cur_stop->next->prev = cur_stop->prev;
++
++		//we only had one stop left
++		if (cur_stop->next == NULL && cur_stop->prev == NULL) {
++
++			//so we remove ALL stops
++			*primary_stop = NULL;
++			st->facilities &= (is_truck) ? ~FACIL_TRUCK_STOP : ~FACIL_BUS_STOP;
++
++		} else if (cur_stop == *primary_stop) {
++			//removed the first stop in the list
++			//need to set the primary element to the next stop
++			*primary_stop = (*primary_stop)->next;
++		}
++
++		UpdateStationVirtCoordDirty(st);
++		DeleteStationIfEmpty(st);
++	}
++
++	return (is_truck) ? _price.remove_truck_station : _price.remove_bus_station;
++}
++
++/** Build a bus stop on a road
++ * @param x,y tile coordinates where the stop will be built
++ * @param p1 the town that is building the road (0 if not applicable)
++ * @param p2 unused
++ *
+  */
++//int32 CmdBuildBusStopOnRoad(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++//{
+ int32 CmdBuildRoadStop(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+-	Station *st;
++	TileInfo ti;
++	int32 cost = 0;
++	Station *st = NULL;
+ 	RoadStop *road_stop;
+ 	RoadStop **currstop;
+ 	RoadStop *prev = NULL;
+ 	TileIndex tile;
+-	int32 cost;
+-	bool type = !!p2;
+ 
+-	/* Saveguard the parameters */
+-	if (p1 > 3) return CMD_ERROR;
+-
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+-	tile = TileVirtXY(x, y);
++	FindLandscapeHeight(&ti, x, y);
+ 
+-	if (!(flags & DC_NO_TOWN_RATING) && !CheckIfAuthorityAllows(tile))
++	tile = ti.tile;
++
++	if (!EnsureNoVehicle(tile))
+ 		return CMD_ERROR;
+ 
+-	cost = CheckFlatLandBelow(tile, 1, 1, flags, 1 << p1, NULL);
+-	if (cost == CMD_ERROR)
++	if ((ti.tileh != 0) && (!_patches.build_on_slopes || IsSteepTileh(ti.tileh)))
++		return_cmd_error(STR_0007_FLAT_LAND_REQUIRED);
++
++	if (!IsTileType(tile, MP_STREET) || IsLevelCrossing(tile))
+ 		return CMD_ERROR;
+ 
++	if (!(_m[tile].m5 == 0x05) && !(_m[tile].m5 == 0x0A))
++		return CMD_ERROR;
++
+ 	st = GetStationAround(tile, 1, 1, -1);
+ 	if (st == CHECK_STATIONS_ERR)
+ 		return CMD_ERROR;
+@@ -1508,10 +1685,10 @@
+ 	//give us a road stop in the list, and check if something went wrong
+ 	road_stop = AllocateRoadStop();
+ 	if (road_stop == NULL)
+-		return_cmd_error( (type) ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
++		return_cmd_error(STR_3008A_TOO_MANY_BUS_STOPS);
+ 
+ 	if ( st != NULL && (GetNumRoadStops(st, RS_BUS) + GetNumRoadStops(st, RS_TRUCK) >= ROAD_STOP_LIMIT))
+-		return_cmd_error( (type) ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
++		return_cmd_error(STR_3008A_TOO_MANY_BUS_STOPS);
+ 
+ 	if (st != NULL) {
+ 		if (st->owner != OWNER_NONE && st->owner != _current_player)
+@@ -1520,7 +1697,7 @@
+ 		if (!CheckStationSpreadOut(st, tile, 1, 1))
+ 			return CMD_ERROR;
+ 
+-		FindRoadStationSpot(type, st, &currstop, &prev);
++		FindRoadStationSpot(0, st, &currstop, &prev);
+ 	} else {
+ 		Town *t;
+ 
+@@ -1530,7 +1707,7 @@
+ 
+ 		st->town = t = ClosestTownFromTile(tile, (uint)-1);
+ 
+-		FindRoadStationSpot(type, st, &currstop, &prev);
++		FindRoadStationSpot(0, st, &currstop, &prev);
+ 
+ 		if (_current_player < MAX_PLAYERS && flags&DC_EXEC)
+ 			SETBIT(t->have_ratings, _current_player);
+@@ -1543,30 +1720,40 @@
+ 		if (flags & DC_EXEC)
+ 			StationInitialize(st, tile);
+ 	}
+-
+-	cost += (type) ? _price.build_truck_station : _price.build_bus_station;
+-
++	
+ 	if (flags & DC_EXEC) {
+ 		//point to the correct item in the _busstops or _truckstops array
+ 		*currstop = road_stop;
+ 
+ 		//initialize an empty station
+ 		InitializeRoadStop(road_stop, prev, tile, st->index);
+-		(*currstop)->type = type;
+-		if (!st->facilities) st->xy = tile;
+-		st->facilities |= (type) ? FACIL_TRUCK_STOP : FACIL_BUS_STOP;
++		(*currstop)->type = 0;
++	
++		if (!st->facilities) st->xy = tile;	
++		st->facilities |= FACIL_BUS_STOP;
++		
+ 		st->owner = _current_player;
+-
+ 		st->build_date = _date;
++		
++		bool e_dir = false;
++		
++		if (_m[tile].m5 == 0x05) {
++			DEBUG(misc,0)("East...");
++			e_dir = true;
++		} else
++			DEBUG(misc,0)("West...");
+ 
+-		ModifyTile(tile,
+-			MP_SETTYPE(MP_STATION) | MP_MAPOWNER_CURRENT |
+-			MP_MAP2 | MP_MAP5 | MP_MAP3LO_CLEAR | MP_MAP3HI_CLEAR,
+-			st->index,                       /* map2 parameter */
+-			/* XXX - Truck stops have 0x43 _m[].m5 value + direction
+-			 * XXX - Bus stops have a _map5 value of 0x47 + direction */
+-			((type) ? 0x43 : 0x47) + p1 /* map5 parameter */
+-		);
++		SetTileType(tile, MP_STREET);
++		
++		_m[tile].m3 = st->index;
++		_m[tile].m4 = st->index << 8;
++		_m[tile].m2 = p1;
++		
++		_m[tile].m5 = 0;
++		SETBIT(_m[tile].m5, 6);
++		if (e_dir) SETBIT(_m[tile].m5, 3);
++				
++		SetTileOwner(tile, _current_player);
+ 
+ 		UpdateStationVirtCoordDirty(st);
+ 		UpdateStationAcceptance(st, false);
+@@ -1575,70 +1762,6 @@
+ 	return cost;
+ }
+ 
+-// Remove a bus station
+-static int32 RemoveRoadStop(Station *st, uint32 flags, TileIndex tile)
+-{
+-	RoadStop **primary_stop;
+-	RoadStop *cur_stop;
+-	bool is_truck = _m[tile].m5 < 0x47;
+-
+-	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner))
+-		return CMD_ERROR;
+-
+-	if (is_truck) {	//truck stop
+-		primary_stop = &st->truck_stops;
+-		cur_stop = GetRoadStopByTile(tile, RS_TRUCK);
+-	} else {
+-		primary_stop = &st->bus_stops;
+-		cur_stop = GetRoadStopByTile(tile, RS_BUS);
+-	}
+-
+-	assert(cur_stop != NULL);
+-
+-	if (!EnsureNoVehicle(tile))
+-		return CMD_ERROR;
+-
+-	if (flags & DC_EXEC) {
+-		int i;
+-		DoClearSquare(tile);
+-
+-		/* Clear all vehicles destined for this station */
+-		for (i = 0; i != NUM_SLOTS; i++) {
+-			if (cur_stop->slot[i] != INVALID_SLOT) {
+-				Vehicle *v = GetVehicle(cur_stop->slot[i]);
+-				ClearSlot(v, v->u.road.slot);
+-			}
+-		}
+-
+-		cur_stop->used = false;
+-		if (cur_stop->prev != NULL)	//alter previous stop
+-			cur_stop->prev->next = cur_stop->next;
+-
+-		if (cur_stop->next != NULL)	//alter next stop
+-			cur_stop->next->prev = cur_stop->prev;
+-
+-		//we only had one stop left
+-		if (cur_stop->next == NULL && cur_stop->prev == NULL) {
+-
+-			//so we remove ALL stops
+-			*primary_stop = NULL;
+-			st->facilities &= (is_truck) ? ~FACIL_TRUCK_STOP : ~FACIL_BUS_STOP;
+-
+-		} else if (cur_stop == *primary_stop) {
+-			//removed the first stop in the list
+-			//need to set the primary element to the next stop
+-			*primary_stop = (*primary_stop)->next;
+-		}
+-
+-		UpdateStationVirtCoordDirty(st);
+-		DeleteStationIfEmpty(st);
+-	}
+-
+-	return (is_truck) ? _price.remove_truck_station : _price.remove_bus_station;
+-}
+-
+-
+-
+ // FIXME -- need to move to its corresponding Airport variable
+ // Country Airfield (small)
+ static const byte _airport_map5_tiles_country[] = {
+Index: docs/landscape.html
+===================================================================
+--- docs/landscape.html	(revision 2858)
++++ docs/landscape.html	(working copy)
+@@ -187,6 +187,13 @@
+ <li>owner: <a href="#OwnershipInfo">owner</a> of the depot</li>
+ <li>m4 bit 7 set = on snow or desert (not displayed, but set internally)</li>
+ </ul>
++m5 bit 6 set: road stop
++<ul>
++<li>owner: <a href="#OwnershipInfo">owner</a> of the road</li>
++<li>m2: Index into the array of towns, 0 for non-town roads</li>
++<li>m3 / m4: Index into array of stations</li>
++<li>m5 bit 3: clear - road in the X direction, set - road in the Y direction (road stop always perpendicular)</li>
++</ul>
+ </td></tr>
+ 
+ <tr><td valign=top nowrap><a name="Class3"><tt> 3 </tt></a></td><td>
+Index: roadveh_cmd.c
+===================================================================
+--- roadveh_cmd.c	(revision 2858)
++++ roadveh_cmd.c	(working copy)
+@@ -1034,9 +1034,16 @@
+ 	}
+ 
+ 	if (IsTileType(tile, MP_STREET)) {
+-		if ((_m[tile].m5&0xF0) == 0x20 && IsTileOwner(tile, v->owner))
+-			/* Road crossing */
++		if (HASBIT(_m[tile].m5, 5) && IsTileOwner(tile, v->owner))
++			/* Road depot */
+ 			bitmask |= _road_veh_fp_ax_or[_m[tile].m5&3];
++		if (HASBIT(_m[tile].m5, 6) && IsTileOwner(tile, v->owner)) {
++			if (HASBIT(_m[tile].m5, 3)) {
++				bitmask = 0x202;
++			} else {
++				bitmask = 0x101;
++			}
++		}
+ 	} else if (IsTileType(tile, MP_STATION)) {
+ 		if (IsTileOwner(tile, OWNER_NONE) || IsTileOwner(tile, v->owner)) {
+ 			/* Our station */
+@@ -1107,9 +1114,11 @@
+ 	} else {
+ 		if (IsTileType(desttile, MP_STREET)) {
+ 			m5 = _m[desttile].m5;
+-			if ((m5&0xF0) == 0x20)
++			if (HASBIT(m5, 5))
+ 				/* We are heading for a Depot */
+ 				goto do_it;
++			if (HASBIT(m5, 6))
++				goto do_it;
+ 		} else if (IsTileType(desttile, MP_STATION)) {
+ 			m5 = _m[desttile].m5;
+ 			if (IS_BYTE_INSIDE(m5, 0x43, 0x4B)) {
+@@ -1656,7 +1665,7 @@
+ 			RoadStop *best_stop = NULL;
+ 			uint32 mindist = 12, dist; // 12 is threshold distance.
+ 
+-		//first we need to find out how far our stations are away.
++			//first we need to find out how far our stations are away.
+ 			DEBUG(ms, 2) ("Multistop: Attempting to obtain a slot for vehicle %d at station %d (0x%x)", v->unitnumber, st->index, st->xy);
+ 			for(; rs != NULL; rs = rs->next) {
+ 				// Only consider those with at least a free slot.
+Index: road_cmd.c
+===================================================================
+--- road_cmd.c	(revision 2858)
++++ road_cmd.c	(working copy)
+@@ -815,6 +815,7 @@
+ 
+ 		drts = _road_display_table[m2][ti->map5 & 0xF];
+ 
++
+ 		while ((image = drts->image) != 0) {
+ 			int x = ti->x | drts->subcoord_x;
+ 			int y = ti->y | drts->subcoord_y;
+@@ -823,7 +824,7 @@
+ 			AddSortableSpriteToDraw(image, x, y, 2, 2, 0x10, z);
+ 			drts++;
+ 		}
+-	} else if ( (ti->map5 & 0xE0) == 0) { // railroad crossing
++	} else if (HASBIT(ti->map5, 4)) { // railroad crossing
+ 		int f = GetRoadFoundation(ti->tileh, ti->map5 & 0xF);
+ 		if (f) DrawFoundation(ti, f);
+ 
+@@ -855,7 +856,7 @@
+ 			if (pbs & TRACK_BIT_RIGHT) DrawGroundSprite(0x3F1 | PALETTE_CRASH);
+ 		}
+ 
+-	} else {
++	} else if (HASBIT(ti->map5, 5)) { // road depot
+ 		uint32 ormod;
+ 		int player;
+ 		const DrawRoadSeqStruct *drss;
+@@ -882,6 +883,47 @@
+ 			AddSortableSpriteToDraw(image, ti->x | drss->subcoord_x,
+ 				ti->y | drss->subcoord_y, drss->width, drss->height, 0x14, ti->z);
+ 		}
++	} else if (HASBIT(ti->map5, 6)) { // road stop on road
++		const DrawRoadTileStruct *drts;
++
++		if (ti->tileh != 0) {
++			int f = GetRoadFoundation(ti->tileh, ti->map5 & 0xF);
++			if (f) DrawFoundation(ti, f);
++
++			// default sloped sprites..
++			if (ti->tileh != 0) {
++				image = _road_sloped_sprites[ti->tileh - 1] + 0x53F;
++			} else  {
++				image = _road_tile_sprites_1[ti->map5 & 0xF];
++			}
++		} else {
++			image = _road_tile_sprites_1[ti->map5 & 0xF];
++		}
++
++		m2 = GB(_m[ti->tile].m4, 4, 3);
++		
++		image = 0x55B;
++		
++		if ( (ti->map5 & 8) != 0)
++			image--;	
++		
++		DrawGroundSprite(image);
++
++		//if (!(_display_opt & DO_FULL_DETAIL) || _cur_dpi->zoom == 2)
++		//	return;
++
++		//drts = _road_display_table[m2][ti->map5 & 0xF];
++
++		//while ((image = drts->image) != 0) {
++		//	int x = ti->x | drts->subcoord_x;
++		//	int y = ti->y | drts->subcoord_y;
++		//	byte z = ti->z;
++		//	if (ti->tileh != 0)	z = GetSlopeZ(x, y);
++		//	AddSortableSpriteToDraw(image, x, y, 2, 2, 0x10, z);
++		//	drts++;
++		//}	
++	} else {
++		assert(0);
+ 	}
+ }
+ 
+Index: station.h
+===================================================================
+--- station.h	(revision 2858)
++++ station.h	(working copy)
+@@ -296,6 +296,7 @@
+ }
+ 
+ static inline bool IsRoadStationTile(TileIndex tile) {
++	
+ 	return IsTileType(tile, MP_STATION) && IS_BYTE_INSIDE(_m[tile].m5, 0x43, 0x4B);
+ }
+ 
+Index: data/openttd.grf
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream
+Index: command.c
+===================================================================
+--- command.c	(revision 2858)
++++ command.c	(working copy)
+@@ -45,6 +45,8 @@
+ 
+ DEF_COMMAND(CmdBuildRoadStop);
+ 
++//DEF_COMMAND(CmdBuildRoadStopOnLoad);
++
+ DEF_COMMAND(CmdBuildLongRoad);
+ DEF_COMMAND(CmdRemoveLongRoad);
+ DEF_COMMAND(CmdBuildRoad);
+@@ -304,6 +306,7 @@
+ 	{CmdChangePatchSetting,         CMD_SERVER}, /* 114 */
+ 	{CmdReplaceVehicle,                      0}, /* 115 */
+ 	{CmdCloneVehicle,						 0}, /* 116 */
++//	{CmdBuildRoadStopOnRoad,                       0}, /*  117 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: order_gui.c
+===================================================================
+--- order_gui.c	(revision 2858)
++++ order_gui.c	(working copy)
+@@ -212,6 +212,24 @@
+ 				order.flags = OF_PART_OF_ORDERS;
+ 				order.station = GetDepotByTile(tile)->index;
+ 				return order;
++			} else if (HASBIT(_m[tile].m5, 6)) { // road stop on road
++				st = GetStation(st_index = _m[tile].m2);
++
++				if (st->owner == _current_player || st->owner == OWNER_NONE) {
++					byte facil;
++					(facil=FACIL_DOCK, v->type == VEH_Ship) ||
++					(facil=FACIL_TRAIN, v->type == VEH_Train) ||
++					(facil=FACIL_AIRPORT, v->type == VEH_Aircraft) ||
++					(facil=FACIL_BUS_STOP, v->type == VEH_Road && v->cargo_type == CT_PASSENGERS) ||
++					(facil=FACIL_TRUCK_STOP, 1);
++					
++					if (st->facilities & facil) {
++						order.type = OT_GOTO_STATION;
++						order.flags = 0;
++						order.station = st_index;
++						return order;
++					}
++				}			
+ 			}
+ 			break;
+ 
+Index: command.h
+===================================================================
+--- command.h	(revision 2858)
++++ command.h	(working copy)
+@@ -138,7 +138,8 @@
+ 	CMD_REPLACE_VEHICLE = 115,
+ 
+ 	CMD_CLONE_VEHICLE = 116,
+-
++	
++	CMD_BUILD_ROAD_STOP_ON_ROAD = 117,
+ };
+ 
+ enum {

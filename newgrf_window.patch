@@ -1,0 +1,52 @@
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2364)
++++ settings_gui.c	(working copy)
+@@ -1177,7 +1177,9 @@
+ 				if(h) GfxFillRect(1, y + 1, 267, y + 12, 156);
+ 				// XXX - will be grf name later
+ 				DoDrawString(c->filename, 25, y + 2, h ? 0xC : 0x10);
+-				DrawSprite(SPRITE_PALETTE(SPR_SQUARE | 0x30b8000), 5, y + 2);
++				
++				// green box if active
++				DrawFrameRect(5, y+2, 15, y+10, (c->flags & 0x0001)? 7 : 0, (c->flags & 0x0001)? 0x20 : 0);
+ 				y += NEWGRF_WND_PROC_ROWSIZE;
+ 			}
+ 
+@@ -1205,6 +1207,7 @@
+ 		switch(e->click.widget) {
+ 		case 3: { // select a grf file
+ 			int y = (e->click.pt.y - NEWGRF_WND_PROC_OFFSET_TOP_WIDGET) / NEWGRF_WND_PROC_ROWSIZE;
++			int y2 = NEWGRF_WND_PROC_OFFSET_TOP_WIDGET;
+ 
+ 			if (y >= w->vscroll.cap) { return;} // click out of bounds
+ 
+@@ -1214,9 +1217,26 @@
+ 
+ 			_sel_grffile = _first_grffile;
+ 			// get selected grf-file
+-			while (y-- != 0) _sel_grffile = _sel_grffile->next;
++			while (y-- != 0) {
++				_sel_grffile = _sel_grffile->next;
++				y2 += NEWGRF_WND_PROC_ROWSIZE;
++			}
++			
++			SetWindowDirty(w);
++			
++			if (e->click.pt.y-y2 < 2)
++				return;
++				
++			if (e->click.pt.y-y2 > 10)
++				return;
++				
++			if (e->click.pt.x < 5)
++				return;
+ 
+-			SetWindowDirty(w);
++			if (e->click.pt.x > 15)
++				return;
++								
++			_sel_grffile->flags ^= 0x0001;
+ 		} break;
+ 		case 9: /* Cancel button */
+ 			DeleteWindowById(WC_GAME_OPTIONS, 0);

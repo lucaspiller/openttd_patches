@@ -1,0 +1,156 @@
+Index: screenshot.c
+===================================================================
+--- screenshot.c	(revision 3007)
++++ screenshot.c	(working copy)
+@@ -164,6 +164,76 @@
+ 	DEBUG(misc, 0) ("WARNING(libpng): %s - %s", message, (char *)png_get_error_ptr(png_ptr));
+ }
+ 
++static inline TileType GetEffectiveTileType(TileIndex tile)
++{
++	TileType t = GetTileType(tile);
++
++	if (t == MP_TUNNELBRIDGE) {
++		t = _m[tile].m5;
++		if ((t & 0x80) == 0) t >>= 1;
++		if ((t & 6) == 0) {
++			t = MP_RAILWAY;
++		} else if ((t & 6) == 2) {
++			t = MP_STREET;
++		} else {
++			t = MP_WATER;
++		}
++	}
++	return t;
++}
++
++#if defined(TTD_BIG_ENDIAN)
++#	define MKCOLOR(x) BSWAP32(x)
++#elif defined(TTD_LITTLE_ENDIAN)
++#	define MKCOLOR(x) (x)
++#endif
++
++typedef struct AndOr {
++	uint32 mor;
++	uint32 mand;
++} AndOr;
++
++static inline uint32 ApplyMask(uint32 colour, const AndOr* mask)
++{
++	return (colour & mask->mand) | mask->mor;
++}
++
++static const AndOr _smallmap_contours_andor[] = {
++	{MKCOLOR(0x00000000),MKCOLOR(0xFFFFFFFF)},
++	{MKCOLOR(0x000A0A00),MKCOLOR(0xFF0000FF)},
++	{MKCOLOR(0x00D7D700),MKCOLOR(0xFF0000FF)},
++	{MKCOLOR(0x00B5B500),MKCOLOR(0xFF0000FF)},
++	{MKCOLOR(0x00000000),MKCOLOR(0xFFFFFFFF)},
++	{MKCOLOR(0x98989898),MKCOLOR(0x00000000)},
++	{MKCOLOR(0xCACACACA),MKCOLOR(0x00000000)},
++	{MKCOLOR(0x00000000),MKCOLOR(0xFFFFFFFF)},
++	{MKCOLOR(0xB5B5B5B5),MKCOLOR(0x00000000)},
++	{MKCOLOR(0x00000000),MKCOLOR(0xFFFFFFFF)},
++	{MKCOLOR(0x00B5B500),MKCOLOR(0xFF0000FF)},
++	{MKCOLOR(0x000A0A00),MKCOLOR(0xFF0000FF)},
++};
++
++static const uint32 _map_height_bits[16] = {
++	MKCOLOR(0x5A5A5A5A),
++	MKCOLOR(0x5A5B5A5B),
++	MKCOLOR(0x5B5B5B5B),
++	MKCOLOR(0x5B5C5B5C),
++	MKCOLOR(0x5C5C5C5C),
++	MKCOLOR(0x5C5D5C5D),
++	MKCOLOR(0x5D5D5D5D),
++	MKCOLOR(0x5D5E5D5E),
++	MKCOLOR(0x5E5E5E5E),
++	MKCOLOR(0x5E5F5E5F),
++	MKCOLOR(0x5F5F5F5F),
++	MKCOLOR(0x5F1F5F1F),
++	MKCOLOR(0x1F1F1F1F),
++	MKCOLOR(0x1F271F27),
++	MKCOLOR(0x27272727),
++	MKCOLOR(0x27272727),
++};
++
++#define WRITE_PIXELS_OR(dst,val)	*(uint32*)(dst) |= (val);
++
+ static bool MakePNGImage(const char *name, ScreenshotCallback *callb, void *userdata, uint w, uint h, int pixelformat, const Colour *palette)
+ {
+ 	png_color rq[256];
+@@ -173,10 +243,13 @@
+ 	uint maxlines;
+ 	png_structp png_ptr;
+ 	png_infop info_ptr;
++	
++	w = MapMaxX();
++	h = MapMaxY();
+ 
+ 	// only implemented for 8bit images so far.
+-	if (pixelformat != 8)
+-		return false;
++	//if (pixelformat != 8)
++	//	return false;
+ 
+ 	f = fopen(name, "wb");
+ 	if (f == NULL) return false;
+@@ -195,6 +268,9 @@
+ 		return false;
+ 	}
+ 
++	const num = 1;
++	const gap = 4;
++
+ 	if (setjmp(png_jmpbuf(png_ptr))) {
+ 		png_destroy_write_struct(&png_ptr, &info_ptr);
+ 		fclose(f);
+@@ -205,7 +281,7 @@
+ 
+ 	png_set_filter(png_ptr, 0, PNG_FILTER_NONE);
+ 
+-	png_set_IHDR(png_ptr, info_ptr, w, h, pixelformat, PNG_COLOR_TYPE_PALETTE,
++	png_set_IHDR(png_ptr, info_ptr, w / gap, h / gap, pixelformat, PNG_COLOR_TYPE_PALETTE,
+ 		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+ 
+ 	// convert the palette to the .PNG format.
+@@ -223,15 +299,15 @@
+ 	maxlines = clamp(65536 / w, 16, 128);
+ 
+ 	// now generate the bitmap bits
+-	buff = malloc(w * maxlines); // by default generate 128 lines at a time.
++	buff = malloc((w / gap) * num); // by default generate 1 line at a time.
+ 	if (buff == NULL) {
+ 		png_destroy_write_struct(&png_ptr, &info_ptr);
+ 		fclose(f);
+ 		return false;
+ 	}
+-	memset(buff, 0, w * maxlines); // zero the buffer to have the padding bytes set to 0
++	//memset(buff, 0, w); // zero the buffer to have the padding bytes set to 0
+ 
+-	y = 0;
++	/*y = 0;
+ 	do {
+ 		// determine # lines to write
+ 		n = min(h - y, maxlines);
+@@ -243,7 +319,19 @@
+ 		// write them to png
+ 		for (i = 0; i != n; i++)
+ 			png_write_row(png_ptr, buff + i * w);
+-	} while (y != h);
++	} while (y != h);*/
++	
++	for (y = 0; y < h; y += gap) {
++		memset(buff, 0, (w / gap) * num);
++		for (n = 0; n < w; n += gap) {
++				TileType t = GetEffectiveTileType(TileXY(n, y));
++				WRITE_PIXELS_OR(buff, (uint8)ApplyMask(_map_height_bits[TileHeight(TileXY(n, y))],&_smallmap_contours_andor[t]));
++				buff += num;
++		}
++		buff -= (w / gap) * num;
++		DEBUG(misc,0)("%d", buff);
++		png_write_row(png_ptr, buff);
++	}
+ 
+ 	png_write_end(png_ptr, info_ptr);
+ 	png_destroy_write_struct(&png_ptr, &info_ptr);

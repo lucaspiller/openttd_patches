@@ -1,0 +1,601 @@
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2289)
++++ lang/english.txt	(working copy)
+@@ -884,7 +884,7 @@
+ 
+ STR_CURR_GBP                                                    :Pounds ({POUNDSIGN})
+ STR_CURR_USD                                                    :Dollars ($)
+-STR_CURR_EUR                                                    :Euro (¤)
++STR_CURR_EUR                                                    :Euro ()
+ STR_CURR_YEN                                                    :Yen ({YENSIGN})
+ STR_CURR_ATS                                                    :Austrian Shilling (ATS)
+ STR_CURR_BEF                                                    :Belgian Franc (BEF)
+@@ -1121,6 +1121,25 @@
+ STR_WAYPOINT                                                    :{WHITE}Waypoint
+ STR_WAYPOINT_GRAPHICS_TIP                                       :{BLACK}Select waypoint type
+ 
++STR_SIGNAL_SELECTION						:{WHITE}Signal Type Selection
++STR_SIGNAL_PRESIG_COMBO						:{BLACK}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{SKIP}{STRING}
++STR_SIGNAL_NORMAL							:Normal Signals
++STR_SIGNAL_ENTRANCE							:Entrance Presignals
++STR_SIGNAL_COMBO							:Combo Presignals
++STR_SIGNAL_EXIT								:Exit Presignals
++STR_SIGNAL_COMPLETION						:{BLACK}Auto Completion
++STR_SIGNAL_DENSITY_DESC						:{BLACK}Signal Density: 
++STR_SIGNAL_DENSITY_TILES					:{GOLD}{INT32} tile(s)
++############ Leave those lines in this order!!
++STR_SIGNAL_TYPE_STANDARD					:{GOLD}Light Signals
++STR_SIGNAL_TYPE_SEMAPHORES					:{GOLD}Semaphores
++############ End of leave-in-this-order
++
++STR_SIGNAL_TYPE_TIP							:{BLACK}Select signal type
++STR_SIGNAL_DENSITY_TIP						:{BLACK}Select signal density for dragging
++STR_SIGNAL_COMPLETION_TIP					:{BLACK}With autocompletion on, signals will be built in the direction you were dragging, following the track until a junction is encountered.
++STR_SIGNAL_PRESIG_TIP						:{BLACK}Select the type of presignal, if any
++
+ STR_WAYPOINT_VIEWPORT                                           :{WHITE}{WAYPOINT}
+ STR_WAYPOINT_VIEWPORT_TINY                                      :{TINYFONT}{WHITE}{WAYPOINT}
+ STR_WAYPOINT_RAW                                                :{WAYPOINT}
+Index: ttd.h
+===================================================================
+--- ttd.h	(revision 2289)
++++ ttd.h	(working copy)
+@@ -434,7 +434,8 @@
+ 	WC_CUSTOM_CURRENCY = 0x4B,
+ 	WC_REPLACE_VEHICLE = 0x4C,
+ 	WC_HIGHSCORE_ENDSCREEN = 0x4D,
+-	WC_SIGN_LIST = 0x4E,
++	WC_BUILD_SIGNALS = 0x4E,
++	WC_SIGN_LIST = 0x4F,
+ };
+ 
+ 
+Index: table/sprites.h
+===================================================================
+--- table/sprites.h	(revision 2289)
++++ table/sprites.h	(working copy)
+@@ -60,6 +60,7 @@
+ 
+ 
+ 	/* Network GUI sprites */
++	SPR_SEMA = SPR_OPENTTD_BASE + 24,				// semaphore icon
+ 	SPR_SQUARE = SPR_OPENTTD_BASE + 23,     // colored square (used for newgrf compatibility)
+ 	SPR_LOCK = SPR_OPENTTD_BASE + 22,       // lock icon (for password protected servers)
+ 	SPR_FLAGS_BASE = SPR_OPENTTD_BASE + 90, // start of the flags block (in same order as enum NetworkLanguage)
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2289)
++++ rail_cmd.c	(working copy)
+@@ -693,14 +693,17 @@
+  * @param x,y coordinates where signals is being built
+  * @param p1 various bitstuffed elements
+  * - p1 = (bit 0-2) - track-orientation, valid values: 0-5
+- * - p1 = (bit 3)   - choose semaphores/signals or cycle normal/pre/exit/combo depending on context
++ * - p1 bit  3      - cycle normal/pre/exit/combo (only applies when signals already exist)
++ * - p1 bit  4      - choose semaphores/light signals (only applies when no signals already exist)
++ * - p1 bits 5-6    - choose presignal type (only aplies when no signals already exist)
+  * @param p2 used for CmdBuildManySignals() to copy style of first signal
+  */
+ int32 CmdBuildSingleSignal(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	TileIndex tile = TILE_FROM_XY(x, y);
+ 	bool semaphore;
+-	bool pre_signal;
++	bool pre_signal_cycle;
++	byte pre_signal_type;
+ 	uint track = p1 & 0x7;
+ 	byte m5;
+ 	int32 cost;
+@@ -714,7 +717,7 @@
+ 	m5 = _map5[tile];
+ 
+ 	/* You can't build signals in a depot, and the selected track must exist */
+-	if (m5 & 0x80 || !HASBIT(m5, track)) return CMD_ERROR;
++	if (m5 & RAIL_TYPE_SPECIAL || !HASBIT(m5, track)) return CMD_ERROR;
+ 
+ 	if (!CheckTileOwnership(tile)) return CMD_ERROR;
+ 
+@@ -735,8 +738,11 @@
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+-	// Same bit, used in different contexts
+-	semaphore = pre_signal = HASBIT(p1, 3);
++	//for when signals already exist
++	pre_signal_cycle = HASBIT(p1, 3);
++	//for placing new signals
++	semaphore = HASBIT(p1, 4);
++	pre_signal_type = (p1 >> 5) & 3;
+ 
+ 	if ((_map3_lo[tile] & _signals_table_both[track]) == 0) {
+ 		// build new signals
+@@ -759,7 +765,7 @@
+ 			_map5[tile] |= RAIL_TYPE_SIGNALS; // change into signals
+ 			_map2[tile] |= 0xF0;              // all signals are on
+ 			_map3_lo[tile] &= ~0xF0;          // no signals built by default
+-			_map3_hi[tile] = semaphore ? 4 : 0;
++			_map3_hi[tile] = (semaphore ? 4 : 0) + pre_signal_type;
+ 		}
+ 
+ 		if (p2 == 0) {
+@@ -767,7 +773,7 @@
+ 				// build new signals
+ 				_map3_lo[tile] |= _signals_table_both[track];
+ 			} else {
+-				if (pre_signal) {
++				if (pre_signal_cycle) {
+ 					// cycle between normal -> pre -> exit -> combo -> ...
+ 					byte type = (_map3_hi[tile] + 1) & 0x03;
+ 					_map3_hi[tile] &= ~0x03;
+@@ -813,10 +819,227 @@
+ 	return cost;
+ }
+ 
++static const byte _dir_from_track[14] = {
++	0,1,0,1,2,1, 0,0,
++	2,3,3,2,3,0,
++};
++
++/*  Build many signals automagically,
++ * Copy a signal along the entire length of connected rail, stopping only when a junction is reached
++ * x, y   = tile to start from
++ * railbit = the railbit (direction in which to start placing signals)
++ * signals = type of signals to copy
++ * p2  = (bit 0)			- 1 = remove signals, 0 = build signals
++ * p2  = (bit 3)			- 0 = signals, 1 = semaphores
++ * p2  = (bit 24-31)	- user defined signals_density
++ */
++int32 BuildAutoSignals(int x, int y, byte railbit, uint32 flags, uint32 p2, byte signals)
++{
++  byte signal_density = (p2 >> 24);
++	int16 signal_ctr = signal_density * 2;
++	byte signal_dir = 0;	// direction in which signals are placed 1=forward  2=backward  3=twoway
++	byte track_mode = 0;	// 128=bridge, 64=tunnel, 192=end of tunnel/bridge, 0=normal track
++	byte track_height = 0; // height of tunnel currently in
++	int32 retr, total_cost = 0;
++	TileIndex tile = TILE_FROM_XY(x, y);
++	byte m5 = _map5[tile];
++	byte m3 = _map3_lo[tile];
++	byte semaphores = (_map3_hi[tile] & ~3) ? 16 : 0;
++	int mode = p2 & 0x1;	
++	int lx, ly;
++	byte dir;
++	
++
++	// remember start position and direction
++	int sx = x, sy = y;
++	int srb = railbit;
++	
++	// get first signal mode
++	if (signals & _signals_table[railbit]) signal_dir |= 1;
++	if (signals & _signals_table_other[railbit]) signal_dir |= 2;
++
++	// check for semaphores
++	if (!(m5 & RAIL_TYPE_SPECIAL) && (m5 & RAIL_BIT_MASK) && (m5 & RAIL_TYPE_SIGNALS))
++		semaphores = (_map3_hi[tile] & ~3) ? 16 : 0; // copy signal/semaphores style (independent of GUI)
++
++	if (signal_dir == 0) 
++		return CMD_ERROR; // no signal on start tile to copy
++
++	signals = 0;
++	lx = 0;
++	ly = 0;
++
++	for(;;) {
++		x += _railbit.xinc[railbit];
++		y += _railbit.yinc[railbit];
++
++		tile = TILE_FROM_XY(x, y);
++
++		m5 = _map5[tile];
++
++		m3 = _map3_lo[tile];
++
++		dir = _dir_from_track[railbit];
++
++		if (track_mode & 128) { // currently on bridge
++			if (IsTileType(tile, MP_TUNNELBRIDGE) && ((m5 & 192) == 128))
++				// end of bridge
++				track_mode = 192;
++		} else if (track_mode & 64) { // currently in tunnel
++			if (IsTileType(tile, MP_TUNNELBRIDGE)
++			&& ((m5 & 0xF0) == 0)
++			&& ((m5 & 3) == (dir ^ 2))
++			&& (GetSlopeZ(x+8, y+8) == track_height))
++					// end of tunnel
++					track_mode = 192;  
++		} else { // currently not on bridge/in tunnel
++			if (IsTileType(tile,MP_TUNNELBRIDGE)
++			&& (((m5 >> 1) & 3) == 0) 
++			&& ((m5 & 192) == 128)
++			&& ((m5 & 1) == (dir & 1)) ) {
++				// start of bridge
++				track_mode = 128;
++			} else if (IsTileType(tile, MP_TUNNELBRIDGE) 
++			&& ((m5 & 0xF0) == 0) 
++			&& (((m5 >> 2) & 3) == 0) ) {
++				// start of tunnel
++				track_mode = 64;
++				track_height = GetSlopeZ(x+8, y+8);
++			};
++		};
++
++		/* for pieces that we cannot build signals on but are not an end of track or a junction, we continue counting. When a signal
++			 should be placed in one of these tiles, it is instead placed on the last possible place for signals, and the counting is 
++			 reset from that place. If a signal already is there, one will be placed one the first possible tile encountered.
++		   last place where a signal could be placed is remembered by lx,ly
++			 if signal==0 a signal is already on lx,ly
++		*/		
++		if ( (IsTileType(tile, MP_RAILWAY) && ((m5 & ~1) == RAIL_TYPE_WAYPOINT)	&& ((m5 & 1) == (dir & 1))) // check for waypoints
++			|| (IsTileType(tile, MP_STREET) && ((m5 >> 4) == 1)										&& (!(m5 & 8) != !(dir & 1))) // check for road crossings
++			|| (IsTileType(tile,MP_TUNNELBRIDGE) && ((m5 & 0xF8) == 0xE0)					&& ((m5 & 1) != (dir & 1))) // check overhanging bridges
++			|| (track_mode != 0) // are we on a bridge/in a tunnel
++		) {
++			if (track_mode == 192) track_mode = 0; // end of tunnel/bridge
++			signal_ctr -= 2; // these pieces are always diagonal, so count faster
++			if (signal_ctr <= 0) {
++				if (signals == 0) {
++					// signal will be placed on next available tile
++					signal_ctr = 1;
++				} else {
++					// signal will be placed on last possible tile, counting will reset from there
++					signal_ctr += signal_density * 2;
++					x = lx;
++					y = ly;
++					// Place Signal
++					retr = DoCommand(x, y, (railbit & 7) | semaphores, signals, flags, (mode == 1) ? CMD_REMOVE_SIGNALS : CMD_BUILD_SIGNALS);
++					if (retr == CMD_ERROR) return CMD_ERROR;
++					total_cost += retr;
++					signals = 0;
++					track_mode = 0;
++				};
++			};
++			continue;
++		};
++
++		if (!IsTileType(tile, MP_RAILWAY)) 
++			return total_cost;  // no more track, we are finished
++
++		if ((m5 & RAIL_TYPE_SPECIAL) || !(m5 & RAIL_BIT_MASK))
++			return total_cost;  // no more track, we are finished
++		
++		// check for valid track combination, and calculate the railbit
++		m5 &= RAIL_BIT_MASK;
++		switch (railbit) {
++			case 0: case 2: case 13: { // from SW
++				if (m5 == RAIL_BIT_DIAG1) {	// SW to NE track
++					railbit = 0;
++				} else if ((m5 & ~RAIL_BIT_UPPER) == RAIL_BIT_LOWER) { // SW to SE track
++					railbit = 3;
++				} else if ((m5 & ~RAIL_BIT_RIGHT) == RAIL_BIT_LEFT) { // SW to NW track
++					railbit = 12;
++				} else {
++					return total_cost; // unsuitable track for signals, we are finished
++				}
++			} break;
++			case 8: case 4: case 11: { // from NE
++				if (m5 == RAIL_BIT_DIAG1) { // NE to SW track
++					railbit = 8;
++				} else if ((m5 & ~RAIL_BIT_LOWER) == RAIL_BIT_UPPER) { // NE to NW track
++					railbit = 10;
++				} else if ((m5 & ~RAIL_BIT_LEFT) == RAIL_BIT_RIGHT) { // NE to SE track
++					railbit = 5;
++				} else {
++					return total_cost; // unsuitable track for signals, we are finished
++				}
++			} break;
++			case 9: case 10: case 12: { // from SE
++				if (m5 == RAIL_BIT_DIAG2) { // SE to NW track
++					railbit = 9;
++				} else if ((m5 & ~RAIL_BIT_UPPER) == RAIL_BIT_LOWER ) { // SE to SW track
++					railbit = 11;
++				} else if ((m5 & ~RAIL_BIT_LEFT) == RAIL_BIT_RIGHT) { // SE to NE track
++					railbit = 13;
++				} else {
++					return total_cost; // unsuitable track for signals, we are finished
++				}
++			} break;
++			case 1: case 3: case 5: { // from NW
++				if (m5 == RAIL_BIT_DIAG2) { // NW to SE track
++					railbit = 1;
++				} else if ((m5 & ~RAIL_BIT_LOWER) == RAIL_BIT_UPPER) { // NW to NE track
++					railbit = 2;
++				} else if((m5 & ~RAIL_BIT_RIGHT) == RAIL_BIT_LEFT) { // NW to SW track
++					railbit = 4;
++				} else {
++					return total_cost; // unsuitable track for signals, we are finished
++				}
++			} break;
++		}
++		
++		// calculate signals to place
++		signals = 0;
++		if (signal_dir & 1) signals |= _signals_table[railbit];
++		if (signal_dir & 2) signals |= _signals_table_other[railbit];
++		
++		if (x == sx && y == sy && railbit == srb) 
++			return total_cost; // back at the start, we are finished
++
++		// remember last place signals could be placed
++		lx = x;			ly = y;
++
++		m5 = _map5[tile];
++		if (mode) 
++			// when removing signals, remove all signals we encounter
++			signal_ctr =( (((m5 & RAIL_TYPE_MASK) == RAIL_TYPE_SIGNALS)) && (m3 & _signals_table_both[railbit]) ) ? 0 : 1;
++		else if (m5 & 0x3) 
++			// count faster on diagonal tracks
++			signal_ctr -= 2;
++		else
++			signal_ctr -= 1;
++
++		if (signal_ctr <= 0) {
++			signal_ctr += signal_density * 2;
++			// Place Signal
++			retr = DoCommand(lx, ly, (railbit & 7) | semaphores, signals , flags, (mode == 1) ? CMD_REMOVE_SIGNALS : CMD_BUILD_SIGNALS);
++			if (retr == CMD_ERROR) return CMD_ERROR;
++			total_cost += retr;
++			signals = 0;
++		};
++
++		// when removing signals, the last position is always handled
++		if (mode) signals = 0;
++
++	};
++
++
++};
++
++
+ /*	Build many signals by dragging: AutoSignals
+  * x,y = start tile
+  * p1  = end tile
+  * p2  = (bit 0)			- 0 = build, 1 = remove signals
++ * p2  = (bit 1)			- 1 = autocompletion on, 0 = off
+  * p2  = (bit 3)			- 0 = signals, 1 = semaphores
+  * p2  = (bit 4-6)		- track-orientation, valid values: 0-5
+  * p2  = (bit 24-31)	- user defined signals_density
+@@ -828,7 +1051,7 @@
+ 	bool error = true;
+ 	TileIndex tile = TILE_FROM_XY(x, y);
+ 	int32 ret, total_cost, signal_ctr;
+-	byte m5, semaphores = (HASBIT(p2, 3)) ? 8 : 0;
++	byte m5, semaphores = (HASBIT(p2, 3)) ? 16 : 0;
+ 	int mode = p2 & 0x1;
+ 	// for vertical/horizontal tracks, double the given signals density
+ 	// since the original amount will be too dense (shorter tracks)
+@@ -850,7 +1073,7 @@
+ 		signals = _map3_lo[tile] & _signals_table_both[railbit];
+ 		if (signals == 0) signals = _signals_table_both[railbit];
+ 
+-		semaphores = (_map3_hi[tile] & ~3) ? 8 : 0; // copy signal/semaphores style (independent of CTRL)
++		semaphores = (_map3_hi[tile] & ~3) ? 16 : 0; // copy signal/semaphores style (independent of CTRL)
+ 	} else { // no signals exist, drag a two-way signal stretch
+ 		signals = _signals_table_both[railbit];
+ 	}
+@@ -878,6 +1101,15 @@
+ 			} else {
+ 				error = false;
+ 				total_cost += ret;
++
++				/* when autocompletion is on, use that to place the rest of the signals */
++				if HASBIT(p2, 1) {
++					ret = BuildAutoSignals(x, y, railbit, flags, p2, signals);
++					if (ret == CMD_ERROR)
++						return CMD_ERROR;
++					total_cost += ret;
++					return total_cost;
++				}
+ 			}
+ 		}
+ 
+@@ -1645,12 +1877,6 @@
+ 	}
+ }
+ 
+-static const byte _dir_from_track[14] = {
+-	0,1,0,1,2,1, 0,0,
+-	2,3,3,2,3,0,
+-};
+-
+-
+ static void ChangeSignalStates(SetSignalsData *ssd)
+ {
+ 	int i;
+Index: rail_gui.c
+===================================================================
+--- rail_gui.c	(revision 2289)
++++ rail_gui.c	(working copy)
+@@ -20,7 +20,18 @@
+ static byte _build_depot_direction;
+ static byte _waypoint_count=1;
+ static byte _cur_waypoint_type;
++static byte _cur_signal_type;
++static byte _cur_presig_type;
++static bool _cur_autosig_compl;
+ 
++static const StringID _presig_types_dropdown[] = {
++	STR_SIGNAL_NORMAL,
++	STR_SIGNAL_ENTRANCE,
++	STR_SIGNAL_EXIT,
++	STR_SIGNAL_COMBO,
++	INVALID_STRING_ID
++};
++
+ struct {
+ 	byte orientation;
+ 	byte numtracks;
+@@ -33,6 +44,7 @@
+ static void ShowBuildTrainDepotPicker(void);
+ static void ShowBuildWaypointPicker(void);
+ static void ShowStationBuilder(void);
++static void ShowSignalBuilder(void);
+ 
+ typedef void OnButtonClick(Window *w);
+ 
+@@ -168,7 +180,7 @@
+ 	if (trackstat != 0) {	while (!(trackstat & 1)) { i++; trackstat >>= 1; }}
+ 
+ 	if (!_remove_button_clicked) {
+-		DoCommandP(tile, i + (_ctrl_pressed ? 8 : 0), 0, CcPlaySound1E,
++		DoCommandP(tile, i + (_ctrl_pressed ? 8 : 0) + (!HASBIT(_cur_signal_type, 0) != !_ctrl_pressed ? 16 : 0) + (_cur_presig_type << 5) , 0, CcPlaySound1E,
+ 			CMD_BUILD_SIGNALS | CMD_AUTO | CMD_MSG(STR_1010_CAN_T_BUILD_SIGNALS_HERE));
+ 	} else {
+ 		DoCommandP(tile, i, 0, CcPlaySound1E,
+@@ -268,7 +280,7 @@
+ 
+ static void BuildRailClick_AutoSignals(Window *w)
+ {
+-	HandlePlacePushButton(w, 13, ANIMCURSOR_BUILDSIGNALS, VHM_RECT, PlaceRail_AutoSignals);
++	if (HandlePlacePushButton(w, 13, ANIMCURSOR_BUILDSIGNALS, VHM_RECT, PlaceRail_AutoSignals))  ShowSignalBuilder();
+ }
+ 
+ static void BuildRailClick_Bridge(Window *w)
+@@ -347,7 +359,7 @@
+ 	// _patches.drag_signals_density is given as a parameter such that each user in a network
+ 	// game can specify his/her own signal density
+ 	DoCommandP(TILE_FROM_XY(thd->selstart.x, thd->selstart.y), TILE_FROM_XY(thd->selend.x, thd->selend.y),
+-	(_ctrl_pressed ? 1 << 3 : 0) | (trackstat << 4) | (_patches.drag_signals_density << 24),
++	(!HASBIT(_cur_signal_type, 0) != !_ctrl_pressed ? 1 << 3 : 0) | (trackstat << 4) | (_patches.drag_signals_density << 24) | (_cur_autosig_compl ? 2 : 0),
+ 	CcPlaySound1E,
+ 	(_remove_button_clicked ?	CMD_REMOVE_SIGNAL_TRACK | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_1013_CAN_T_REMOVE_SIGNALS_FROM) :
+ 	                          CMD_BUILD_SIGNAL_TRACK  | CMD_AUTO | CMD_NO_WATER | CMD_MSG(STR_1010_CAN_T_BUILD_SIGNALS_HERE) ) );
+@@ -470,6 +482,9 @@
+ 		if (w != NULL) WP(w,def_d).close=true;
+ 		w = FindWindowById(WC_BUILD_DEPOT, 0);
+ 		if (w != NULL) WP(w,def_d).close=true;
++		w = FindWindowById(WC_BUILD_SIGNALS, 0);
++		if (w != NULL) WP(w,def_d).close=true;
++
+ 		break;
+ 
+ 	case WE_PLACE_PRESIZE: {
+@@ -933,10 +948,127 @@
+ }
+ 
+ 
++static void BuildSignalWndProc(Window *w, WindowEvent *e)
++{
++	switch(e->event) {
++	case WE_PAINT: {
++		/* XXX TODO: dont always disable the buttons when more than 2 signal types are available */
++		w->disabled_state = (1 << 3) | (1 << 6);
++
++		/* XXX TODO: take into account the scroll position for setting the click state */
++		w->click_state = ((1 << 4) << _cur_signal_type) | (_cur_autosig_compl ? 1 << 9 : 0);
++
++		SetDParam(10, _presig_types_dropdown[_cur_presig_type]);
++		DrawWindowWidgets(w);
++
++		// Draw the left/right arrows in the scroll buttons
++		DrawSprite(SPR_ARROW_LEFT, 23, 31);
++		DrawSprite(SPR_ARROW_RIGHT, 113, 31);
++	
++		// Draw the string for current signal type
++		DrawStringCentered(69, 49, STR_SIGNAL_TYPE_STANDARD + _cur_signal_type, 0);
++
++		// Draw the strings for drag density
++		DrawStringCentered(69, 60, STR_SIGNAL_DENSITY_DESC, 0);
++		SetDParam(0, _patches.drag_signals_density);
++		DrawString( 50, 71, STR_SIGNAL_DENSITY_TILES , 0);
++
++		// Draw the '<' and '>' characters for the decrease/increase buttons
++		DrawStringCentered(30, 72, STR_6819, 0);
++		DrawStringCentered(40, 72, STR_681A, 0);
++
++		break;
++		}
++	case WE_CLICK: {
++		switch(e->click.widget) {
++			case 3: case 6: // scroll signal types
++				/* XXX TODO: implement scrolling */
++				break;
++			case 4: case 5: // select signal type
++				/* XXX TODO: take into account the scroll position for changing selected type */
++				_cur_signal_type = e->click.widget - 4;
++				SndPlayFx(SND_15_BEEP);
++				SetWindowDirty(w);
++				break;
++			case 7: // decrease drag density
++				if (_patches.drag_signals_density > 1) { 
++					--_patches.drag_signals_density;
++					SndPlayFx(SND_15_BEEP);
++					SetWindowDirty(w);
++				};
++				break;
++			case 8: // increase drag density
++				if (_patches.drag_signals_density < 20) {
++					++_patches.drag_signals_density;
++					SndPlayFx(SND_15_BEEP);
++					SetWindowDirty(w);
++				};
++				break;
++			case 9: // autosignal mode toggle button
++				_cur_autosig_compl = !_cur_autosig_compl;
++				SndPlayFx(SND_15_BEEP);
++				SetWindowDirty(w);
++				break;
++			case 10: case 11: // presignal-type dropdown list
++				ShowDropDownMenu(w, _presig_types_dropdown, _cur_presig_type, 11, 0, 0);
++				break;
++		}
++		break;
++	case WE_DROPDOWN_SELECT: // change presignal type
++		_cur_presig_type = e->dropdown.index;
++		SetWindowDirty(w);
++		break;
++	}
++
++	case WE_MOUSELOOP:
++		if (WP(w,def_d).close)
++			DeleteWindow(w);
++		return;
++
++	case WE_DESTROY:
++		if (!WP(w,def_d).close)
++			ResetObjectToPlace();
++		break;
++	}
++}
++
++static const Widget _build_signal_widgets[] = {
++{   WWT_CLOSEBOX, RESIZE_NONE,    7,    0,   10,    0,   13, STR_00C5									, STR_018B_CLOSE_WINDOW},
++{   WWT_CAPTION,  RESIZE_NONE,    7,   11,  139,    0,   13, STR_SIGNAL_SELECTION			, STR_018C_WINDOW_TITLE_DRAG_THIS},
++{   WWT_PANEL,    RESIZE_NONE,    7,    0,  139,   14,  114, 0x0											, STR_NULL},
++{   WWT_PANEL,    RESIZE_NONE,    7,   20,   30,   29,   39, 0x0											, STR_SIGNAL_TYPE_TIP},
++{   WWT_PANEL,    RESIZE_NONE,    7,   43,   64,   24,   45, 0x50B										, STR_SIGNAL_TYPE_TIP},
++{   WWT_PANEL,    RESIZE_NONE,    7,   75,   96,   24,   45, SPR_SEMA									, STR_SIGNAL_TYPE_TIP},
++{   WWT_PANEL,    RESIZE_NONE,    7,  109,  119,   29,   39, 0x0											, STR_SIGNAL_TYPE_TIP},
++{   WWT_IMGBTN,   RESIZE_NONE,    3,   25,   34,   72,   80, 0x0											, STR_SIGNAL_DENSITY_TIP},
++{   WWT_IMGBTN,   RESIZE_NONE,    3,   35,   44,   72,   80, 0x0											, STR_SIGNAL_DENSITY_TIP}, 
++{   WWT_TEXTBTN,  RESIZE_NONE,    7,   20,  119,   84,   95, STR_SIGNAL_COMPLETION		, STR_SIGNAL_COMPLETION_TIP},
++{   WWT_6,        RESIZE_NONE,    7,   10,  129,   99,  110, STR_SIGNAL_PRESIG_COMBO	, STR_SIGNAL_PRESIG_TIP},
++{   WWT_CLOSEBOX, RESIZE_NONE,    7,  118,  128,  100,  109, STR_0225									, STR_SIGNAL_PRESIG_TIP},
++{   WIDGETS_END},
++};
++
++static const WindowDesc _build_signal_desc = {
++	-1,-1, 140, 115,
++	WC_BUILD_SIGNALS,WC_BUILD_TOOLBAR,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET,
++	_build_signal_widgets,
++	BuildSignalWndProc
++};
++
++static void ShowSignalBuilder(void)
++{
++	_cur_presig_type = 0;
++	AllocateWindowDesc(&_build_signal_desc);
++}
++
+ void InitializeRailGui(void)
+ {
+ 	_build_depot_direction = 3;
+ 	_railstation.numtracks = 1;
+ 	_railstation.platlength = 1;
+ 	_railstation.dragdrop = true;
++	_cur_signal_type = 0;
++	_cur_presig_type = 0;
++	_cur_autosig_compl = false;
+ }

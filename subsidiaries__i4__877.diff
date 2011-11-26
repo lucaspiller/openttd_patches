@@ -1,0 +1,3251 @@
+Index: station_cmd.c
+===================================================================
+--- station_cmd.c	(revision 2424)
++++ station_cmd.c	(working copy)
+@@ -18,6 +18,7 @@
+ #include "player.h"
+ #include "airport.h"
+ #include "sprite.h"
++#include "network.h"
+ #include "npf.h"
+ #include "depot.h"
+ 
+@@ -423,7 +424,7 @@
+ 	Station* st;
+ 
+ 	FOR_ALL_STATIONS(st) {
+-		if (st->xy != 0 && (owner == OWNER_SPECTATOR || st->owner == owner)) {
++		if (st->xy != 0 && (owner == OWNER_SPECTATOR || IsSisterCompany(st->owner, owner) || _patches.shared_stations)) {
+ 			uint cur_dist = DistanceManhattan(tile, st->xy);
+ 
+ 			if (cur_dist < threshold) {
+@@ -534,10 +535,10 @@
+ 
+ 	// expand the region by rad tiles on each side
+ 	// while making sure that we remain inside the board.
+-	x2 = min(x + w + rad, MapSizeX());
++	x2 = min((uint)(x + w + rad), MapSizeX());
+ 	x1 = max(x - rad, 0);
+ 
+-	y2 = min(y + h + rad, MapSizeY());
++	y2 = min((uint)(y + h + rad), MapSizeY());
+ 	y1 = max(y - rad, 0);
+ 
+ 	assert(x1 < x2);
+@@ -583,8 +584,8 @@
+ 
+ 	// expand the region by rad tiles on each side
+ 	// while making sure that we remain inside the board.
+-	x2 = min(x + w + rad, MapSizeX());
+-	y2 = min(y + h + rad, MapSizeY());
++	x2 = min((uint)(x + w + rad), MapSizeX());
++	y2 = min((uint)(y + h + rad), MapSizeY());
+ 	x1 = max(x - rad, 0);
+ 	y1 = max(y - rad, 0);
+ 
+@@ -938,6 +939,7 @@
+ 	int plat_len, numtracks;
+ 	int direction;
+ 	uint finalvalues[3];
++	bool extending = false;
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -986,15 +988,18 @@
+ 
+ 	if (st != NULL) {
+ 		// Reuse an existing station.
+-		if (st->owner != OWNER_NONE && st->owner != _current_player)
++		if (st->owner != OWNER_NONE && !IsSisterCompany(st->owner,_current_player))
+ 			return_cmd_error(STR_3009_TOO_CLOSE_TO_ANOTHER_STATION);
+ 
+ 		if (st->train_tile != 0) {
+ 			// check if we want to expanding an already existing station?
+ 			if ((!_patches.ainew_active && _is_ai_player) || !_patches.join_stations)
+ 				return_cmd_error(STR_3005_TOO_CLOSE_TO_ANOTHER_RAILROAD);
++
+ 			if (!CanExpandRailroadStation(st, finalvalues, direction))
+ 				return CMD_ERROR;
++			else
++				extending = true;
+ 		}
+ 
+ 		//XXX can't we pack this in the "else" part of the if above?
+@@ -1032,7 +1037,8 @@
+ 		st->train_tile = finalvalues[0];
+ 		if (!st->facilities) st->xy = finalvalues[0];
+ 		st->facilities |= FACIL_TRAIN;
+-		st->owner = _current_player;
++		if(!_patches.subsidiaries || (_patches.subsidiaries && st->facilities == FACIL_TRAIN && !extending))
++			st->owner = _current_player;
+ 
+ 		st->trainst_w = finalvalues[1];
+ 		st->trainst_h = finalvalues[2];
+@@ -1132,7 +1138,7 @@
+ 	// make sure the specified tile belongs to the current player, and that it is a railroad station.
+ 	if (!IsTileType(tile, MP_STATION) || _map5[tile] >= 8 || !_patches.nonuniform_stations) return CMD_ERROR;
+ 	st = GetStation(_map2[tile]);
+-	if (_current_player != OWNER_WATER && (!CheckOwnership(st->owner) || !EnsureNoVehicle(tile))) return CMD_ERROR;
++	if (_current_player != OWNER_WATER && (!(CheckOwnership(st->owner) && DEREF_PLAYER(st->owner)->is_active) || !EnsureNoVehicle(tile))) return CMD_ERROR;
+ 
+ 	// if we reached here, it means we can actually delete it. do that.
+ 	if (flags & DC_EXEC) {
+@@ -1348,7 +1354,7 @@
+ 		return DoCommandByTile(tile, 0, 0, DC_EXEC, CMD_REMOVE_FROM_RAILROAD_STATION);
+ 
+ 	/* Current player owns the station? */
+-	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner))
++	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner) && DEREF_PLAYER(st->owner)->is_active)
+ 		return CMD_ERROR;
+ 
+ 	/* determine width and height of platforms */
+@@ -1478,7 +1484,7 @@
+ 		return_cmd_error( (type) ? STR_3008B_TOO_MANY_TRUCK_STOPS : STR_3008A_TOO_MANY_BUS_STOPS);
+ 
+ 	if (st != NULL) {
+-		if (st->owner != OWNER_NONE && st->owner != _current_player)
++		if (st->owner != OWNER_NONE && !IsSisterCompany(st->owner, _current_player))
+ 			return_cmd_error(STR_3009_TOO_CLOSE_TO_ANOTHER_STATION);
+ 
+ 		if (!CheckStationSpreadOut(st, tile, 1, 1))
+@@ -1518,9 +1524,10 @@
+ 		InitializeRoadStop(road_stop, prev, tile, st->index);
+ 		(*currstop)->type = type;
+ 		if (!st->facilities) st->xy = tile;
++		if(!_patches.subsidiaries || (_patches.subsidiaries && !st->facilities)){
++			st->owner = _current_player;
++		}
+ 		st->facilities |= (type) ? FACIL_TRUCK_STOP : FACIL_BUS_STOP;
+-		st->owner = _current_player;
+-
+ 		st->build_date = _date;
+ 
+ 		ModifyTile(tile,
+@@ -1546,7 +1553,7 @@
+ 	RoadStop *cur_stop;
+ 	bool is_truck = _map5[tile] < 0x47;
+ 
+-	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner))
++	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner) && DEREF_PLAYER(st->owner)->is_active)
+ 		return CMD_ERROR;
+ 
+ 	if (is_truck) {	//truck stop
+@@ -1710,7 +1717,7 @@
+ 	}
+ 
+ 	if (st != NULL) {
+-		if (st->owner != OWNER_NONE && st->owner != _current_player)
++		if (st->owner != OWNER_NONE && !IsSisterCompany(st->owner,_current_player))
+ 			return_cmd_error(STR_3009_TOO_CLOSE_TO_ANOTHER_STATION);
+ 
+ 		if (!CheckStationSpreadOut(st, tile, 1, 1))
+@@ -1744,8 +1751,9 @@
+ 
+ 	if (flags & DC_EXEC) {
+ 		const AirportFTAClass *afc = GetAirport(p1);
+-
+-		st->owner = _current_player;
++		if(!st->facilities){
++			st->owner = _current_player;
++		}
+ 		if (_current_player == _local_player && afc->nof_depots != 0) {
+       _last_built_aircraft_depot_tile = tile + ToTileIndexDiff(afc->airport_depots[0]);
+     }
+@@ -1790,7 +1798,7 @@
+ 	int w,h;
+ 	int32 cost;
+ 
+-	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner))
++	if (_current_player != OWNER_WATER && !CheckOwnership(st->owner) && DEREF_PLAYER(st->owner)->is_active)
+ 		return CMD_ERROR;
+ 
+ 	tile = st->airport_tile;
+@@ -2002,7 +2010,7 @@
+ 	}
+ 
+ 	if (st != NULL) {
+-		if (st->owner != OWNER_NONE && st->owner != _current_player)
++		if (st->owner != OWNER_NONE && !IsSisterCompany(st->owner, _current_player))
+ 			return_cmd_error(STR_3009_TOO_CLOSE_TO_ANOTHER_STATION);
+ 
+ 		if (!CheckStationSpreadOut(st, tile, 1, 1)) return CMD_ERROR;
+@@ -2031,7 +2039,8 @@
+ 		st->dock_tile = tile;
+ 		if (!st->facilities) st->xy = tile;
+ 		st->facilities |= FACIL_DOCK;
+-		st->owner = _current_player;
++		if(!_patches.subsidiaries || (_patches.subsidiaries && st->facilities == FACIL_DOCK))
++			st->owner = _current_player;
+ 
+ 		st->build_date = _date;
+ 
+@@ -2060,7 +2069,7 @@
+ {
+ 	uint tile1, tile2;
+ 
+-	if (!CheckOwnership(st->owner))
++	if (!CheckOwnership(st->owner) && DEREF_PLAYER(st->owner)->is_active)
+ 		return CMD_ERROR;
+ 
+ 	tile1 = st->dock_tile;
+Index: functions.h
+===================================================================
+--- functions.h	(revision 2424)
++++ functions.h	(working copy)
+@@ -72,6 +72,7 @@
+ void SubtractMoneyFromPlayerFract(byte player, int32 cost);
+ bool CheckOwnership(byte owner);
+ bool CheckTileOwnership(uint tile);
++bool CheckSubsidiaryTileOwnership(uint tile);
+ StringID GetPlayerNameString(byte player, byte index);
+ 
+ /* standard */
+Index: aircraft_cmd.c
+===================================================================
+--- aircraft_cmd.c	(revision 2424)
++++ aircraft_cmd.c	(working copy)
+@@ -14,6 +14,7 @@
+ #include "sound.h"
+ #include "player.h"
+ #include "airport.h"
++#include "economy.h"
+ #include "vehicle_gui.h"
+ 
+ static bool AirportMove(Vehicle *v, const AirportFTAClass *Airport);
+@@ -178,7 +179,7 @@
+ 	// Workaround: TODO: make AI players try to build planes in a hangar instead of just an airport tile.
+ 	if (!IsAircraftHangarTile(tile) && IS_HUMAN_PLAYER(_current_player)) return CMD_ERROR;
+ 
+-	if (!IsTileOwner(tile, _current_player) && IS_HUMAN_PLAYER(_current_player)) return CMD_ERROR;
++	if (!IsSisterCompany(GetTileOwner(tile),_current_player) && IS_HUMAN_PLAYER(_current_player)) return CMD_ERROR;
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_NEW_VEHICLES);
+ 
+@@ -1560,7 +1561,8 @@
+ 	// heliport/oilrig, etc --> no airplanes (HELICOPTERS_ONLY)
+ 	// runway busy or not allowed to use this airstation, circle
+ 	if (! (v->subtype == Airport->acc_planes ||
+-			st->airport_tile == 0 || (st->owner != OWNER_NONE && st->owner != v->owner) )) {
++			st->airport_tile == 0 || (st->owner != OWNER_NONE &&
++			!(IsSisterCompany(st->owner, v->owner) || _patches.shared_stations)))) {
+ 
+ 		// {32,FLYING,NOTHING_block,37}, {32,LANDING,N,33}, {32,HELILANDING,N,41},
+ 		// if it is an airplane, look for LANDING, for helicopter HELILANDING
+Index: npf.c
+===================================================================
+--- npf.c	(revision 2424)
++++ npf.c	(working copy)
+@@ -8,6 +8,7 @@
+ #include "station.h"
+ #include "tile.h"
+ #include "depot.h"
++#include "economy.h"
+ 
+ AyStar _train_find_station;
+ AyStar _train_find_depot;
+@@ -592,7 +593,7 @@
+ 		|| IsTileDepotType(dst_tile, TRANSPORT_WATER) /* Water depot tile */
+ 	) /* TODO: Crossings, tunnels and bridges are "public" now */
+ 		/* The above cases are "private" tiles, we need to check the owner */
+-		if (!IsTileOwner(dst_tile, aystar->user_data[NPF_OWNER]))
++		if (!_patches.shared_tracks && !IsSisterCompany(GetTileOwner(dst_tile), aystar->user_data[NPF_OWNER]))
+ 			return;
+ 
+ 	/* Determine available tracks */
+@@ -784,7 +785,7 @@
+ 	FOR_ALL_DEPOTS(depot) {
+ 		/* Check if this is really a valid depot, it is of the needed type and
+ 		 * owner */
+-		if (IsValidDepot(depot) && IsTileDepotType(depot->xy, type) && IsTileOwner(depot->xy, owner))
++		if (IsValidDepot(depot) && IsTileDepotType(depot->xy, type) && (_patches.shared_tracks || IsSisterCompany(GetTileOwner(depot->xy),owner)))
+ 			/* If so, let's add it to the queue, sorted by distance */
+ 			depots.push(&depots, depot, DistanceManhattan(tile, depot->xy));
+ 	}
+Index: lang/french.txt
+===================================================================
+--- lang/french.txt	(revision 2424)
++++ lang/french.txt	(working copy)
+@@ -2809,6 +2809,73 @@
+ STR_SHORT_DATE                                                  :{WHITE}{DATE_TINY}
+ STR_SIGN_LIST_CAPTION                                           :{WHITE}Liste des panneaux - {COMMA16} panneaux
+ 
++############ subsidiaries strings
++STR_SUBSIDIARIES                                                :{BLACK}Filiales
++STR_SUBSIDIARIES_MANAGEMENT                                     :{BLACK}gérer vos filiales
++STR_YOUR_SUBSIDIARIES                                           :{WHITE}Vos filiales
++STR_SUBSIDIARIES_ADMINISTRATE                                   :{BLACK}Administrer
++STR_SUBSIDIARIES_SEND_MONEY                                     :{BLACK}Envoyer Argent
++STR_SUBSIDIARIES_REQUEST_MONEY                                  :{BLACK}Recevoir Argent
++STR_SUBSIDIARIES_MERGER                                         :{BLACK}Fusionner
++STR_SUBSIDIARIES_ADMINISTRATE_E                                 :{BLACK}Administrer (Jouer avec) la filiale sélectionée
++STR_SUBSIDIARIES_SEND_MONEY_E                                   :{BLACK}Envoyer de l'argnet à la filiale, la banque prélève 6% de frais sur la transaction 
++STR_SUBSIDIARIES_REQUEST_MONEY_E                                :{BLACK}Recevoir de l'argent de la filiale, la banque prélève 6% de frais sur la transaction 
++STR_SUBSIDIARIES_MERGER_E                                       :{BLACK}Effectue une fusion complète en la filiale sélectionée et votre compagnie
++STR_SUBSIDIARY_OF                                               :{WHITE}(Filiale de {STRING})
++STR_SUBSIDIARY_CREATE                                           :{BLACK}Créer
++STR_SUBSIDIARY_CREATE_E                                         :{BLACK}Crée une nouvelle filiale
++STR_SUBSIDIARY_ADD_CASH                                         :{BLACK}ajouter {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_ADD_CASH_E                                       :{BLACK}Augmente le montant transféré
++STR_SUBSIDIARY_SUB_CASH                                         :{BLACK}Soustraire {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_SUB_CASH_E                                       :{BLACK}Diminue le montant transféré
++STR_SUBSIDIARY_SEND_TO                                          :{WHITE}Envoyer argent à {STRING}
++STR_SUBSIDIARY_REQUEST_FROM                                     :{WHITE}Recevoir argent de {STRING}
++STR_SUBSIDIARY_SEND_AMOUNT                                      :{WHITE}Montant à envoyer:
++STR_SUBSIDIARY_REQUEST_AMOUNT                                   :{WHITE}Montant prélevé:
++STR_SUBSIDIARY_AMOUNT_SEND                                      :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_GET                                       :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_TARGET                                    :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_GET_ERROR                                        :{WHITE}Impossible de recevoir ce montant...
++STR_SUBSIDIARY_SEND_ERROR                                       :{WHITE}Impossible d'envoyer ce montant...
++STR_SUBSIDIARY_PLAYER_ERROR                                     :{WHITE}Impossible de créer la filiale...
++STR_SUBSIDIARY_ASK_MERGER                                       :{YELLOW}Voulez vous fusionner {STRING} avec {STRING}?
++STR_SUBSIDIARY_ASK_MERGER_TITLE                                 :{WHITE}Fusionner
++STR_SUBSIDIARY_TARGET_HAS                                       :{WHITE}Equilibre bancaire de la filiale:
++STR_SUBSIDIARY_TOGGLE                                           :{BLACK}Toggle this subsidiary
++STR_SUBSIDIARY_CASH_REQUEST                                     :{WHITE}Prélèvement demandé
++STR_SUBSIDIARY_CASH_REQUESTED                                   :{WHITE}{STRING} demande {CURRENCY64}. Voulez vous lui envoyer ce montant?
++STR_SUBSIDIARY_CASH_REQUEST_DENIED                              :{WHITE}Votre prélèvement est refusé
++STR_SUBSIDIARY_CASH_REQUEST_GRANTED                             :{WHITE}Votre prélèvement est accepté
++STR_SUBSIDIARY_SELL_SHARE_TITLE                                 :{WHITE}Requete
++STR_SUBSIDIARY_SELL_SHARE                                       :{WHITE}{STRING} veut acheter 25% de vos actions acceptez vous de lui vendre ?
++STR_SUBSIDIARY_SELL_SHARE_GRANTED                               :{WHITE}Votre offre est acceptée
++STR_SUBSIDIARY_SELL_SHARE_DENIED                                :{WHITE}Votre offre est refusée
++STR_TOO_MANY_PLAYERS                                            :{WHITE}Trop de joueurs
++
++STR_CONFIG_PATCHES_SUBSIDIARIES                                 :{LTBLUE}Active la gestion des filiales: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_ST_TAX                                :{LTBLUE}Taxe sur les véhicules s'arrêtant dans une station de vos filiales: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_SUB_CONFIG        :{LTBLUE}Taxe de base pour l'utilisation des voies de vos filiales: {ORANGE}{STRING} per tile
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_CONFIG            :{LTBLUE}Autorise le partage des voies pour tout le monde: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_OTHER_CONFIG      :{LTBLUE}Taxe de base pour l'utilisation des voies partagées: {ORANGE}{STRING} per tile
++STR_CONFIG_PATCHES_SUBS_ALLOW_REMOVE                            :{LTBLUE}Autorise les filiales à supprimer les routes/voies de tout le groupe: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_COOP                                         :{BLACK}Coopération
++STR_CONFIG_PATCHES_SHARED_STATIONS                              :{LTBLUE}Autorise le partage des stations pour tous: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_STATIONS_SUBS_CARGOTAX                :{LTBLUE}Base tax for subsidiaries cargo pickup: {ORANGE}{STRING} per unit
++STR_CONFIG_PATCHES_SHARED_STATIONS_OTHERS_CARGOTAX              :{LTBLUE}Base tax for cargo pickup: {ORANGE}{STRING} per unit
++STR_CONFIG_PATCHES_SHARED_ST_TAX_OTHERS                         :{LTBLUE}Taxe sur les véhicules s'arretant dans la station d'une autre companie: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_YEARS_OF_PROTECTION                          :{LTBLUE}Protection des actions pendant:{ORANGE}{STRING} année(s)
++
++STR_703A_TRAIN_SUB                                              :{WHITE}{COMMA16} train sur {COMMA16} ({COMMA16}%)
++STR_703B_TRAINS_SUB                                             :{WHITE}{COMMA16} trains sur {COMMA16} ({COMMA16}%)
++STR_703C_ROAD_VEHICLE_SUB                                       :{WHITE}{COMMA16} véhicule routier sur {COMMA16} ({COMMA16}%)
++STR_703D_ROAD_VEHICLES_SUB                                      :{WHITE}{COMMA16} véhicules routiers sur {COMMA16} ({COMMA16}%)
++STR_703E_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} aéroplane sur {COMMA16} ({COMMA16}%)
++STR_703F_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} aéroplanes sur {COMMA16} ({COMMA16}%)
++STR_7040_SHIP_SUB                                               :{WHITE}{COMMA16} navire sur {COMMA16} ({COMMA16}%)
++STR_7041_SHIPS_SUB                                              :{WHITE}{COMMA16} navires sur {COMMA16} ({COMMA16}%)
++############ end of subsidiaries strings
++
++
+ ############ Lists rail types
+ 
+ STR_RAIL_VEHICLES                                               :Véhicules sur rail
+Index: lang/german.txt
+===================================================================
+--- lang/german.txt	(revision 2424)
++++ lang/german.txt	(working copy)
+@@ -2805,10 +2805,75 @@
+ STR_REPLACE_HELP_RAILTYPE                                       :{BLACK}Wähle einen Schienentyp für den Loks ersetzt werden sollen
+ STR_REPLACE_HELP_REPLACE_INFO_TAB                               :{BLACK}Hier wird angezeigt, gegen welches Fahrzeug das auf der linken Seite gewählte ersetzt wird
+ STR_REPLACE_HELP                                                :{BLACK}Dieses Feature ermöglicht es, einen Fahrzeugtyp auszuwählen und ihn durch einen anderen ersetzen zu lassen. Dies geschieht automatisch, wenn das Fahrzeug regulär das Depot besucht.
+-
+ STR_SHORT_DATE                                                  :{WHITE}{DATE_TINY}
+ STR_SIGN_LIST_CAPTION                                           :{WHITE}Schilderliste - {COMMA16} Schild(er)
+ 
++############ Subsidiaries strings
++STR_SUBSIDIARIES                                                :{BLACK}Tochterfirmen
++STR_SUBSIDIARIES_MANAGEMENT                                     :{BLACK}verwalte Deine Tochterfirmen
++STR_YOUR_SUBSIDIARIES                                           :{WHITE}Deine Tochterfirmen
++STR_SUBSIDIARIES_ADMINISTRATE			                :{BLACK}Verwalten
++STR_SUBSIDIARIES_SEND_MONEY			                :{BLACK}Überweise Geld
++STR_SUBSIDIARIES_REQUEST_MONEY			                :{BLACK}Fordere Geld
++STR_SUBSIDIARIES_MERGER			                        :{BLACK}Fusionieren
++STR_SUBSIDIARIES_ADMINISTRATE_E			                :{BLACK}Verwalte (spielen als) die ausgewählte Firma
++STR_SUBSIDIARIES_SEND_MONEY_E			                :{BLACK}Überweise Geld an die ausgewählte Firma, die Bank kassiert 6 % Überweisungsgebühr
++STR_SUBSIDIARIES_REQUEST_MONEY_E			        :{BLACK} Überweise Geld von der ausgewählten Firma, die Bank kassiert 6 % Überweisungsgebühr
++STR_SUBSIDIARIES_MERGER_E			                :{BLACK}Vollziehe eine Fusion mit der ausgewählten Tochterfirma
++STR_SUBSIDIARY_OF			                        :{WHITE}(Tochterfirma von {STRING})
++STR_SUBSIDIARY_CREATE			                        :{BLACK}Erstellen
++STR_SUBSIDIARY_CREATE_E			                        :{BLACK}Erstelle eine neue Tochterfirma
++STR_SUBSIDIARY_ADD_CASH			                        :{BLACK}Hinzufügen {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_ADD_CASH_E			                :{BLACK}Erhöhe den zu überweisenden Betrag
++STR_SUBSIDIARY_SUB_CASH			                        :{BLACK}Abziehen {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_SUB_CASH_E			                :{BLACK}Vermindere den zu überweisenden Betrag
++STR_SUBSIDIARY_SEND_TO                                          :{WHITE}Sende Geld an {STRING}
++STR_SUBSIDIARY_REQUEST_FROM                                     :{WHITE}Fordere Geld an von {STRING}
++STR_SUBSIDIARY_SEND_AMOUNT                                      :{WHITE}Betrag zum Überweisen:
++STR_SUBSIDIARY_REQUEST_AMOUNT                                   :{WHITE}Betrag der an Dich überwiesen wird:
++STR_SUBSIDIARY_AMOUNT_SEND                                      :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_GET                                       :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_TARGET                                    :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_GET_ERROR                                        :{WHITE}Unmöglich diesen Betrag abzufordern...
++STR_SUBSIDIARY_SEND_ERROR                                       :{WHITE}Unmöglich diesen Betrag zu überweisen...
++STR_SUBSIDIARY_PLAYER_ERROR                                     :{WHITE}Kann keine Tochterfirma eröffnen...
++STR_SUBSIDIARY_ASK_MERGER                                       :{YELLOW}Bist Du sicher daß {STRING} fusionieren soll mit {STRING}?
++STR_SUBSIDIARY_ASK_MERGER_TITLE                                 :{WHITE}Fusion ausführen
++STR_SUBSIDIARY_TARGET_HAS                                       :{WHITE}Derzeitiges Bankguthaben der ausgewählten Tochterfirma:
++STR_SUBSIDIARY_TOGGLE                                           :{BLACK}Erpresse diese Tochterfirma
++STR_SUBSIDIARY_CASH_REQUEST                                     :{WHITE}Ankommende Geldforderung
++STR_SUBSIDIARY_CASH_REQUESTED                                   :{WHITE}{STRING} Angefordert {CURRENCY64}. Aktzeptieren Sie die Überweisung?
++STR_SUBSIDIARY_CASH_REQUEST_DENIED                              :{WHITE}Überweisung wurde abgelehnt
++STR_SUBSIDIARY_CASH_REQUEST_GRANTED                             :{WHITE}Überweisung wurde angenommen
++STR_SUBSIDIARY_SELL_SHARE_TITLE                                 :{WHITE}Anfrage
++STR_SUBSIDIARY_SELL_SHARE                                       :{WHITE}{STRING} möchte 25% Ihrer Aktien kaufen. Wollen Sie die Aktien verkaufen?
++STR_SUBSIDIARY_SELL_SHARE_GRANTED                               :{WHITE}Angebot angemommen
++STR_SUBSIDIARY_SELL_SHARE_DENIED                                :{WHITE}Angebot abgelehnt
++STR_TOO_MANY_PLAYERS                                            :{WHITE}Zu viele Spieler
++
++STR_CONFIG_PATCHES_SUBSIDIARIES                                 :{LTBLUE}Ermögliche Tochterfirmen: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_ST_TAX                                :{LTBLUE}Gebühr für das Benutzen der Stationen: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_SUB_CONFIG        :{LTBLUE}Gebühr für das Nutzen der Schienen: {ORANGE}{STRING} per tile
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_CONFIG            :{LTBLUE}Erlaube die Schienennutzung für jeden: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_OTHER_CONFIG      :{LTBLUE}Gebühr für FREMDE Stations-Nutzung: {ORANGE}{STRING} per tile
++STR_CONFIG_PATCHES_SUBS_ALLOW_REMOVE                            :{LTBLUE}Tochterfrinem dürfen Schienen/Strassen entfernen: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_COOP                                         :{BLACK}Cooperation
++STR_CONFIG_PATCHES_SHARED_STATIONS                              :{LTBLUE}Erlaube die Nutzung der Bahnhöfe durch alle: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_STATIONS_SUBS_CARGOTAX                :{LTBLUE}Gebühr für das Aufnehmen von Gütern(Töchter): {ORANGE}{STRING} per unit
++STR_CONFIG_PATCHES_SHARED_STATIONS_OTHERS_CARGOTAX              :{LTBLUE}Gebühr für das Aufnehmen von Gütern(Fremde): {ORANGE}{STRING} per unit
++STR_CONFIG_PATCHES_SHARED_ST_TAX_OTHERS                         :{LTBLUE}Gebühr für das Halten in fremden Stationen: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_YEARS_OF_PROTECTION                          :{LTBLUE}Jahre Aktienschutz:{ORANGE}{STRING} Jahr(e)
++
++STR_703A_TRAIN_SUB                                              :{WHITE}{COMMA16} Zug von {COMMA16} ({COMMA16}%)
++STR_703B_TRAINS_SUB                                             :{WHITE}{COMMA16} Züge von {COMMA16} ({COMMA16}%)
++STR_703C_ROAD_VEHICLE_SUB                                       :{WHITE}{COMMA16} Strassenfahrzeug von {COMMA16} ({COMMA16}%)
++STR_703D_ROAD_VEHICLES_SUB                                      :{WHITE}{COMMA16} Strassenfahrzeuge von {COMMA16} ({COMMA16}%)
++STR_703E_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} Flugzeug von {COMMA16} ({COMMA16}%)
++STR_703F_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} Flugzeuge von {COMMA16} ({COMMA16}%)
++STR_7040_SHIP_SUB                                               :{WHITE}{COMMA16} Schiff von {COMMA16} ({COMMA16}%)
++STR_7041_SHIPS_SUB                                              :{WHITE}{COMMA16} Schiffe von {COMMA16} ({COMMA16}%)
++################### end of subs strings
++
+ ############ Lists rail types
+ 
+ STR_RAIL_VEHICLES                                               :Eisenbahn
+Index: lang/hungarian.txt
+===================================================================
+--- lang/hungarian.txt	(revision 2424)
++++ lang/hungarian.txt	(working copy)
+@@ -2809,6 +2809,72 @@
+ STR_SHORT_DATE                                                  :{WHITE}{DATE_TINY}
+ STR_SIGN_LIST_CAPTION                                           :{WHITE}Feliratok listája ({COMMA16} db)
+ 
++############ Subsidiairies strings
++STR_SUBSIDIARIES                                                :{BLACK}Leányvállalatok
++STR_SUBSIDIARIES_MANAGEMENT                                     :{BLACK}Leányvállalataid irányítása
++STR_YOUR_SUBSIDIARIES                                           :{WHITE}Leányvállalataid
++STR_SUBSIDIARIES_ADMINISTRATE                                   :{BLACK}Irányít
++STR_SUBSIDIARIES_SEND_MONEY                                     :{BLACK}Pénz küldése
++STR_SUBSIDIARIES_REQUEST_MONEY                                  :{BLACK}Pénz fogadása
++STR_SUBSIDIARIES_MERGER                                         :{BLACK}Egyesítés
++STR_SUBSIDIARIES_ADMINISTRATE_E                                 :{BLACK}A kiválasztott leányvállalat irányítása
++STR_SUBSIDIARIES_SEND_MONEY_E                                   :{BLACK}Pénz küldése a kiválasztott leányvállalatnak, a bank 6% kezelési költséget számol fel.
++STR_SUBSIDIARIES_REQUEST_MONEY_E                                :{BLACK}Pénz fogadása a kiválasztott leányvállalattól, a bank 6% kezelési költséget számol fel.
++STR_SUBSIDIARIES_MERGER_E                                       :{BLACK}A jelenlegi és a kiválasztott leányvállalatok egyesítése
++STR_SUBSIDIARY_OF                                               :{WHITE}({STRING} leányvállalata)
++STR_SUBSIDIARY_CREATE                                           :{BLACK}Alapít
++STR_SUBSIDIARY_CREATE_E                                         :{BLACK}Új leányvállalatot alapít a semmibõl
++STR_SUBSIDIARY_ADD_CASH                                         :{BLACK}{SKIP}{SKIP}{SKIP}{CURRENCY64} hozzáadása
++STR_SUBSIDIARY_ADD_CASH_E                                       :{BLACK}Az átviteli összeg emelése
++STR_SUBSIDIARY_SUB_CASH                                         :{BLACK}{SKIP}{SKIP}{SKIP}{CURRENCY64} elvítele
++STR_SUBSIDIARY_SUB_CASH_E                                       :{BLACK}Az átviteli összeg csökkentése
++STR_SUBSIDIARY_SEND_TO                                          :{WHITE}Pénz küldése {STRING} cégnek
++STR_SUBSIDIARY_REQUEST_FROM                                     :{WHITE}Pénz kérése {STRING} cégtõl
++STR_SUBSIDIARY_SEND_AMOUNT                                      :{WHITE}Az elküldendõ összeg:
++STR_SUBSIDIARY_REQUEST_AMOUNT                                   :{WHITE}A kért összeg:
++STR_SUBSIDIARY_AMOUNT_SEND                                      :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_GET                                       :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_TARGET                                    :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_GET_ERROR                                        :{WHITE}Lehetetlen ennyit kapni...
++STR_SUBSIDIARY_SEND_ERROR                                       :{WHITE}Lehetetlen ennyit küldeni...
++STR_SUBSIDIARY_PLAYER_ERROR                                     :{WHITE}Nem lehet leányvállalatot alapítani...
++STR_SUBSIDIARY_ASK_MERGER                                       :{YELLOW}Biztos hogy {STRING} egyesüljön {STRING} cégbe?
++STR_SUBSIDIARY_ASK_MERGER_TITLE                                 :{WHITE}Egyesítés
++STR_SUBSIDIARY_TARGET_HAS                                       :{WHITE}A leányvállalat jelenlegi banki tartozása:
++STR_SUBSIDIARY_TOGGLE                                           :{BLACK}Átkapcsol erre a leányvállalatra
++STR_SUBSIDIARY_CASH_REQUEST                                     :{WHITE}Bejövõ összeg kérelem
++STR_SUBSIDIARY_CASH_REQUESTED                                   :{WHITE}{STRING} {CURRENCY64} összeget kér. Elküldöd neki?
++STR_SUBSIDIARY_CASH_REQUEST_DENIED                              :{WHITE}A pénzkérésed elutasították
++STR_SUBSIDIARY_CASH_REQUEST_GRANTED                             :{WHITE}A pénzkérésed elfogadták
++STR_SUBSIDIARY_SELL_SHARE_TITLE                                 :{WHITE}Kérés
++STR_SUBSIDIARY_SELL_SHARE                                       :{WHITE}{STRING} akar 25%-ot vásárolni a részvényeidbõl. Beleegyezel?
++STR_SUBSIDIARY_SELL_SHARE_GRANTED                               :{WHITE}A kérésed elutasították
++STR_SUBSIDIARY_SELL_SHARE_DENIED                                :{WHITE}A kérésed elfogadták
++STR_TOO_MANY_PLAYERS                                            :{WHITE}Túl sok játékos
++
++STR_CONFIG_PATCHES_SUBSIDIARIES                                 :{LTBLUE}Leányvállalatok engedélyezése: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_ST_TAX                                :{LTBLUE}Adó mértéke a leányvállalatok megállójában megálláskor: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_SUB_CONFIG        :{LTBLUE}Adó mértéke a leányvállalatok sín használatákor: {ORANGE}{STRING} négyzetenként
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_CONFIG            :{LTBLUE}Mindenki használhatja a síneket: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_OTHER_CONFIG      :{LTBLUE}Adó mértéke a megosztott sín használatákor: {ORANGE}{STRING} négyzetenként
++STR_CONFIG_PATCHES_SUBS_ALLOW_REMOVE                            :{LTBLUE}A leányvállalatok törölhetik-e egymás útjait és sínjeit: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_COOP                                         :{BLACK}Együttmûködés
++STR_CONFIG_PATCHES_SHARED_STATIONS			                        :{LTBLUE}Mindenki használhatja az állomásokat: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_STATIONS_SUBS_CARGOTAX			          :{LTBLUE}Adó mértéke a leányvállalatok rakományaihoz: {ORANGE}{STRING} egységenként
++STR_CONFIG_PATCHES_SHARED_STATIONS_OTHERS_CARGOTAX			        :{LTBLUE}Adó mértéke a megosztott rakományokhoz: {ORANGE}{STRING} egységenként
++STR_CONFIG_PATCHES_SHARED_ST_TAX_OTHERS                         :{LTBLUE}Adó mértéke a megosztott állomáson megálláskor: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_YEARS_OF_PROTECTION                          :{LTBLUE}Megosztások elleni védelem: {ORANGE}{STRING} évig
++
++STR_703A_TRAIN_SUB                                              :{WHITE}{COMMA16} vonat a {COMMA16} darabból ({COMMA16}%)
++STR_703B_TRAINS_SUB                                             :{WHITE}{COMMA16} vonat a {COMMA16} darabból ({COMMA16}%)
++STR_703C_ROAD_VEHICLE_SUB                                       :{WHITE}{COMMA16} közúti jármû a {COMMA16} darabból ({COMMA16}%)
++STR_703D_ROAD_VEHICLES_SUB                                      :{WHITE}{COMMA16} közûti jármû a {COMMA16} darabból ({COMMA16}%)
++STR_703E_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} repülõgép a {COMMA16} darabból({COMMA16}%)
++STR_703F_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} repülõgép a {COMMA16} darabból({COMMA16}%)
++STR_7040_SHIP_SUB                                               :{WHITE}{COMMA16} hajó a {COMMA16} darabból ({COMMA16}%)
++STR_7041_SHIPS_SUB                                              :{WHITE}{COMMA16} hajó a {COMMA16} darabból ({COMMA16}%)
++############ End of Subsidiairies strings
++
+ ############ Lists rail types
+ 
+ STR_RAIL_VEHICLES                                               :Normál Vasutak
+Index: lang/english.txt
+===================================================================
+--- lang/english.txt	(revision 2424)
++++ lang/english.txt	(working copy)
+@@ -2809,6 +2809,72 @@
+ STR_SHORT_DATE                                                  :{WHITE}{DATE_TINY}
+ STR_SIGN_LIST_CAPTION                                           :{WHITE}Sign List - {COMMA16} Signs
+ 
++############ subsidiaries strings
++STR_SUBSIDIARIES						                                    :{BLACK}Subsidiaries
++STR_SUBSIDIARIES_MANAGEMENT				                              :{BLACK}Manage your subsidiaries
++STR_YOUR_SUBSIDIARIES                                           :{WHITE}Your Subsidiaries
++STR_SUBSIDIARIES_ADMINISTRATE                                   :{BLACK}Administrate
++STR_SUBSIDIARIES_SEND_MONEY                                     :{BLACK}Send Cash
++STR_SUBSIDIARIES_REQUEST_MONEY                                  :{BLACK}Get Cash
++STR_SUBSIDIARIES_MERGER                                         :{BLACK}Merger
++STR_SUBSIDIARIES_ADMINISTRATE_E                                 :{BLACK}Administrate (play as) the selected subsidiary
++STR_SUBSIDIARIES_SEND_MONEY_E                                   :{BLACK}Send Cash to the selected subsidiary, banks will keep 6% of the transaction amount as service charge
++STR_SUBSIDIARIES_REQUEST_MONEY_E                                :{BLACK}Get Cash from the selected subsidiary, banks will keep 6% of the transaction amount as service charge
++STR_SUBSIDIARIES_MERGER_E                                       :{BLACK}Perform a full merger of the current subsidiary and the selected one
++STR_SUBSIDIARY_OF                                               :{WHITE}(Subsidiary of {STRING})
++STR_SUBSIDIARY_CREATE                                           :{BLACK}Create
++STR_SUBSIDIARY_CREATE_E                                         :{BLACK}Create a new subsidiary company from scratch
++STR_SUBSIDIARY_ADD_CASH                                         :{BLACK}Add {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_ADD_CASH_E                                       :{BLACK}Increase the amount to be transfered
++STR_SUBSIDIARY_SUB_CASH                                         :{BLACK}Subtract {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_SUB_CASH_E                                       :{BLACK}Decrease the amount to be transfered
++STR_SUBSIDIARY_SEND_TO                                          :{WHITE}Send cash to {STRING}
++STR_SUBSIDIARY_REQUEST_FROM                                     :{WHITE}Request cash from {STRING}
++STR_SUBSIDIARY_SEND_AMOUNT                                      :{WHITE}Amount to be sent:
++STR_SUBSIDIARY_REQUEST_AMOUNT                                   :{WHITE}Amount which will be recieved:
++STR_SUBSIDIARY_AMOUNT_SEND                                      :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_GET                                       :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_TARGET                                    :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_GET_ERROR                                        :{WHITE}Impossible to retrieve this amount...
++STR_SUBSIDIARY_SEND_ERROR                                       :{WHITE}Impossible to send this amount...
++STR_SUBSIDIARY_PLAYER_ERROR                                     :{WHITE}Cannot create subsidiary...
++STR_SUBSIDIARY_ASK_MERGER                                       :{YELLOW}Are you sure you want to merge {STRING} into {STRING}?
++STR_SUBSIDIARY_ASK_MERGER_TITLE                                 :{WHITE}Perform Merger
++STR_SUBSIDIARY_TARGET_HAS                                       :{WHITE}Target subsidiary current bank balance:
++STR_SUBSIDIARY_TOGGLE                                           :{BLACK}Toggle this subsidiary
++STR_SUBSIDIARY_CASH_REQUEST                                     :{WHITE}Incoming cash request
++STR_SUBSIDIARY_CASH_REQUESTED                                   :{WHITE}{STRING} Requested {CURRENCY64}. Do you accept sending this amount?
++STR_SUBSIDIARY_CASH_REQUEST_DENIED                              :{WHITE}Your cash request was denied
++STR_SUBSIDIARY_CASH_REQUEST_GRANTED                             :{WHITE}Your cash request was granted
++STR_SUBSIDIARY_SELL_SHARE_TITLE                                 :{WHITE}Incomming request
++STR_SUBSIDIARY_SELL_SHARE                                       :{WHITE}{STRING} would like to buy 25% of your shares. Do you accept selling those shares?
++STR_SUBSIDIARY_SELL_SHARE_GRANTED                               :{WHITE}Your offer was accepted
++STR_SUBSIDIARY_SELL_SHARE_DENIED                                :{WHITE}Your offer was denied
++STR_TOO_MANY_PLAYERS                                            :{WHITE}Too many players
++
++STR_CONFIG_PATCHES_SUBSIDIARIES                                 :{LTBLUE}Enable susidiaries management: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_ST_TAX                                :{LTBLUE}Tax vehicles stopping in a subsidiary's station: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_SUB_CONFIG        :{LTBLUE}Base tax for subsidiaries shared tracks usage: {ORANGE}{STRING} per tile
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_CONFIG            :{LTBLUE}Allow track sharing for everyone: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_OTHER_CONFIG      :{LTBLUE}Base tax for shared tracks usage: {ORANGE}{STRING} per tile
++STR_CONFIG_PATCHES_SUBS_ALLOW_REMOVE                            :{LTBLUE}Allow subsidiaries to remove each others tracks and roads: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_COOP                                         :{BLACK}Cooperation
++STR_CONFIG_PATCHES_SHARED_STATIONS                              :{LTBLUE}Allow station sharing for everyone: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_STATIONS_SUBS_CARGOTAX                :{LTBLUE}Base tax for subsidiaries cargo pickup: {ORANGE}{STRING} per unit
++STR_CONFIG_PATCHES_SHARED_STATIONS_OTHERS_CARGOTAX              :{LTBLUE}Base tax for cargo pickup: {ORANGE}{STRING} per unit
++STR_CONFIG_PATCHES_SHARED_ST_TAX_OTHERS                         :{LTBLUE}Tax vehicles stopping in another company's station: {ORANGE}{STRING}%
++STR_CONFIG_PATCHES_YEARS_OF_PROTECTION                          :{LTBLUE}Years of shares protection:{ORANGE}{STRING} year(s)
++
++STR_703A_TRAIN_SUB                                              :{WHITE}{COMMA16} train out of {COMMA16} ({COMMA16}%)
++STR_703B_TRAINS_SUB                                             :{WHITE}{COMMA16} trains out of {COMMA16} ({COMMA16}%)
++STR_703C_ROAD_VEHICLE_SUB                                       :{WHITE}{COMMA16} road vehicle out of {COMMA16} ({COMMA16}%)
++STR_703D_ROAD_VEHICLES_SUB                                      :{WHITE}{COMMA16} road vehicles out of {COMMA16} ({COMMA16}%)
++STR_703E_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} aircraft out of {COMMA16} ({COMMA16}%)
++STR_703F_AIRCRAFT_SUB                                           :{WHITE}{COMMA16} aircraft out of {COMMA16} ({COMMA16}%)
++STR_7040_SHIP_SUB                                               :{WHITE}{COMMA16} ship out of {COMMA16} ({COMMA16}%)
++STR_7041_SHIPS_SUB                                              :{WHITE}{COMMA16} ships out of {COMMA16} ({COMMA16}%)
++############ end of subsidiaries strings
++
+ ############ Lists rail types
+ 
+ STR_RAIL_VEHICLES                                               :Rail Vehicles
+Index: lang/czech.txt
+===================================================================
+--- lang/czech.txt	(revision 2424)
++++ lang/czech.txt	(working copy)
+@@ -2805,10 +2805,55 @@
+ STR_REPLACE_HELP_RAILTYPE                                       :{BLACK}Vyber typ kolejí, pro které chces vybírat lokomotivy na zamenu
+ STR_REPLACE_HELP_REPLACE_INFO_TAB                               :{BLACK}Tady je zobrazeno, za jakou lokomotivu se ta v levém seznamu zamenuje
+ STR_REPLACE_HELP                                                :{BLACK}Tato moznost hry ti umoznuje vybrat typ lokomotivy, který nechá vymenit za jiný. To se bude automaticky provadet, kdyz lokomotiva zajede do depa.
+-
+ STR_SHORT_DATE                                                  :{WHITE}{DATE_TINY}
+ STR_SIGN_LIST_CAPTION                                           :{WHITE}Seznam popisku - {COMMA16} popisku
+ 
++############ Subsidiaries strings
++STR_CONFIG_PATCHES_SUBSIDIARIES			                :{LTBLUE}Povolit spravu dcerinych spolecnosti: {ORANGE}{STRING}
++STR_CONFIG_PATCHES_SHARED_ST_TAX		                :{LTBLUE}Poplatek za komercni pouziti stanice: {ORANGE}{STRING}%
++STR_SUBSIDIARIES						:{BLACK}Podspolecnosti
++STR_SUBSIDIARIES_MANAGEMENT				        :{BLACK}Spravovat dcerine spolecnosti
++STR_YOUR_SUBSIDIARIES                                           :{WHITE}Tvoje dcerine spolecnosti
++STR_SUBSIDIARIES_ADMINISTRATE			                :{BLACK}Spravovat
++STR_SUBSIDIARIES_SEND_MONEY			                :{BLACK}Odeslat penize
++STR_SUBSIDIARIES_REQUEST_MONEY			                :{BLACK}Vyzadat penize
++STR_SUBSIDIARIES_MERGER			                        :{BLACK}Slouceni
++STR_SUBSIDIARIES_ADMINISTRATE_E			                :{BLACK}Spravovat (hrat za) vybranou spolecnost
++STR_SUBSIDIARIES_SEND_MONEY_E			                :{BLACK}Odeslat penize zvolene spolecnosti, bankovni poplatky maji hodnotu 6% z prevadene castky
++STR_SUBSIDIARIES_REQUEST_MONEY_E			        :{BLACK}Ziskat penize ze zvolene spolecnosti, bankovni poplatky maji hodnotu 6% z prevadene castky
++STR_SUBSIDIARIES_MERGER_E			                :{BLACK}Provést kompletní sloucení teto spolecnsti s vybranou
++STR_SUBSIDIARY_OF                                               :{WHITE}(Dcerina spolecnost pod {STRING})
++STR_SUBSIDIARY_CREATE                                           :{BLACK}Vytvorit
++STR_SUBSIDIARY_CREATE_E                                         :{BLACK}Vytvori novou dcerinou spolecnost na zelene louce
++STR_SUBSIDIARY_ADD_CASH                                         :{BLACK}Pridat {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_ADD_CASH_E                                       :{BLACK}Pridat castku urcenou k prevodu
++STR_SUBSIDIARY_SUB_CASH                                         :{BLACK}Odebrat {SKIP}{SKIP}{SKIP}{CURRENCY64}
++STR_SUBSIDIARY_SUB_CASH_E                                       :{BLACK}Odebrat castku urcenou k prevodu
++STR_SUBSIDIARY_SEND_TO                                          :{WHITE}Zaslat peniza pro {STRING}
++STR_SUBSIDIARY_REQUEST_FROM                                     :{WHITE}Vyzadat penize od {STRING}
++STR_SUBSIDIARY_SEND_AMOUNT                                      :{WHITE}Castka k odeslani:
++STR_SUBSIDIARY_REQUEST_AMOUNT                                   :{WHITE}Castka pripsana na ucet:
++STR_SUBSIDIARY_AMOUNT_SEND                                      :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_GET                                       :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_AMOUNT_TARGET                                    :{YELLOW}{CURRENCY64}
++STR_SUBSIDIARY_GET_ERROR                                        :{WHITE}Neni mozne ziskat takovou castku...
++STR_SUBSIDIARY_SEND_ERROR                                       :{WHITE}Neni mozne odeslat takovou castku...
++STR_SUBSIDIARY_PLAYER_ERROR                                     :{WHITE}Neni mozne vytvorit dcerinou spolecnost...
++STR_SUBSIDIARY_ASK_MERGER                                       :{YELLOW}Opravdu chces sloucit {STRING} do {STRING}?
++STR_SUBSIDIARY_ASK_MERGER_TITLE                                 :{WHITE}Provest spojeni
++STR_SUBSIDIARY_TARGET_HAS                                       :{WHITE}Bank. bilance prijemce:
++STR_SUBSIDIARY_TOGGLE                                           :{BLACK}Prepnout na tuto spolecnost
++STR_TOO_MANY_PLAYERS                                            :{WHITE}Prilis mnoho hracu
++STR_SUBSIDIARY_CASH_REQUEST                                     :{WHITE}Prichozi zadost o financni vypomoc
++STR_SUBSIDIARY_CASH_REQUESTED                                   :{WHITE}{STRING} Pozaduje {CURRENCY64}. Souhlasis s odeslanim takove cestky?
++STR_SUBSIDIARY_CASH_REQUEST_DENIED                              :{WHITE}Pozadavek na financni hotovost byl zamitnut
++STR_SUBSIDIARY_CASH_REQUEST_GRANTED                             :{WHITE}Penize byly prislibeny
++STR_SUBSIDIARY_SELL_SHARE_TITLE                                 :{WHITE}Prichozi zadost
++STR_SUBSIDIARY_SELL_SHARE                                       :{WHITE}{STRING} si chce koupit 25% podil ve tve spolecnosti. Povolis odkup tohoto podilu?
++STR_SUBSIDIARY_SELL_SHARE_GRANTED                               :{WHITE}Tvoje nabidka byla zamitnuta
++STR_SUBSIDIARY_SELL_SHARE_DENIED                                :{WHITE}Tvoje nabidka byla prijata
++################### end of subs strings
++
+ ############ Lists rail types
+ 
+ STR_RAIL_VEHICLES                                               :Zeleznicni lokomotivy
+Index: variables.h
+===================================================================
+--- variables.h	(revision 2424)
++++ variables.h	(working copy)
+@@ -193,6 +193,18 @@
+ 	byte drag_signals_density; // many signals density
+ 	bool ainew_active;  // Is the new AI active?
+ 
++	bool subsidiaries;
++	bool allow_track_removal;
++	byte shared_stations_tax;
++	int32 shared_tracks_tax_subsidiary;
++	bool shared_tracks;
++	int32 shared_tracks_tax_others;
++	bool shared_stations;
++	byte shared_stations_tax_others;
++	int32 shared_stations_pickuptax_subsidiary;
++	int32 shared_stations_pickuptax_others;
++	byte years_of_protection;
++
+ 	/*
+ 	 * New Path Finding
+ 	 */
+Index: players.c
+===================================================================
+--- players.c	(revision 2424)
++++ players.c	(working copy)
+@@ -17,6 +17,7 @@
+ #include "command.h"
+ #include "ai.h"
+ #include "sound.h"
++#include "economy.h"
+ #include "network.h"
+ 
+ extern void StartupEconomy(void);
+@@ -271,8 +272,7 @@
+ bool CheckOwnership(byte owner)
+ {
+ 	assert(owner <= OWNER_WATER);
+-
+-	if (owner == _current_player)
++	if (IsSisterCompany(owner, _current_player))
+ 		return true;
+ 	_error_message = STR_013B_OWNED_BY;
+ 	GetNameOfOwner(owner, 0);
+@@ -287,6 +287,7 @@
+ 
+ 	if (owner == _current_player)
+ 		return true;
++
+ 	_error_message = STR_013B_OWNED_BY;
+ 
+ 	// no need to get the name of the owner unless we're the local player (saves some time)
+@@ -295,6 +296,23 @@
+ 	return false;
+ }
+ 
++bool CheckSubsidiaryTileOwnership(uint tile)
++{
++	byte owner = GetTileOwner(tile);
++
++	assert(owner <= OWNER_WATER);
++
++	if (IsSisterCompany(owner, _current_player))
++		return true;
++
++	_error_message = STR_013B_OWNED_BY;
++
++	// no need to get the name of the owner unless we're the local player (saves some time)
++	if (_current_player == _local_player)
++		GetNameOfOwner(owner, tile);
++	return false;
++}
++
+ static void GenerateCompanyName(Player *p)
+ {
+ 	uint tile;
+@@ -577,7 +595,7 @@
+ StringID GetPlayerNameString(byte player, byte index)
+ {
+ 	if (IS_HUMAN_PLAYER(player) && player < MAX_PLAYERS) {
+-		SetDParam(index, player+1);
++		SetDParam(index, (_patches.subsidiaries && !_networking) ? GetMotherCompany(DEREF_PLAYER(player))+1 : player +1);
+ 		return STR_7002_PLAYER;
+ 	}
+ 	return STR_EMPTY;
+Index: tunnelbridge_cmd.c
+===================================================================
+--- tunnelbridge_cmd.c	(revision 2424)
++++ tunnelbridge_cmd.c	(working copy)
+@@ -10,6 +10,7 @@
+ #include "player.h"
+ #include "town.h"
+ #include "sound.h"
++#include "economy.h"
+ 
+ extern void DrawCanalWater(uint tile);
+ 
+@@ -627,7 +628,7 @@
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+ 	// in scenario editor you can always destroy tunnels
+-	if (_game_mode != GM_EDITOR && !CheckTileOwnership(tile)) {
++	if (_game_mode != GM_EDITOR && !(CheckTileOwnership(tile) || (_patches.allow_track_removal && IsSisterCompany(_current_player, GetTileOwner(tile)))) && DEREF_PLAYER(GetTileOwner(tile))->is_active) {
+ 		if (!(_patches.extra_dynamite || _cheats.magic_bulldozer.value) || !IsTileOwner(tile, OWNER_TOWN))
+ 			return CMD_ERROR;
+ 	}
+@@ -704,7 +705,8 @@
+ 		int32 cost;
+ 
+ 		// check if we own the tile below the bridge..
+-		if (_current_player != OWNER_WATER && (!CheckTileOwnership(tile) || !EnsureNoVehicleZ(tile, TilePixelHeight(tile))))
++		
++		if (_current_player != OWNER_WATER && ((!(CheckTileOwnership(tile) || (_patches.allow_track_removal && IsSisterCompany(_current_player, GetTileOwner(tile))))&& DEREF_PLAYER(GetTileOwner(tile))->is_active) || !EnsureNoVehicleZ(tile, TilePixelHeight(tile))))
+ 			return CMD_ERROR;
+ 
+ 		cost = (_map5[tile] & 8) ? _price.remove_road * 2 : _price.remove_rail;
+@@ -735,7 +737,7 @@
+ 	tile = FindEdgesOfBridge(tile, &endtile);
+ 
+ 	// floods, scenario editor can always destroy bridges
+-	if (_current_player != OWNER_WATER && _game_mode != GM_EDITOR && !CheckTileOwnership(tile)) {
++	if (_current_player != OWNER_WATER && _game_mode != GM_EDITOR && !(CheckTileOwnership(tile) || (_patches.allow_track_removal && IsSisterCompany(_current_player, GetTileOwner(tile))))) {
+ 		if (!(_patches.extra_dynamite || _cheats.magic_bulldozer.value) || !IsTileOwner(tile, OWNER_TOWN))
+ 			return CMD_ERROR;
+ 	}
+Index: roadveh_cmd.c
+===================================================================
+--- roadveh_cmd.c	(revision 2424)
++++ roadveh_cmd.c	(working copy)
+@@ -14,9 +14,11 @@
+ #include "npf.h"
+ #include "player.h"
+ #include "sound.h"
++#include "economy.h"
+ #include "depot.h"
+ #include "vehicle_gui.h"
+ 
++
+ void ShowRoadVehViewWindow(Vehicle *v);
+ 
+ static const uint16 _roadveh_images[63] = {
+@@ -133,7 +135,7 @@
+ 	/* The ai_new queries the vehicle cost before building the route,
+ 	 * so we must check against cheaters no sooner than now. --pasky */
+ 	if (!IsTileDepotType(tile, TRANSPORT_ROAD)) return CMD_ERROR;
+-	if (!IsTileOwner(tile, _current_player)) return CMD_ERROR;
++	if (!IsSisterCompany(GetTileOwner(tile),_current_player)) return CMD_ERROR;
+ 
+ 	v = AllocateVehicle();
+ 	if (v == NULL || IsOrderPoolFull())
+@@ -297,8 +299,7 @@
+ 
+ 	if (IsTileType(tile, MP_STREET) &&
+ 			(_map5[tile] & 0xF0) == 0x20 &&
+-			IsTileOwner(tile, rfdd->owner)) {
+-
++			(IsSisterCompany(GetTileOwner(tile), rfdd->owner) || _patches.shared_stations)){
+ 		if (length < rfdd->best_length) {
+ 			rfdd->best_length = length;
+ 			rfdd->tile = tile;
+@@ -1048,11 +1049,12 @@
+ 	}
+ 
+ 	if (IsTileType(tile, MP_STREET)) {
+-		if ((_map5[tile]&0xF0) == 0x20 && IsTileOwner(tile, v->owner))
++		if ((_map5[tile]&0xF0) == 0x20 && IsSisterCompany(GetTileOwner(tile), v->owner))
++
+ 			/* Road crossing */
+ 			bitmask |= _road_veh_fp_ax_or[_map5[tile]&3];
+ 	} else if (IsTileType(tile, MP_STATION)) {
+-		if (IsTileOwner(tile, OWNER_NONE) || IsTileOwner(tile, v->owner)) {
++		if (GetTileOwner(tile) == OWNER_NONE || IsSisterCompany(GetTileOwner(tile), v->owner) || _patches.shared_stations){
+ 			/* Our station */
+ 			Station *st = GetStation(_map2[tile]);
+ 			byte val = _map5[tile];
+Index: openttd.h
+===================================================================
+--- openttd.h	(revision 2424)
++++ openttd.h	(working copy)
+@@ -440,6 +440,9 @@
+ 	WC_HIGHSCORE = 0x4D,
+ 	WC_ENDSCREEN = 0x4E,
+ 	WC_SIGN_LIST = 0x4F,
++	WC_SUBSIDIARIES = 0x50,
++	WC_SUBSIDIARIES_MONEY = 0x51,
++	WC_SUBSIDIARIES_ASK_MERGER = 0x52, 
+ };
+ 
+ 
+Index: aircraft_gui.c
+===================================================================
+--- aircraft_gui.c	(revision 2424)
++++ aircraft_gui.c	(working copy)
+@@ -13,6 +13,8 @@
+ #include "engine.h"
+ #include "viewport.h"
+ #include "player.h"
++#include "economy.h"
++#include "network.h"
+ #include "depot.h"
+ 
+ /**
+@@ -510,7 +512,7 @@
+ 						disabled = 0;
+ 		}
+ 
+-		if (v->owner != _local_player)
++		if (!IsSisterCompany(v->owner,_local_player))
+ 			disabled |= 1<<8 | 1<<7;
+ 		w->disabled_state = disabled;
+ 
+@@ -630,9 +632,8 @@
+ 	tile = w->window_number;
+ 
+ 	/* setup disabled buttons */
+-	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 7));
+-
++	w->disabled_state = (IsSisterCompany(GetTileOwner(tile),_local_player)) ? 0 : ((1<<4)|(1<<7));
++	
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+ 	FOR_ALL_VEHICLES(v) {
+@@ -786,7 +787,9 @@
+ 		case 4:
+ 			if (!HASBIT(w->disabled_state, 4) &&
+ 					WP(w,traindepot_d).sel != INVALID_VEHICLE)	{
++
+ 				Vehicle *v;
++				byte backup = _current_player;
+ 
+ 				HandleButtonClick(w, 4);
+ 
+@@ -796,8 +799,10 @@
+ 				_backup_orders_tile = v->tile;
+ 				BackupVehicleOrders(v, _backup_orders_data);
+ 
++				_current_player = v->owner;
+ 				if (!DoCommandP(v->tile, v->index, 0, NULL,  CMD_SELL_AIRCRAFT | CMD_MSG(STR_A01C_CAN_T_SELL_AIRCRAFT)))
+ 					_backup_orders_tile = 0;
++				_current_player = backup;
+ 			}
+ 			break;
+ 		default:
+@@ -931,6 +936,16 @@
+ 		BuildVehicleList(vl, VEH_Aircraft, owner, station);
+ 		SortVehicleList(vl);
+ 
++		if (_local_player != owner){
++			if(IsWindowOfPrototype(w,_player_aircraft_widgets)){
++				w->disabled_state |= (1<<10);
++			}else{
++				w->disabled_state |= (1<<9);
++			}
++		}else{
++			w->disabled_state &= ~(1<<9);
++		}
++
+ 		SetVScrollCount(w, vl->list_length);
+ 
+ 		// disable 'Sort By' tooltip on Unsorted sorting criteria
+@@ -1117,7 +1132,7 @@
+ {
+ 	Window *w;
+ 
+-	if (player == _local_player) {
++	if (IsSisterCompany(player,_local_player)) {
+ 		w = AllocateWindowDescFront(&_player_aircraft_desc, (station << 16) | player);
+ 	} else  {
+ 		w = AllocateWindowDescFront(&_other_player_aircraft_desc, (station << 16) | player);
+Index: train_cmd.c
+===================================================================
+--- train_cmd.c	(revision 2424)
++++ train_cmd.c	(working copy)
+@@ -14,6 +14,8 @@
+ #include "engine.h"
+ #include "player.h"
+ #include "sound.h"
++#include "economy.h"
++#include "network.h"
+ #include "depot.h"
+ #include "waypoint.h"
+ #include "vehicle_gui.h"
+@@ -592,7 +594,7 @@
+ 	 * to the player. Doesn't matter if only the cost is queried */
+ 	if (!(flags & DC_QUERY_COST)) {
+ 		if (!IsTileDepotType(tile, TRANSPORT_RAIL)) return CMD_ERROR;
+-		if (!IsTileOwner(tile, _current_player)) return CMD_ERROR;
++		if (!IsSisterCompany(GetTileOwner(tile),_current_player)) return CMD_ERROR;
+ 	}
+ 
+ 	_cmd_build_rail_veh_var1 = 0;
+@@ -1448,7 +1450,7 @@
+ 
+ static bool TrainFindDepotEnumProc(uint tile, TrainFindDepotData *tfdd, int track, uint length, byte *state)
+ {
+-	if (IsTileType(tile, MP_RAILWAY) && IsTileOwner(tile, tfdd->owner)) {
++	if (IsTileType(tile, MP_RAILWAY) && (IsSisterCompany(GetTileOwner(tile), tfdd->owner) || _patches.shared_stations)) {
+ 		if ((_map5[tile] & ~0x3) == 0xC0) {
+ 			if (length < tfdd->best_length) {
+ 				tfdd->best_length = length;
+@@ -2377,7 +2379,7 @@
+ 		case MP_STREET:
+ 			// tracks over roads, do owner check of tracks (_map_owner[tile])
+ 			return
+-				IsTileOwner(tile, v->owner) &&
++				(_patches.shared_tracks || IsSisterCompany(GetTileOwner(tile), v->owner)) &&
+ 				(v->subtype != TS_Front_Engine || (_map3_hi[tile] & 0xF) == v->u.rail.railtype);
+ 
+ 		default:
+@@ -2385,7 +2387,7 @@
+ 	}
+ 
+ 	return
+-		IsTileOwner(tile, v->owner) &&
++		(_patches.shared_tracks || IsSisterCompany(GetTileOwner(tile), v->owner)) &&
+ 		(v->subtype != TS_Front_Engine || (_map3_lo[tile] & 0xF) == v->u.rail.railtype);
+ }
+ 
+Index: road_cmd.c
+===================================================================
+--- road_cmd.c	(revision 2424)
++++ road_cmd.c	(working copy)
+@@ -11,6 +11,7 @@
+ #include "gfx.h"
+ #include "npf.h"
+ #include "sound.h"
++#include "economy.h"
+ #include "depot.h"
+ 
+ /* When true, GetTrackStatus for roads will treat roads under reconstruction
+@@ -86,7 +87,19 @@
+ 	// Only do the special processing if the road is owned
+ 	// by a town
+ 	if (owner != OWNER_TOWN) {
+-		return owner == OWNER_NONE || CheckOwnership(owner);
++		if(owner == OWNER_NONE || (!_patches.allow_track_removal && owner == _current_player)){
++			return true;
++		}
++		if(_patches.allow_track_removal && IsSisterCompany(owner,_current_player)){
++			return true;
++		}
++		if(!DEREF_PLAYER(owner)->is_active){
++			return true;
++		}
++
++		_error_message = STR_013B_OWNED_BY;
++		GetNameOfOwner(owner, 0);
++		return false;
+ 	}
+ 
+ 	if (_cheats.magic_bulldozer.value)
+@@ -663,7 +676,7 @@
+ 
+ static int32 RemoveRoadDepot(uint tile, uint32 flags)
+ {
+-	if (!CheckTileOwnership(tile) && _current_player != OWNER_WATER)
++	if ((!CheckTileOwnership(tile) && !(_patches.allow_track_removal && IsSisterCompany(_current_player, GetTileOwner(tile))))&& _current_player != OWNER_WATER)
+ 		return CMD_ERROR;
+ 
+ 	if (!EnsureNoVehicle(tile))
+Index: rail_cmd.c
+===================================================================
+--- rail_cmd.c	(revision 2424)
++++ rail_cmd.c	(working copy)
+@@ -15,6 +15,7 @@
+ #include "sprite.h"
+ #include "depot.h"
+ #include "waypoint.h"
++#include "economy.h"
+ 
+ extern uint16 _custom_sprites_base;
+ 
+@@ -338,7 +339,7 @@
+ 				return CMD_ERROR;
+ 			}
+ 			if (m5 & RAIL_TYPE_SPECIAL ||
+-					!IsTileOwner(tile, _current_player) ||
++					!(_patches.shared_tracks || IsSisterCompany(GetTileOwner(tile),_current_player)) ||
+ 					(_map3_lo[tile] & 0xFU) != p1) {
+ 				// Get detailed error message
+ 				return DoCommandByTile(tile, 0, 0, flags, CMD_LANDSCAPE_CLEAR);
+@@ -441,7 +442,9 @@
+ 	if (!((1<<ti.type) & ((1<<MP_TUNNELBRIDGE)|(1<<MP_STREET)|(1<<MP_RAILWAY))))
+ 		return CMD_ERROR;
+ 
+-	if (_current_player != OWNER_WATER && !CheckTileOwnership(tile))
++	if (_current_player != OWNER_WATER &&
++				((_patches.allow_track_removal && !CheckSubsidiaryTileOwnership(tile)) ||
++				(!_patches.allow_track_removal && !CheckTileOwnership(tile))))
+ 		return CMD_ERROR;
+ 
+ 	// allow building rail under bridge
+@@ -931,7 +934,10 @@
+ 		return CMD_ERROR;
+ 
+ 	/* Only water can remove signals from anyone */
+-	if (_current_player != OWNER_WATER && !CheckTileOwnership(tile)) return CMD_ERROR;
++	if (_current_player != OWNER_WATER && 
++				((_patches.allow_track_removal && !CheckSubsidiaryTileOwnership(tile)) ||
++				(!_patches.allow_track_removal && !CheckTileOwnership(tile))))
++			return CMD_ERROR;
+ 
+ 	SET_EXPENSES_TYPE(EXPENSES_CONSTRUCTION);
+ 
+@@ -1067,7 +1073,8 @@
+ 		if (m5 & RAIL_TYPE_SPECIAL)
+ 			return_cmd_error(STR_2004_BUILDING_MUST_BE_DEMOLISHED);
+ 
+-		if (!IsTileOwner(tile, _current_player))
++		if ((_patches.allow_track_removal && !IsSisterCompany(GetTileOwner(tile), _current_player)) ||
++			 (!_patches.allow_track_removal && !IsTileOwner(tile, _current_player)))
+ 			return_cmd_error(STR_1024_AREA_IS_OWNED_BY_ANOTHER);
+ 
+ 		return_cmd_error(STR_1008_MUST_REMOVE_RAILROAD_TRACK);
+Index: vehicle.c
+===================================================================
+--- vehicle.c	(revision 2424)
++++ vehicle.c	(working copy)
+@@ -14,6 +14,7 @@
+ #include "player.h"
+ #include "engine.h"
+ #include "sound.h"
++#include "economy.h"
+ #include "debug.h"
+ #include "npf.h"
+ #include "vehicle_gui.h"
+@@ -1416,7 +1417,7 @@
+ 	/* Check if there is money for the upgrade.. if not, give a nice news-item
+ 	    (that is needed, because this CMD is called automaticly) */
+ 	if ( DEREF_PLAYER(v->owner)->money64 < (int32)(autorefit_money + build_cost + rear_engine_cost - v->value)) {
+-		if (( _local_player == v->owner ) && ( v->unitnumber != 0 )) {  //v->unitnumber = 0 for train cars
++		if (IsSisterCompany(v->owner,_local_player) && ( v->unitnumber != 0 )) {  //v->unitnumber = 0 for train cars
+ 			int message;
+ 			SetDParam(0, v->unitnumber);
+ 			switch (v->type) {
+Index: player_gui.c
+===================================================================
+--- player_gui.c	(revision 2424)
++++ player_gui.c	(working copy)
+@@ -17,9 +17,15 @@
+ #include "network_client.h"
+ #endif
+ 
++extern void DrawPlayerIcon(int p, int x, int y);
++extern Player *DoStartupNewPlayer(bool is_ai);
++
++static uint64 _subsidiaries_money_amount = 0;
++static byte _subsidiaries_money_target = 0;
++void ShowSubsidiariesManagement(void);
++
+ static void DoShowPlayerFinances(int player, bool show_small, bool show_stickied);
+ 
+-
+ static void DrawPlayerEconomyStats(Player *p, byte mode)
+ {
+ 	int x,y,i,j,year;
+@@ -95,6 +101,259 @@
+ 	DrawStringRightAligned(182, y, STR_7028, 0);
+ }
+ 
++static const Widget _ask_merge_subsidiaries_widgets[] = {
++{    WWT_TEXTBTN,    RESIZE_NONE,	4,     0,    10,     0,    13, STR_00C5,			STR_NULL},
++{    WWT_CAPTION,    RESIZE_NONE,	4,    11,   179,     0,    13, STR_SUBSIDIARY_ASK_MERGER_TITLE,	STR_NULL},
++{     WWT_IMGBTN,    RESIZE_NONE,	4,     0,   179,    14,    91, 0x0,						STR_NULL},
++{    WWT_TEXTBTN,    RESIZE_NONE,	12,    25,    84,    72,    83, STR_00C9_NO,		STR_NULL},
++{    WWT_TEXTBTN,    RESIZE_NONE,	12,    95,   154,    72,    83, STR_00C8_YES,	STR_NULL},
++{   WIDGETS_END},
++};
++
++static void AskMergeSubsidiariesWndProc(Window *w, WindowEvent *e) {
++	int i = 0;
++	WindowClass clss;
++	WindowNumber n;
++	Player *p;
++	Player *local;
++
++	p = DEREF_PLAYER(w->window_number);
++	local = DEREF_PLAYER(_local_player);
++
++	switch(e->event) {
++	case WE_PAINT:
++		DrawWindowWidgets(w);
++
++		if((GetMotherCompany(DEREF_PLAYER(_local_player)) == w->window_number)){
++			SetDParam(0, local->name_1);
++			SetDParam(1, local->name_2);
++
++			SetDParam(2, p->name_1);
++			SetDParam(3, p->name_2);
++		}else{
++			SetDParam(0, p->name_1);
++			SetDParam(1, p->name_2);
++
++			SetDParam(2, local->name_1);
++			SetDParam(3, local->name_2);
++		}
++
++		DrawStringMultiCenter(0x5A, 0x26, STR_SUBSIDIARY_ASK_MERGER, 178);
++		return;
++
++	case WE_CLICK:
++		switch(e->click.widget) {
++
++			case 3:
++				DeleteWindowById(WC_SUBSIDIARIES_ASK_MERGER, w->window_number);
++				break;
++
++			case 4:
++	do_merger:;
++				/* Ugly hack to go around the w pointer modification during DoAcquireCompany() calls */
++				clss = w->window_class;
++				n = w->window_number;
++
++				if((GetMotherCompany(DEREF_PLAYER(_local_player)) == w->window_number)){
++					i = _current_player;
++					_current_player = w->window_number;
++					_local_player = w->window_number;
++					DoAcquireCompany(DEREF_PLAYER(i));
++				}else{
++					DoAcquireCompany(DEREF_PLAYER(w->window_number));
++				}
++
++				DeleteWindowById(clss,n);
++				break;
++			}
++		break;
++
++	case WE_KEYPRESS: /* Perform the merger on pressing 'Enter' */
++		if (e->keypress.keycode == WKC_RETURN)
++			goto do_merger;
++		break;
++	}
++}
++
++static const Widget _ask_send_money_widgets[] = {
++{    WWT_TEXTBTN,	RESIZE_NONE,     4,     0,    10,     0,    13, STR_00C5,			STR_NULL},
++{    WWT_CAPTION,   RESIZE_NONE,	 4,    11,   179,     0,    13, STR_SUBSIDIARY_CASH_REQUEST,	STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,	4,     0,   179,    14,    91, 0x0,						STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,	12,    25,    84,    72,    83, STR_00C9_NO,		STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,	12,    95,   154,    72,    83, STR_00C8_YES,	STR_NULL},
++{   WIDGETS_END},
++};
++
++static const Widget _ask_sell_share_widgets[] = {
++{    WWT_TEXTBTN,	RESIZE_NONE,     4,     0,    10,     0,    13, STR_00C5,			STR_NULL},
++{    WWT_CAPTION,   RESIZE_NONE,	 4,    11,   179,     0,    13, STR_SUBSIDIARY_SELL_SHARE_TITLE,	STR_NULL},
++{     WWT_IMGBTN,   RESIZE_NONE,	4,     0,   179,    14,    91, 0x0,						STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,	12,    25,    84,    72,    83, STR_00C9_NO,		STR_NULL},
++{    WWT_TEXTBTN,   RESIZE_NONE,	12,    95,   154,    72,    83, STR_00C8_YES,	STR_NULL},
++{   WIDGETS_END},
++};
++
++int32 _ask_send_money_amount;
++
++static void AskSellShareWndProc(Window *w, WindowEvent *e) {
++	/* Unused Variable	int i = 0;	*/
++	WindowClass clss;
++	WindowNumber n;
++	Player *p;
++	Player *local;
++
++	p = DEREF_PLAYER(w->window_number);
++	local = DEREF_PLAYER(_local_player);
++
++	/* Ugly hack to go around the w pointer modification during DoAcquireCompany() calls */
++	clss = w->window_class;
++	n = w->window_number;
++
++	switch(e->event) {
++	case WE_PAINT:
++		DrawWindowWidgets(w);
++
++		SetDParam(0, p->name_1);
++		SetDParam(1, p->name_2);
++
++		SetDParam(2, _ask_send_money_amount);
++
++		DrawStringMultiCenter(0x5A, 0x26, STR_SUBSIDIARY_SELL_SHARE, 178);
++		return;
++
++	case WE_CLICK:
++		switch(e->click.widget) {
++
++			case 3:
++				DoCommandP(0, n, 0, NULL, CMD_SUBSIDIARY_BUY_SHARE_RESPONSE | CMD_MSG(STR_SUBSIDIARY_GET_ERROR));
++				DeleteWindowById(clss, n);
++				break;
++
++			case 4:
++	do_send:;
++				DoCommandP(0, n, 1, NULL, CMD_SUBSIDIARY_BUY_SHARE_RESPONSE | CMD_MSG(STR_SUBSIDIARY_GET_ERROR));
++				DeleteWindowById(clss,n);
++				break;
++			}
++		break;
++
++	case WE_KEYPRESS: /* Perform the merger on pressing 'Enter' */
++		if (e->keypress.keycode == WKC_RETURN)
++			goto do_send;
++		break;
++	}
++}
++
++static void AskSendMoneyWndProc(Window *w, WindowEvent *e) {
++	/* Unused Variable	int i = 0;	*/
++	WindowClass clss;
++	WindowNumber n;
++	Player *p;
++	Player *local;
++
++	p = DEREF_PLAYER(w->window_number);
++	local = DEREF_PLAYER(_local_player);
++
++	/* Ugly hack to go around the w pointer modification during DoAcquireCompany() calls */
++	clss = w->window_class;
++	n = w->window_number;
++
++	switch(e->event) {
++	case WE_PAINT:
++		DrawWindowWidgets(w);
++
++		SetDParam(0, p->name_1);
++		SetDParam(1, p->name_2);
++
++		SetDParam(2, _ask_send_money_amount);
++
++		DrawStringMultiCenter(0x5A, 0x26, STR_SUBSIDIARY_CASH_REQUESTED, 178);
++		return;
++
++	case WE_CLICK:
++		switch(e->click.widget) {
++
++			case 3:
++				DoCommandP(0, n, -1, NULL, CMD_SUBSIDIARY_SEND_MONEY_ON_REQUEST | CMD_MSG(STR_SUBSIDIARY_GET_ERROR));
++				DeleteWindowById(clss, n);
++				break;
++
++			case 4:
++	do_send:;
++				DoCommandP(0, n, _ask_send_money_amount, NULL, CMD_SUBSIDIARY_SEND_MONEY_ON_REQUEST | CMD_MSG(STR_SUBSIDIARY_GET_ERROR));
++
++				DeleteWindowById(clss,n);
++				break;
++			}
++		break;
++
++	case WE_KEYPRESS: /* Perform the merger on pressing 'Enter' */
++		if (e->keypress.keycode == WKC_RETURN)
++			goto do_send;
++		break;
++	}
++}
++
++static const WindowDesc _ask_merge_subsidiaries_desc = {
++	WDP_CENTER, WDP_CENTER, 180, 92,
++	WC_SUBSIDIARIES_ASK_MERGER,0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS,
++	_ask_merge_subsidiaries_widgets,
++	AskMergeSubsidiariesWndProc
++};
++
++void AskMergeSubsidiaries(byte player)
++{
++	AllocateWindowDescFront(&_ask_merge_subsidiaries_desc, player);
++}
++
++static const WindowDesc _ask_send_money_desc = {
++	WDP_CENTER, WDP_CENTER, 180, 92,
++	WC_SUBSIDIARIES_ASK_MERGER,0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS,
++	_ask_send_money_widgets,
++	AskSendMoneyWndProc
++};
++
++void AskSendMoney(byte player, int32 amount)
++{
++	_ask_send_money_amount = amount;
++	AllocateWindowDescFront(&_ask_send_money_desc, player);
++}
++
++static const WindowDesc _ask_sell_share_desc = {
++	WDP_CENTER, WDP_CENTER, 180, 92,
++	WC_SUBSIDIARIES_ASK_MERGER,0,
++	WDF_STD_TOOLTIPS | WDF_DEF_WIDGET | WDF_STD_BTN | WDF_UNCLICK_BUTTONS,
++	_ask_sell_share_widgets,
++	AskSellShareWndProc
++};
++
++void AskSellShare(byte player)
++{
++	AllocateWindowDescFront(&_ask_sell_share_desc, player);
++}
++
++static const Widget _subsidiary_send_money[] = {
++{    WWT_TEXTBTN,    RESIZE_NONE,	14,     0,    10,     0,    13, STR_00C5,											STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,    RESIZE_NONE,	14,    11,   319,     0,    13, STR_SUBSIDIARY_SEND_TO,				STR_018C_WINDOW_TITLE_DRAG_THIS},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,		 0,   319,    14,    72, 0x0,														STR_NULL},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,     0,   159,    73,    84, STR_SUBSIDIARY_ADD_CASH,				STR_SUBSIDIARY_ADD_CASH_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   160,   319,    73,    84, STR_SUBSIDIARY_SUB_CASH,				STR_SUBSIDIARY_SUB_CASH_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   182,   317,    16,    27, STR_SUBSIDIARIES_SEND_MONEY,		STR_SUBSIDIARIES_SEND_MONEY_E},
++{   WIDGETS_END},
++};
++
++static const Widget _subsidiary_request_money[] = {
++{    WWT_TEXTBTN,    RESIZE_NONE,	14,     0,    10,     0,    13, STR_00C5,											STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,    RESIZE_NONE,	14,    11,   319,     0,    13, STR_SUBSIDIARY_REQUEST_FROM,		STR_018C_WINDOW_TITLE_DRAG_THIS},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     0,   319,    14,    72, 0x0,														STR_NULL},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,     0,   159,    73,    84, STR_SUBSIDIARY_ADD_CASH,				STR_SUBSIDIARY_ADD_CASH_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   160,   319,    73,    84, STR_SUBSIDIARY_SUB_CASH,				STR_SUBSIDIARY_SUB_CASH_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   182,   317,    16,    27, STR_SUBSIDIARIES_REQUEST_MONEY,STR_SUBSIDIARIES_REQUEST_MONEY_E},
++{   WIDGETS_END},
++};
++
+ static const Widget _player_finances_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,					STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   379,     0,    13, STR_700E_FINANCES,	STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -139,7 +398,103 @@
+ {   WIDGETS_END},
+ };
+ 
++static void SubsidiaryMoneyTransferWndProc(Window *w, WindowEvent *e)
++{
++	Player *p = DEREF_PLAYER(_subsidiaries_money_target);
+ 
++	switch(e->event){
++		case WE_PAINT:
++
++			SetDParam(0, p->name_1);
++			SetDParam(1, p->name_2);
++			SetDParam(2, GetPlayerNameString(p->index, 3));
++			SetDParam(3, 10000);
++
++			w->caption_color = _local_player;
++
++			DrawWindowWidgets(w);
++
++			DrawString(10, 32, STR_SUBSIDIARY_TARGET_HAS, 0);
++			SetDParam64(0, p->player_money);
++			DrawStringRightAligned(315, 32, STR_SUBSIDIARY_AMOUNT_TARGET, 0);
++
++			DrawString(10, 46, STR_SUBSIDIARY_SEND_AMOUNT, 0);
++			DrawString(10, 60, STR_SUBSIDIARY_REQUEST_AMOUNT, 0);
++			SetDParam64(0, _subsidiaries_money_amount);
++			DrawStringRightAligned(315, 46, STR_SUBSIDIARY_AMOUNT_SEND, 0);
++			SetDParam64(0,  _subsidiaries_money_amount - (_subsidiaries_money_amount / 16));
++			DrawStringRightAligned(315, 60, STR_SUBSIDIARY_AMOUNT_GET, 0);
++
++			break;
++
++		case WE_CLICK:
++			switch(e->click.widget){
++			case 3:{ /* Increase amount */
++					uint64 oldAmount = _subsidiaries_money_amount;
++					if(_shift_pressed){
++						_subsidiaries_money_amount += 100000;
++					}else if(_ctrl_pressed){
++						_subsidiaries_money_amount *= 2;
++					}else{
++						_subsidiaries_money_amount += 10000;
++					}
++					if(_subsidiaries_money_amount > 0x7FFFFFFFFFFFFFFFL)
++						_subsidiaries_money_amount = oldAmount;
++
++					SetWindowDirty(w);
++					}break;
++
++				case 4:{ /* Decrease amount */
++					uint64 oldAmount = _subsidiaries_money_amount;
++					if(_shift_pressed){
++						_subsidiaries_money_amount -= 100000;
++					}else if(_ctrl_pressed){
++						_subsidiaries_money_amount /= 2;
++					}else{
++						_subsidiaries_money_amount -= 10000;
++					}
++					if(_subsidiaries_money_amount > 0x7FFFFFFFFFFFFFFFL)
++						_subsidiaries_money_amount = oldAmount;
++					SetWindowDirty(w);
++					}break;
++
++				case 5:{/* Perform transaction */
++					WindowNumber wn = w->window_number;
++					Player *me = DEREF_PLAYER(_local_player);
++
++					if(IsWindowOfPrototype(w,_subsidiary_send_money)){
++						if(!DoCommandP(0,_subsidiaries_money_target,_subsidiaries_money_amount, NULL, CMD_SUBSIDIARY_SEND_MONEY | CMD_MSG(STR_SUBSIDIARY_GET_ERROR))){
++							SetDParam(0,_subsidiaries_money_amount);
++							ShowErrorMessage(STR_0003_NOT_ENOUGH_CASH_REQUIRES, STR_SUBSIDIARY_GET_ERROR, 0,0);
++						}
++					}else{
++						if(!_networking){
++							// don't ask for getting money
++							_current_player = p->index;
++							if(!DoCommandP(0, _local_player, _subsidiaries_money_amount, NULL, CMD_SUBSIDIARY_SEND_MONEY | CMD_MSG(STR_SUBSIDIARY_GET_ERROR))){
++								SetDParam(0,_subsidiaries_money_amount);
++								ShowErrorMessage(STR_0003_NOT_ENOUGH_CASH_REQUIRES, STR_SUBSIDIARY_GET_ERROR, 0,0);
++							}
++							_current_player = _local_player;
++						}else{
++							// ask target company if it allows to get money
++							DoCommandP(0, p->index, _subsidiaries_money_amount,NULL, CMD_SUBSIDIARY_GET_MONEY);
++						}
++
++					}
++					DeleteWindowById(WC_SUBSIDIARIES_MONEY, wn);
++					}break;
++			}
++			break;
++
++		case WE_MOUSELOOP:
++			/* redraw the window every now and then */
++			if ((++w->vscroll.pos & 0x1F) == 0)
++				SetWindowDirty(w);
++			break;
++	}
++}
++
+ static void PlayerFinancesWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+@@ -148,10 +503,19 @@
+ 
+ 		w->disabled_state = p->current_loan != 0 ? 0 : (1 << 7);
+ 
++		if(( _patches.subsidiaries && !_networking && (GetMotherCompany(p) != p->index || _local_player != GetMotherCompany(p))) ||
++			(((_patches.subsidiaries && _networking) || !_patches.subsidiaries) && _local_player != p->index)){
++			w->disabled_state |= 0x1 << 6;
++			if(p->current_loan <= 0 || _local_player != p->index){
++				w->disabled_state |= 0x1 << 7;
++			}
++		}
++
+ 		SetDParam(0, p->name_1);
+ 		SetDParam(1, p->name_2);
+ 		SetDParam(2, GetPlayerNameString((byte)w->window_number, 3));
+ 		SetDParam(4, 10000);
++
+ 		DrawWindowWidgets(w);
+ 
+ 		DrawPlayerEconomyStats(p, (byte)WP(w,def_d).data_1);
+@@ -221,7 +585,8 @@
+ 	Window *w;
+ 	int mode;
+ 
+-	mode = ((byte)player != _local_player)*2 + show_small;
++	mode = (!IsSisterCompany((byte)player,_local_player))*2 + show_small;
++
+ 	w = AllocateWindowDescFront( desc_table[mode], player);
+ 	if (w) {
+ 		w->caption_color = w->window_number;
+@@ -296,6 +661,30 @@
+ 	}
+ }
+ 
++static const WindowDesc _subsidiary_send_money_desc = {
++	-1,-1,  320, 85,
++	WC_SUBSIDIARIES_MONEY,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_RESTORE_DPARAM | WDF_UNCLICK_BUTTONS,
++	_subsidiary_send_money,
++	SubsidiaryMoneyTransferWndProc
++};
++
++static const WindowDesc _subsidiary_request_money_desc = {
++	-1,-1,  320, 85,
++	WC_SUBSIDIARIES_MONEY,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_RESTORE_DPARAM | WDF_UNCLICK_BUTTONS,
++	_subsidiary_request_money,
++	SubsidiaryMoneyTransferWndProc
++};
++
++static void ShowSubsidiaryMoneyTransfer(byte player, bool send){
++	Window *w;
++	_subsidiaries_money_target = player;
++	_subsidiaries_money_amount = 0;
++
++	w = AllocateWindowDescFront( send ? &_subsidiary_send_money_desc : &_subsidiary_request_money_desc, GetMotherCompany(DEREF_PLAYER(player)));
++}
++
+ static const Widget _select_player_color_widgets[] = {
+ {    WWT_TEXTBTN,   RESIZE_NONE,    14,     0,    10,     0,    13, STR_00C5,STR_018B_CLOSE_WINDOW},
+ {    WWT_CAPTION,   RESIZE_NONE,    14,    11,   149,     0,    13, STR_7007_NEW_COLOR_SCHEME, STR_018C_WINDOW_TITLE_DRAG_THIS},
+@@ -377,7 +766,8 @@
+ {      WWT_EMPTY,   RESIZE_NONE,    14,     0,   355,    32,    43, 0x0,                     STR_NULL},
+ {      WWT_EMPTY,   RESIZE_NONE,    14,     0,   355,    32,    43, 0x0,                     STR_NULL},
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   266,   355,   138,   149, STR_COMPANY_PASSWORD,    STR_COMPANY_PASSWORD_TOOLTIP},
+-{   WIDGETS_END},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,	14,   266,   355,    32,    43, STR_SUBSIDIARIES,			STR_SUBSIDIARIES_MANAGEMENT},
++{WIDGETS_END},
+ };
+ 
+ static const Widget _other_player_company_widgets[] = {
+@@ -408,19 +798,51 @@
+ {      WWT_EMPTY,   RESIZE_NONE,    14,     0,   355,    32,    43, 0x0,                     STR_NULL},
+ {      WWT_EMPTY,   RESIZE_NONE,    14,     0,   355,    32,    43, 0x0,                     STR_NULL},
+ { WWT_PUSHTXTBTN,   RESIZE_NONE,    14,   266,   355,   138,   149, STR_COMPANY_PASSWORD,    STR_COMPANY_PASSWORD_TOOLTIP},
++{ WWT_PUSHTXTBTN,   RESIZE_NONE,	14,   266,   355,    46,    57, STR_SUBSIDIARIES,			STR_SUBSIDIARIES_MANAGEMENT},
+ {   WIDGETS_END},
+ };
+ 
++static Widget _subsidiary_management_widgets[] = {
++{    WWT_TEXTBTN,    RESIZE_NONE,	14,     0,    10,     0,    13, STR_00C5,					STR_018B_CLOSE_WINDOW},
++{    WWT_CAPTION,    RESIZE_NONE,	14,    11,   379,     0,    13, STR_YOUR_SUBSIDIARIES,		STR_018C_WINDOW_TITLE_DRAG_THIS},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     0,   379,    14,   120, 0x0,								STR_NULL},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    16,    27, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    35,    46, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    47,    58, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    59,    70, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    71,    82, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    83,    94, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,    95,   106, 0x0,STR_SUBSIDIARY_TOGGLE},
++{     WWT_IMGBTN,    RESIZE_NONE,	14,     2,   247,   107,   118, 0x0,STR_SUBSIDIARY_TOGGLE},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   264,   377,    18,    29, STR_SUBSIDIARIES_ADMINISTRATE,		STR_SUBSIDIARIES_ADMINISTRATE_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   264,   377,    32,    43, STR_SUBSIDIARIES_SEND_MONEY,			STR_SUBSIDIARIES_SEND_MONEY_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   264,   377,    46,    57, STR_SUBSIDIARIES_REQUEST_MONEY,	STR_SUBSIDIARIES_REQUEST_MONEY_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   264,   377,    60,    71, STR_SUBSIDIARIES_MERGER,					STR_SUBSIDIARIES_MERGER_E},
++{ WWT_PUSHTXTBTN,    RESIZE_NONE,	14,   264,   377,   107,   118, STR_SUBSIDIARY_CREATE,						STR_SUBSIDIARY_CREATE_E},
++{   WIDGETS_END},
++};
++
++static void SubsidiaryManagementWndProc(Window *w, WindowEvent *e);
++
++static const WindowDesc _subsidiary_management_desc = {
++	-1,-1, 380, 121,
++	WC_SUBSIDIARIES,0,
++	WDF_STD_TOOLTIPS | WDF_STD_BTN | WDF_DEF_WIDGET | WDF_UNCLICK_BUTTONS,
++	_subsidiary_management_widgets,
++	SubsidiaryManagementWndProc
++};
++
+ static void DrawPlayerVehiclesAmount(int player)
+ {
+ 	const int x = 110;
+ 	int y = 72;
+ 	Vehicle *v;
+-	uint train,road,air,ship;
++	uint train,road,air,ship, subtrain, subroad, subair, subship;
+ 
+ 	DrawString(x, y, STR_7039_VEHICLES, 0);
+ 
+ 	train = road = air = ship = 0;
++	subtrain = subair = subroad = subship = 0;
+ 
+ 	FOR_ALL_VEHICLES(v) {
+ 		if (v->owner == player) {
+@@ -436,6 +858,19 @@
+ 				ship++;
+ 			}
+ 		}
++		if(IsSisterCompany(v->owner, player)){
++			if (v->type == VEH_Train) {
++				if (v->subtype == TS_Front_Engine)
++					subtrain++;
++			} else if (v->type == VEH_Road) {
++				subroad++;
++			} else if (v->type == VEH_Aircraft) {
++				if (v->subtype <= 2)
++					subair++;
++			} else if (v->type == VEH_Ship) {
++				subship++;
++			}
++		}
+ 	}
+ 
+ 	if (train+road+air+ship == 0) {
+@@ -443,25 +878,49 @@
+ 	} else {
+ 		if (train != 0) {
+ 			SetDParam(0, train);
+-			DrawString(x + 70, y, train==1 ? STR_703A_TRAIN : STR_703B_TRAINS, 0);
++			if(_patches.subsidiaries && subtrain > 0){
++				SetDParam(1, subtrain);
++				SetDParam(2, (uint16)(((double)train / (double)subtrain) * 100 + 0.5));
++				DrawString(x + 70, y, train==1 ? STR_703A_TRAIN_SUB : STR_703B_TRAINS_SUB, 0);
++			}else{
++				DrawString(x + 70, y, train==1 ? STR_703A_TRAIN : STR_703B_TRAINS, 0);
++			}
+ 			y += 10;
+ 		}
+ 
+ 		if (road != 0) {
+ 			SetDParam(0, road);
+-			DrawString(x + 70, y, road==1 ? STR_703C_ROAD_VEHICLE : STR_703D_ROAD_VEHICLES, 0);
++			if(_patches.subsidiaries && subroad > 0){
++				SetDParam(1, subroad);
++				SetDParam(2, (uint16)(((double)road / (double)subroad) * 100 + 0.5));
++				DrawString(x + 70, y, road==1 ? STR_703C_ROAD_VEHICLE_SUB : STR_703D_ROAD_VEHICLES_SUB, 0);
++			}else{
++				DrawString(x + 70, y, road==1 ? STR_703C_ROAD_VEHICLE : STR_703D_ROAD_VEHICLES, 0);
++			}
+ 			y += 10;
+ 		}
+ 
+ 		if (air != 0) {
+ 			SetDParam(0, air);
+-			DrawString(x + 70, y, air==1 ? STR_703E_AIRCRAFT : STR_703F_AIRCRAFT, 0);
++			if(_patches.subsidiaries && subair > 0){
++				SetDParam(1, subair);
++				SetDParam(2, (uint16)(((double)air / (double)subair) * 100 + 0.5));
++				DrawString(x + 70, y, air==1 ? STR_703E_AIRCRAFT_SUB : STR_703F_AIRCRAFT_SUB, 0);
++			}else{
++				DrawString(x + 70, y, air==1 ? STR_703E_AIRCRAFT : STR_703F_AIRCRAFT, 0);
++			}
+ 			y += 10;
+ 		}
+ 
+ 		if (ship != 0) {
+ 			SetDParam(0, ship);
+-			DrawString(x + 70, y, ship==1 ? STR_7040_SHIP : STR_7041_SHIPS, 0);
++			if(_patches.subsidiaries && subship > 0){
++				SetDParam(1, subship);
++				SetDParam(2, (uint16)(((double)ship / (double)subship) * 100 + 0.5));
++				DrawString(x + 70, y, ship==1 ? STR_7040_SHIP_SUB : STR_7041_SHIPS_SUB, 0);
++			}else{
++				DrawString(x + 70, y, ship==1 ? STR_7040_SHIP : STR_7041_SHIPS, 0);
++			}
+ 		}
+ 	}
+ }
+@@ -480,21 +939,30 @@
+ 	Player *p2;
+ 	int amt;
+ 
+-	FOR_ALL_PLAYERS(p2) {
+-		if ((amt=GetAmountOwnedBy(p, p2->index)) != 0) {
+-			num++;
+ 
+-			SetDParam(num*3+0, amt*25);
+-			SetDParam(num*3+1, p2->name_1);
+-			SetDParam(num*3+2, p2->name_2);
++	if(_patches.subsidiaries && GetMotherCompany(p) != p->index){
++		SetDParam(0,DEREF_PLAYER(GetMotherCompany(p))->name_1);
++		SetDParam(1,DEREF_PLAYER(GetMotherCompany(p))->name_2);
+ 
+-			if (num != 0)
+-				break;
++		DrawString(120, 124, STR_SUBSIDIARY_OF, 0);
++
++	}else{
++		FOR_ALL_PLAYERS(p2) {
++			if ((amt=GetAmountOwnedBy(p, p2->index)) != 0) {
++				num++;
++
++				SetDParam(num*3+0, amt*25);
++				SetDParam(num*3+1, p2->name_1);
++				SetDParam(num*3+2, p2->name_2);
++
++				if (num != 0)
++					break;
++			}
+ 		}
++
++		if (num >= 0)
++			DrawString(120, 124, STR_707D_OWNED_BY+num, 0);
+ 	}
+-
+-	if (num >= 0)
+-		DrawString(120, 124, STR_707D_OWNED_BY+num, 0);
+ }
+ 
+ static void PlayerCompanyWndProc(Window *w, WindowEvent *e)
+@@ -504,10 +972,19 @@
+ 		Player *p = DEREF_PLAYER(w->window_number);
+ 		uint32 dis = 0;
+ 
++		if (_patches.subsidiaries && IsWindowOfPrototype(w, _other_player_company_widgets) && GetMotherCompany(p) != p->index && IsSisterCompany(_local_player,p->index)){
++			DeleteWindowById(WC_COMPANY, w->window_number);
++			ShowPlayerCompany(p->index);
++			return;
++		}
++
+ 		if (!IsWindowOfPrototype(w, _other_player_company_widgets)) {
+ 			AssignWidgetToWindow(w, (p->location_of_house != 0) ? _my_player_company_bh_widgets : _my_player_company_widgets);
+ 
+-			if (!_networking) SETBIT(w->hidden_state, 11); // hide company-password widget
++			if (!_networking || (_networking && _patches.subsidiaries && _local_player != p->index)) SETBIT(w->hidden_state, 11); // hide company-password widget
++			if (!_patches.subsidiaries) w->hidden_state |= (1 << 12); // hide subsidiairies widget
++			if (_networking && _patches.subsidiaries && _local_player != p->index) dis |= 0xF << 3;
++
+ 		} else {
+ 			if (p->location_of_house == 0) SETBIT(dis, 7);
+ 
+@@ -515,8 +992,11 @@
+ 				/* If all shares are owned by someone (none by nobody), disable buy button */
+ 				if (GetAmountOwnedBy(p, OWNER_SPECTATOR) == 0) SETBIT(dis, 9);
+ 
+-				/* Only 25% left to buy. If the player is human, disable buying it up.. TODO issues! */
+-				if (GetAmountOwnedBy(p, OWNER_SPECTATOR) == 1 && !p->is_ai) SETBIT(dis, 9);
++				/* We can buy out real players in a network game only if subsidiairies are enabled*/
++				/* and target company isn't already part of a sub group (except if it's the mother company)*/
++				if ((GetAmountOwnedBy(p, OWNER_SPECTATOR) == 1 && !p->is_ai && !_patches.subsidiaries) ||
++					(_patches.subsidiaries && (IsSisterCompany(_local_player,p->index) || GetMotherCompany(p) != p->index)))
++					SETBIT(dis, 9);
+ 
+ 				/* If the player doesn't own any shares, disable sell button */
+ 				if (GetAmountOwnedBy(p, _local_player) == 0) SETBIT(dis, 10);
+@@ -531,6 +1011,18 @@
+ 		SetDParam(1, p->name_2);
+ 		SetDParam(2, GetPlayerNameString((byte)w->window_number, 3));
+ 
++		if(_patches.subsidiaries && IsSubsidiary(p) && (DEREF_PLAYER(_local_player) != p)){
++			if(IsWindowOfPrototype(w, _my_player_company_widgets))
++				dis |= 1 << 7;
++			else
++				dis |= 1 << 8;
++			}
++
++		if(_patches.subsidiaries && (GetMotherCompany(p) != p->index)){
++			dis |= 1 <<10;
++			dis |= 1 << 9;
++		}
++
+ 		w->disabled_state = dis;
+ 		DrawWindowWidgets(w);
+ 
+@@ -622,6 +1114,11 @@
+ 			}
+ 			#endif
+ 		}	break;
++
++		case 12: /* Manage Subsidiaries */
++			if(_patches.subsidiaries)
++				ShowSubsidiariesManagement();
++			break;
+ 		}
+ 
+ 	case WE_MOUSELOOP:
+@@ -642,6 +1139,7 @@
+ 	case WE_DESTROY:
+ 		DeleteWindowById(WC_PLAYER_COLOR, w->window_number);
+ 		DeleteWindowById(WC_PLAYER_FACE, w->window_number);
++		DeleteWindowById(WC_SUBSIDIARIES, GetMotherCompany(DEREF_PLAYER(w->window_number)));
+ 		break;
+ 
+ 	case WE_ON_EDIT_TEXT: {
+@@ -669,7 +1167,182 @@
+ 	}
+ }
+ 
++static void SubsidiaryManagementWndProc(Window *w, WindowEvent *e)
++{
++	int i = 0;
++	int selected = -1;
++	Player *selectedPlayer;
++	Player *p;
+ 
++	switch(e->event) {
++	case WE_PAINT: {
++
++		w->caption_color = _local_player;
++
++		w->disabled_state = 0;
++		if((GetSubsidiariesCount() <= 1) || ((w->click_state & 0x7F8) == 0))
++			w->disabled_state = 0xF << 11;
++
++		// disable create new sub in network mode
++		if(_networking)
++			w->disabled_state |= (1 << 15) | (1 << 14) | (1 << 11);
++
++		DrawWindowWidgets(w);
++
++		// highlight commanded company
++		if(_local_player == GetMotherCompany(DEREF_PLAYER(_local_player))){
++			DrawFrameRect(2, 16, 247, 27, 5, 0x60);
++		}else{
++			FOR_ALL_PLAYERS(p) {
++				if(_local_player == p->index){
++					DrawFrameRect(2, 35+i*12, 247, 46+i*12, 5, 0x60);
++					break;
++				}
++				if(IsSubsidiary(p) && p->index != GetMotherCompany(p) && p->is_active)
++					i++;
++			}
++		}
++
++		p = DEREF_PLAYER(GetMotherCompany(DEREF_PLAYER(_local_player)));
++
++		DrawPlayerIcon(p->index, 4, 18);
++
++		SetDParam(0, p->name_1);
++		SetDParam(1, p->name_2);
++		SetDParam(2, GetPlayerNameString(p->index, 3));
++		DrawString(21,17,STR_7021, !HASBIT(w->click_state >> 3, 0) ? 0x10 : 0xC);
++
++		i = 0;
++		FOR_ALL_PLAYERS(p) {
++			if (!p->is_active || !IsSubsidiary(p) || p->index == GetMotherCompany(DEREF_PLAYER(_local_player)))
++				continue;
++
++			DrawPlayerIcon(p->index, 4, 37+i*12);
++
++			SetDParam(0, p->name_1);
++			SetDParam(1, p->name_2);
++			SetDParam(2, GetPlayerNameString(p->index, 3));
++			DrawString(21,36+i*12,STR_7021, !HASBIT(w->click_state >> 3, i+1) ? 0x10 : 0xC);
++			i++;
++		}
++
++	} break;
++
++	case WE_CLICK:
++		if (IS_INT_INSIDE(e->click.widget, 3, 3+GetSubsidiariesCount())) {
++			i = 1;
++
++			FOR_ALL_PLAYERS(p){
++				if(_local_player == p->index){
++					if(GetMotherCompany(DEREF_PLAYER(_local_player)) == _local_player)
++						i = 0;
++					break;
++				}
++				if(GetMotherCompany(DEREF_PLAYER(_local_player)) == p->index)
++					continue;
++				if(IsSubsidiary(p) && p->is_active)
++					i++;
++			}
++			if(i+3 != e->click.widget){
++				int old_state = w->click_state;
++				w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++				w->click_state ^= (1 << (e->click.widget));
++				if(old_state == w->click_state)
++					w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++				SetWindowDirty(w);
++			}
++
++		}else{
++			// determin selected Subsidiary, if any
++			for(i = 3; i < (3+GetSubsidiariesCount());i++){
++				if(HASBIT(w->click_state , i)){
++					selected = i-3;
++				}
++			}
++
++			//determin selected player
++			i = 0;
++			if(selected == 0){
++				selectedPlayer = DEREF_PLAYER(GetMotherCompany(DEREF_PLAYER(_local_player)));
++			}else{
++				i = 1;
++				FOR_ALL_PLAYERS(selectedPlayer) {
++					if (!selectedPlayer->is_active || !IsSubsidiary(selectedPlayer) || (GetMotherCompany(DEREF_PLAYER(_local_player)) == selectedPlayer->index))
++						continue;
++
++					if (i == selected) break;
++					i++;
++				}
++			}
++
++			switch(e->click.widget){
++				case 11: /* Administrate */
++					p = DEREF_PLAYER(_local_player);
++					w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++					_local_player = selectedPlayer->index;
++					MarkWholeScreenDirty();
++					break;
++
++				case 12: /* Send Money */
++					DeleteWindowById(WC_SUBSIDIARIES_MONEY, w->window_number);
++					ShowSubsidiaryMoneyTransfer(selectedPlayer->index, true);
++					w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++					SetWindowDirty(w);
++					break;
++
++				case 13: /* Request Money */
++					DeleteWindowById(WC_SUBSIDIARIES_MONEY, w->window_number);
++					ShowSubsidiaryMoneyTransfer(selectedPlayer->index, false);
++					w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++					SetWindowDirty(w);
++					break;
++
++				case 14: /* Merger */
++					AskMergeSubsidiaries(selectedPlayer->index);
++					w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++					SetWindowDirty(w);
++					break;
++
++				case 15:{/* Create */
++					Player *newp;
++					int i = 0;
++					newp = DoStartupNewPlayer(false);
++					if(newp == 0){
++						ShowErrorMessage(STR_SUBSIDIARY_PLAYER_ERROR, STR_TOO_MANY_PLAYERS, 0,0);
++						break;
++					}
++
++					newp->money64 = newp->player_money = newp->current_loan = 0;
++					for(i = 0; i < 4; i++){
++						newp->share_owners[i] = w->window_number;
++					}
++					ShowPlayerCompany(newp->index);
++					w->click_state &= ((0xFFFFFFFF >> 11) << 11) & 0x7;
++					MarkWholeScreenDirty();
++					}break;
++
++			}
++			//clear the selection
++		}
++
++		break;
++
++	case WE_MOUSELOOP:
++		/* redraw the window every now and then */
++		if ((++w->vscroll.pos & 0x1F) == 0)
++			SetWindowDirty(w);
++		break;
++
++	case WE_DESTROY: /* Destroy side windows */
++		DeleteWindowById(WC_SUBSIDIARIES_MONEY, w->window_number);
++		break;
++	}
++}
++
++void ShowSubsidiariesManagement(void){
++	AllocateWindowDescFront(&_subsidiary_management_desc ,  ((Player*)DEREF_PLAYER(GetMotherCompany(DEREF_PLAYER(_local_player))))->index);
++}
++
+ static const WindowDesc _my_player_company_desc = {
+ 	-1,-1, 360, 170,
+ 	WC_COMPANY,0,
+@@ -689,13 +1362,11 @@
+ void ShowPlayerCompany(int player)
+ {
+ 	Window *w;
+-	w = AllocateWindowDescFront((byte)player == _local_player ? &_my_player_company_desc : &_other_player_company_desc,  player);
++	w = AllocateWindowDescFront(((IsSisterCompany(player, _local_player) && _patches.subsidiaries) || (!_patches.subsidiaries && (byte)player == _local_player)) ? &_my_player_company_desc : &_other_player_company_desc,  player);
+ 	if (w)
+ 		w->caption_color = w->window_number;
+ }
+ 
+-
+-
+ static void BuyCompanyWndProc(Window *w, WindowEvent *e)
+ {
+ 	switch(e->event) {
+Index: water_cmd.c
+===================================================================
+--- water_cmd.c	(revision 2424)
++++ water_cmd.c	(working copy)
+@@ -11,6 +11,7 @@
+ #include "news.h"
+ #include "sound.h"
+ #include "depot.h"
++#include "economy.h"
+ #include "vehicle_gui.h"
+ 
+ static void FloodVehicle(Vehicle *v);
+@@ -81,7 +82,7 @@
+ {
+ 	uint tile2;
+ 
+-	if (!CheckTileOwnership(tile))
++	if (!CheckTileOwnership(tile) && !(_patches.allow_track_removal && IsSisterCompany(_current_player, GetTileOwner(tile))))
+ 		return CMD_ERROR;
+ 
+ 	if (!EnsureNoVehicle(tile))
+Index: economy.c
+===================================================================
+--- economy.c	(revision 2424)
++++ economy.c	(working copy)
+@@ -73,6 +73,74 @@
+ 	MarkTileDirtyByTile(tile + TILE_XY(1,1));
+ }
+ 
++int32 GetSubsidiaries(void)
++{
++	int64 list = 0;
++	int i = 0;
++	Player *p;
++
++	FOR_ALL_PLAYERS(p){
++		if(p->is_active && IsSubsidiary(p)){
++			list |= 1 << i;
++		}
++		i++;
++	}
++
++	return list;
++}
++
++/* Can be used even if _patches.subsidiaries is false */
++byte GetMotherCompany(Player *p)
++{
++	int i;
++
++	for(i=1;p->share_owners[i] == p->share_owners[0];) {
++		if (++i == 4 && p->share_owners[0] != 0xFF) {
++			return p->share_owners[0];
++		}
++	}
++
++	return p->index;
++}
++
++bool IsSisterCompanyIgnorePatch(byte c1, byte c2){
++	if(c1 > MAX_PLAYERS || c2 > MAX_PLAYERS)
++			return false;
++	return GetMotherCompany(DEREF_PLAYER(c1)) == GetMotherCompany(DEREF_PLAYER(c2));
++}
++
++bool IsSisterCompany(byte c1, byte c2)
++{
++	if (!_patches.subsidiaries){
++		return c1 == c2;
++	}else{
++		if(c1 > MAX_PLAYERS || c2 > MAX_PLAYERS)
++			return false;
++		return GetMotherCompany(DEREF_PLAYER(c1)) == GetMotherCompany(DEREF_PLAYER(c2));
++	}
++}
++
++bool IsSubsidiary(Player *p)
++{
++	byte playerOwner = GetMotherCompany(DEREF_PLAYER(_local_player));
++	byte paramOwner = GetMotherCompany(p);
++
++	return (playerOwner == paramOwner);
++}
++
++byte GetSubsidiariesCount(void)
++{
++	Player *p;
++	int count = 0;
++
++	FOR_ALL_PLAYERS(p){
++		if(p->is_active && IsSubsidiary(p))
++			count++;
++	}
++
++	return count;
++}
++
+ int64 CalculateCompanyValue(Player *p) {
+ 	byte owner = p->index;
+ 	int64 value;
+@@ -1442,6 +1510,52 @@
+ 			v->cargo_days = ge->enroute_time;
+ 			result |= 2;
+ 			st->last_vehicle = v->index;
++
++			// And tax the vehicle if the cargo was picked up at another player's station
++			if(u->owner != st->owner){
++				int32 tax = 0;
++				byte backup = _current_player;
++				if(IsSisterCompany(u->owner, st->owner)){
++					tax = _patches.shared_stations_pickuptax_subsidiary;
++				}else if(_patches.shared_stations){
++					tax = _patches.shared_stations_pickuptax_others;
++				}
++
++				_current_player = u->owner;
++				switch(u->type){
++					case VEH_Train: SET_EXPENSES_TYPE(EXPENSES_TRAIN_RUN); break;
++					case VEH_Road: SET_EXPENSES_TYPE(EXPENSES_ROADVEH_RUN); break;
++					case VEH_Ship: SET_EXPENSES_TYPE(EXPENSES_SHIP_RUN); break;
++					case VEH_Aircraft: SET_EXPENSES_TYPE(EXPENSES_AIRCRAFT_RUN); break;
++					default: SET_EXPENSES_TYPE(EXPENSES_OTHER); break;
++				}
++				u->profit_this_year -= cap * tax / 2;
++				SubtractMoneyFromPlayer(cap * tax / 2);
++
++				_current_player = st->owner;
++				SET_EXPENSES_TYPE(EXPENSES_PROPERTY);
++				SubtractMoneyFromPlayer(-(int32)(cap * tax / 2));
++
++				if(v->owner != GetTileOwner(v->tile)){
++
++					_current_player = u->owner;
++					switch(v->type){
++						case VEH_Train: SET_EXPENSES_TYPE(EXPENSES_TRAIN_RUN); break;
++						case VEH_Road: SET_EXPENSES_TYPE(EXPENSES_ROADVEH_RUN); break;
++						case VEH_Ship: SET_EXPENSES_TYPE(EXPENSES_SHIP_RUN); break;
++						case VEH_Aircraft: SET_EXPENSES_TYPE(EXPENSES_AIRCRAFT_RUN); break;
++						default: SET_EXPENSES_TYPE(EXPENSES_OTHER); break;
++					}
++					SubtractMoneyFromPlayer(cap * tax / 2);
++					u->profit_this_year -= cap * tax / 2;
++
++					_current_player = GetTileOwner(u->tile);
++					SET_EXPENSES_TYPE(EXPENSES_PROPERTY);
++					SubtractMoneyFromPlayer(-(int32)(cap * tax / 2));
++				}
++
++				_current_player = backup;
++			}
+ 		}
+ 	}
+ 
+@@ -1470,9 +1584,61 @@
+ 			InvalidateWindow(WC_STATION_VIEW, last_visited);
+ 
+ 		if (profit != 0) {
++			switch(v->type){
++				case VEH_Train: SET_EXPENSES_TYPE(EXPENSES_TRAIN_INC); break;
++				case VEH_Road: SET_EXPENSES_TYPE(EXPENSES_ROADVEH_INC); break;
++				case VEH_Ship: SET_EXPENSES_TYPE(EXPENSES_SHIP_INC); break;
++				case VEH_Aircraft: SET_EXPENSES_TYPE(EXPENSES_AIRCRAFT_INC); break;
++				default: SET_EXPENSES_TYPE(EXPENSES_OTHER); break;
++			}
+ 			v->profit_this_year += profit;
+ 			SubtractMoneyFromPlayer(-profit);
+ 
++			if(v->owner != st->owner){
++				byte curr = _current_player;
++				byte tax = 0;
++
++				if(IsSisterCompany(v->owner, st->owner)){
++					tax = _patches.shared_stations_tax;
++				}else if(_patches.shared_stations){
++					tax = _patches.shared_stations_tax_others;
++				}
++
++				switch(v->type){
++					case VEH_Train: SET_EXPENSES_TYPE(EXPENSES_TRAIN_RUN); break;
++					case VEH_Road: SET_EXPENSES_TYPE(EXPENSES_ROADVEH_RUN); break;
++					case VEH_Ship: SET_EXPENSES_TYPE(EXPENSES_SHIP_RUN); break;
++					case VEH_Aircraft: SET_EXPENSES_TYPE(EXPENSES_AIRCRAFT_RUN); break;
++					default: SET_EXPENSES_TYPE(EXPENSES_OTHER); break;
++				}
++				SubtractMoneyFromPlayer(profit * tax / 200);
++				v->profit_this_year -= profit * tax / 200;
++
++				_current_player = st->owner;
++				SET_EXPENSES_TYPE(EXPENSES_PROPERTY);
++				SubtractMoneyFromPlayer(-profit * tax / 200);
++				_current_player = curr;
++
++				if(v->owner != GetTileOwner(v->tile)){
++					curr = _current_player;
++
++					switch(v->type){
++						case VEH_Train: SET_EXPENSES_TYPE(EXPENSES_TRAIN_RUN); break;
++						case VEH_Road: SET_EXPENSES_TYPE(EXPENSES_ROADVEH_RUN); break;
++						case VEH_Ship: SET_EXPENSES_TYPE(EXPENSES_SHIP_RUN); break;
++						case VEH_Aircraft: SET_EXPENSES_TYPE(EXPENSES_AIRCRAFT_RUN); break;
++						default: SET_EXPENSES_TYPE(EXPENSES_OTHER); break;
++					}
++					SubtractMoneyFromPlayer(profit * tax / 200);
++					v->profit_this_year -= profit* tax / 200;
++
++					_current_player = GetTileOwner(v->tile);
++					SET_EXPENSES_TYPE(EXPENSES_PROPERTY);
++					SubtractMoneyFromPlayer(-profit * tax / 200);
++					_current_player = curr;
++				}
++			}
++
+ 			if (_current_player == _local_player)
+ 				SndPlayVehicleFx(SND_14_CASHTILL, v);
+ 
+@@ -1496,7 +1662,7 @@
+ 	SubsidyMonthlyHandler();
+ }
+ 
+-static void DoAcquireCompany(Player *p)
++void DoAcquireCompany(Player *p)
+ {
+ 	Player *owner;
+ 	int i,pi;
+@@ -1532,8 +1698,128 @@
+ 	RebuildVehicleLists();	//Updates the open windows to add the newly acquired vehicles to the lists
+ }
+ 
++extern void ShowErrorMessage(StringID msg_1, StringID msg_2, int x, int y);
++
++int32 CmdSubsidiaryBuyShareResponse(int x, int y, uint32 flags, uint32 p1, uint32 p2){
++
++	Player *p;
++	Player *player2;
++	int motherIndex;
++	Player *mother;
++	int64 cost;
++	byte *b;
++	int i;
++
++	p = DEREF_PLAYER(_current_player);
++	cost = CalculateCompanyValue(DEREF_PLAYER(_current_player)) >> 2;
++
++	if(flags & DC_EXEC){
++		if(p2 == 0){
++			if(p1 == _local_player){
++				ShowErrorMessage(STR_SUBSIDIARY_SELL_SHARE_DENIED, STR_NULL ,0,0);
++			}
++			return 0;
++		}
++
++		b = p->share_owners;
++		while (*b != 0xFF) b++; /* share owners is guaranteed to contain at least one 0xFF */
++		*b = GetMotherCompany(DEREF_PLAYER(p1));
++
++		for(i=0;p->share_owners[i] == GetMotherCompany(DEREF_PLAYER(p1));) {
++			if (++i == 4) {
++				// The buying company is taking over this one.
++				p->is_ai = 0;
++				motherIndex = GetMotherCompany(DEREF_PLAYER(p1));
++
++				/* The bought out company must surrender its shares into other companies, to the */
++				/* buying one. */
++				FOR_ALL_PLAYERS(player2){
++					for(i = 0; i < 4; i++){
++						if(player2->share_owners[i] == p->index)
++							player2->share_owners[i] = motherIndex;
++					}
++				}
++
++				/* At this point, due to the share exchanges, it is possible that the buying company */
++				/* holds shares of itself, clean the mess */
++				mother = DEREF_PLAYER(motherIndex);
++				for(i = 0; i < 4; i ++){
++					if(mother->share_owners[i] == motherIndex)
++						mother->share_owners[i] = 0xFF;
++				}
++
++				MarkWholeScreenDirty();
++				break;
++			}
++		}
++		InvalidateWindow(WC_COMPANY, (int)p1);
++		if(p1 == _local_player){
++			ShowErrorMessage(STR_SUBSIDIARY_SELL_SHARE_GRANTED, STR_NULL ,0,0);
++		}
++	}
++	return cost;
++}
++
++int32 CmdSubsidiarySendMoneyOnRequest(int x, int y, uint32 flags, uint32 p1, uint32 p2){
++	byte old_cp;
++	SET_EXPENSES_TYPE(EXPENSES_OTHER);
++
++	if((int32)p2 == -1){
++		// request denied
++		if(_local_player == p1){
++			ShowErrorMessage(STR_SUBSIDIARY_CASH_REQUEST_DENIED,STR_NULL,0,0);
++		}
++		return 0;
++	}
++
++	if(_local_player == p1){
++		ShowErrorMessage(STR_SUBSIDIARY_CASH_REQUEST_GRANTED,STR_NULL,0,0);
++	}
++
++	// Add money to player
++	if(flags & DC_EXEC){
++		old_cp = _current_player;
++		_current_player = p1;
++		SubtractMoneyFromPlayer(-(int32)p2 + (p2 / 16)); // don't forget to correct for tax
++		_current_player = old_cp;
++	}
++
++	// Subtract money from local-player
++	return (int32)p2;
++}
++
++// p1 = destination
++// p2 = amount
++extern void AskSendMoney(byte player,int32 amount);
++int32 CmdSubsidiaryGetMoney(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++{
++	if(_local_player == p1){
++		AskSendMoney(_current_player,p2);
++	}
++	return 0;
++}
++
++// p1 = destination
++// p2 = amount
++int32 CmdSubsidiarySendMoney(int x, int y, uint32 flags, uint32 p1, uint32 p2)
++{
++	byte old_cp;
++	SET_EXPENSES_TYPE(EXPENSES_OTHER);
++
++	// Add money to player
++	if(flags & DC_EXEC){
++		old_cp = _current_player;
++		_current_player = p1;
++		SubtractMoneyFromPlayer(-(int32)p2 + (p2 / 16)); // don't forget to correct for tax
++		_current_player = old_cp;
++	}
++
++	// Subtract money from local-player
++	return (int32)p2;
++}
++
+ extern int GetAmountOwnedBy(Player *p, byte owner);
+-
++extern void AskSellShare(byte player);
+ /** Acquire shares in an opposing company.
+  * @param x,y unused
+  * @param p1 player to buy the shares from
+@@ -1542,6 +1828,9 @@
+ int32 CmdBuyShareInCompany(int x, int y, uint32 flags, uint32 p1, uint32 p2)
+ {
+ 	Player *p;
++	Player *player2;
++	int motherIndex;
++	Player *mother;
+ 	int64 cost;
+ 
+ 	/* Check if buying shares is allowed (protection against modified clients */
+@@ -1551,26 +1840,70 @@
+ 	p = DEREF_PLAYER(p1);
+ 
+ 	/* Protect new companies from hostile takeovers */
+-	if (_cur_year - p->inaugurated_year < 6) return_cmd_error(STR_7080_PROTECTED);
++	if (_cur_year - p->inaugurated_year < _patches.years_of_protection + 1 && _patches.years_of_protection > 0) {
++		_error_message = STR_7080_PROTECTED;
++		return CMD_ERROR;
++	}
+ 
++	/* Check if buying shares is allowed (protection against modified clients */
++	if (!_patches.allow_shares && !_patches.subsidiaries)
++		return CMD_ERROR;
++
+ 	/* Those lines are here for network-protection (clients can be slow) */
+ 	if (GetAmountOwnedBy(p, OWNER_SPECTATOR) == 0) return 0;
+ 
+ 	/* We can not buy out a real player (temporarily). TODO: well, enable it obviously */
+-	if (GetAmountOwnedBy(p, OWNER_SPECTATOR) == 1 && !p->is_ai) return 0;
++	if (GetAmountOwnedBy(p, OWNER_SPECTATOR) == 1 && !p->is_ai && !_patches.subsidiaries) return 0;
+ 
++	// if we are networking and the subsidiaries patch is active, popup a confirmation box
++	if(_patches.subsidiaries && _networking){
++		if(_local_player == p1 && flags & DC_EXEC){
++			AskSellShare(_current_player);
++		}
++		return 0;
++	}
++
+ 	cost = CalculateCompanyValue(p) >> 2;
+ 	if (flags & DC_EXEC) {
+ 		int i;
+ 		byte *b = p->share_owners;
+ 
+ 		while (*b != 0xFF) b++; /* share owners is guaranteed to contain at least one 0xFF */
+-		*b = _current_player;
++		if(_patches.subsidiaries)
++			*b = GetMotherCompany(DEREF_PLAYER(_current_player));
++		else
++			*b = _current_player;
+ 
+ 		for (i = 0; p->share_owners[i] == _current_player;) {
+ 			if (++i == 4) {
+-				p->bankrupt_value = 0;
+-				DoAcquireCompany(p);
++				// The buying company is taking over this one.
++				if(!_patches.subsidiaries){
++					p->bankrupt_value = 0;
++					DoAcquireCompany(p);
++					motherIndex = _current_player;
++				}else{
++					p->is_ai = 0;
++					motherIndex = GetMotherCompany(DEREF_PLAYER(_current_player));
++				}
++
++				/* The bought out company must surrender its shares into other companies, to the */
++				/* buying one. */
++				FOR_ALL_PLAYERS(player2){
++					for(i = 0; i < 4; i++){
++						if(player2->share_owners[i] == p->index)
++							player2->share_owners[i] = motherIndex;
++					}
++				}
++
++				/* At this point, due to the share exchanges, it is possible that the buying company */
++				/* holds shares of itself, clean the mess */
++				mother = DEREF_PLAYER(motherIndex);
++				for(i = 0; i < 4; i ++){
++					if(mother->share_owners[i] == motherIndex)
++						mother->share_owners[i] = 0xFF;
++				}
++
++				MarkWholeScreenDirty();
+ 				break;
+ 			}
+ 		}
+@@ -1606,6 +1939,8 @@
+ 		byte *b = p->share_owners;
+ 		while (*b != _current_player) b++; /* share owners is guaranteed to contain player */
+ 		*b = 0xFF;
++		if(!_networking)
++			p->is_ai = true;
+ 		InvalidateWindow(WC_COMPANY, (int)p1);
+ 	}
+ 	return cost;
+Index: economy.h
+===================================================================
+--- economy.h	(revision 2424)
++++ economy.h	(working copy)
+@@ -72,7 +72,17 @@
+ void DeleteSubsidyWithStation(uint16 index);
+ void RemoteSubsidyAdd(Subsidy *s_new);
+ 
++void DoAcquireCompany(Player *p);
++
+ int32 GetTransportedGoodsIncome(uint num_pieces, uint dist, byte transit_days, byte cargo_type);
+ uint MoveGoodsToStation(uint tile, int w, int h, int type, uint amount);
+ 
++
++bool IsSisterCompany(byte c1, byte c2);
++bool IsSisterCompanyIgnorePatch(byte c1, byte c2);
++byte GetMotherCompany(Player *p);
++bool IsSubsidiary(Player *p);
++int32 GetSubsidiaries(void);
++byte GetSubsidiariesCount(void);
++
+ #endif /* ECONOMY_H */
+Index: ship_cmd.c
+===================================================================
+--- ship_cmd.c	(revision 2424)
++++ ship_cmd.c	(working copy)
+@@ -13,6 +13,7 @@
+ #include "gui.h"
+ #include "player.h"
+ #include "sound.h"
++#include "economy.h"
+ #include "npf.h"
+ #include "depot.h"
+ 
+@@ -82,7 +83,8 @@
+ 	} else {
+ 		FOR_ALL_DEPOTS(depot) {
+ 			tile = depot->xy;
+-			if (IsValidDepot(depot) && IsTileDepotType(tile, TRANSPORT_WATER) && IsTileOwner(tile, v->owner)) {
++			if (IsValidDepot(depot) && IsTileDepotType(tile, TRANSPORT_WATER) && (IsSisterCompany(GetTileOwner(tile),v->owner) || _patches.shared_stations)) {
++
+ 				dist = DistanceManhattan(tile, tile2);
+ 				if (dist < best_dist) {
+ 					best_dist = dist;
+@@ -876,7 +878,7 @@
+ 	/* The ai_new queries the vehicle cost before building the route,
+ 	 * so we must check against cheaters no sooner than now. --pasky */
+ 	if (!IsTileDepotType(tile, TRANSPORT_WATER)) return CMD_ERROR;
+-	if (!IsTileOwner(tile, _current_player)) return CMD_ERROR;
++	if (!IsSisterCompany(GetTileOwner(tile),_current_player)) return CMD_ERROR;
+ 
+ 	v = AllocateVehicle();
+ 	if (v == NULL || IsOrderPoolFull() ||
+Index: main_gui.c
+===================================================================
+--- main_gui.c	(revision 2424)
++++ main_gui.c	(working copy)
+@@ -47,6 +47,14 @@
+ extern void GenerateIndustries(void);
+ extern void GenerateTowns(void);
+ 
++extern void ShowSubsidiariesManagement(void);
++
++extern void DrawPlayerIcon(int p, int x, int y);
++
++extern uint GetCurrentCurrencyRate(void);
++
++extern void CcTerraform(bool success, uint tile, uint32 p1, uint32 p2);
++
+ void HandleOnEditTextCancel(void)
+ {
+ 	switch(_rename_what) {
+@@ -2193,7 +2201,7 @@
+ 		}
+ 	}
+ 
+-	if (!FillDrawPixelInfo(&tmp_dpi, NULL, 141, 1, 358, 11))
++	if (!FillDrawPixelInfo(&tmp_dpi, NULL, 141, 1, 338, 11))
+ 		return true;
+ 
+ 	old_dpi = _cur_dpi;
+@@ -2221,6 +2229,11 @@
+ 			DrawStringCentered(570, 1, p->player_money >= 0 ? STR_0004 : STR_0005, 0);
+ 		}
+ 
++		if(p){ // draw player icon
++			DrawPlayerIcon(p->index, 482, 2);
++			DrawPlayerIcon(p->index, 496, 2);
++		}
++
+ 		// Draw status bar
+ 		if (w->message.msg) { // true when saving is active
+ 			DrawStringCentered(320, 1, STR_SAVING_GAME, 0);
+@@ -2237,7 +2250,7 @@
+ 				// This is the default text
+ 				SetDParam(0, p->name_1);
+ 				SetDParam(1, p->name_2);
+-				DrawStringCentered(320, 1,	STR_02BA, 0);
++				DrawStringCentered(310, 1,	STR_02BA, 0);
+ 			}
+ 		}
+ 
+@@ -2250,11 +2263,23 @@
+ 		break;
+ 
+ 	case WE_CLICK:
+-		switch (e->click.widget) {
+-			case 1: ShowLastNewsMessage(); break;
+-			case 2: if (_local_player != OWNER_SPECTATOR) ShowPlayerFinances(_local_player); break;
++		switch(e->click.widget){
++			case 1:	ShowLastNewsMessage(); break;
++			case 2: 
++				if (_local_player != OWNER_SPECTATOR){
++					if(!_patches.subsidiaries)
++						ShowPlayerCompany(_local_player);
++					else
++						ShowSubsidiariesManagement();
++				}
++				break;
++
++			case 3:
++				if (_local_player != OWNER_SPECTATOR) 
++					ShowPlayerFinances(_local_player);
++				break;
+ 			default: ResetObjectToPlace();
+-		}
++			}
+ 		break;
+ 
+ 	case WE_TICK: {
+@@ -2279,8 +2304,9 @@
+ 
+ static const Widget _main_status_widgets[] = {
+ {     WWT_IMGBTN,   RESIZE_NONE,    14,     0,   139,     0,    11, 0x0,	STR_NULL},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,   140,   499,     0,    11, 0x0, STR_02B7_SHOW_LAST_MESSAGE_OR_NEWS},
+-{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,   500,   639,     0,    11, 0x0, STR_NULL},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,   140,   479,     0,    11, 0x0, STR_02B7_SHOW_LAST_MESSAGE_OR_NEWS},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,	14,   480,   511,     0,    11, 0x0, STR_NULL},
++{ WWT_PUSHIMGBTN,   RESIZE_NONE,    14,   512,   639,     0,    11, 0x0, STR_NULL},
+ {   WIDGETS_END},
+ };
+ 
+Index: roadveh_gui.c
+===================================================================
+--- roadveh_gui.c	(revision 2424)
++++ roadveh_gui.c	(working copy)
+@@ -12,6 +12,8 @@
+ #include "command.h"
+ #include "player.h"
+ #include "engine.h"
++#include "economy.h"
++#include "network.h"
+ #include "depot.h"
+ 
+ /**
+@@ -231,7 +233,7 @@
+ 		Vehicle *v = GetVehicle(w->window_number);
+ 		StringID str;
+ 
+-		w->disabled_state = (v->owner != _local_player) ? (1<<8 | 1<<7) : 0;
++		w->disabled_state = (!IsSisterCompany(v->owner,_local_player)) ? (1<<8 | 1<<7) : 0;
+ 
+ 		/* draw widgets & caption */
+ 		SetDParam(0, v->string_id);
+@@ -531,8 +533,7 @@
+ 	tile = w->window_number;
+ 
+ 	/* setup disabled buttons */
+-	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 7));
++	w->disabled_state = (IsSisterCompany(GetTileOwner(tile),_local_player)) ? 0 : ((1<<4)|(1<<7));
+ 
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+@@ -692,6 +693,7 @@
+ 		case 4:
+ 			if (!HASBIT(w->disabled_state, 4) &&
+ 					WP(w,traindepot_d).sel != INVALID_VEHICLE)	{
++				byte backup = _current_player;
+ 				Vehicle *v;
+ 
+ 				HandleButtonClick(w, 4);
+@@ -702,8 +704,10 @@
+ 				_backup_orders_tile = v->tile;
+ 				BackupVehicleOrders(v, _backup_orders_data);
+ 
++				_current_player = v->owner;
+ 				if (!DoCommandP(v->tile, v->index, 0, NULL, CMD_SELL_ROAD_VEH | CMD_MSG(STR_9014_CAN_T_SELL_ROAD_VEHICLE)))
+ 					_backup_orders_tile = 0;
++				_current_player = backup;
+ 			}
+ 			break;
+ 		default:
+@@ -815,6 +819,16 @@
+ 		BuildVehicleList(vl, VEH_Road, owner, station);
+ 		SortVehicleList(vl);
+ 
++		if (_local_player != owner){
++			if(IsWindowOfPrototype(w,_player_roadveh_widgets)){
++				w->disabled_state |= (1<<10);
++			}else{
++				w->disabled_state |= (1<<9);
++			}
++		}else{
++			w->disabled_state &= ~(1<<9);
++		}
++
+ 		SetVScrollCount(w, vl->list_length);
+ 
+ 		// disable 'Sort By' tooltip on Unsorted sorting criteria
+@@ -848,7 +862,7 @@
+ 			Vehicle *v = GetVehicle(vl->sort_list[i].index);
+ 			StringID str;
+ 
+-			assert(v->type == VEH_Road && v->owner == owner);
++			assert(v->type == VEH_Road && (IsSisterCompany(v->owner, owner) || _patches.shared_stations));
+ 
+ 			DrawRoadVehImage(v, x + 22, y + 6, INVALID_VEHICLE);
+ 			DrawVehicleProfitButton(v, x, y + 13);
+@@ -993,12 +1007,11 @@
+ 	PlayerRoadVehWndProc
+ };
+ 
+-
+ void ShowPlayerRoadVehicles(int player, int station)
+ {
+ 	Window *w;
+ 
+-	if ( player == _local_player) {
++	if (IsSisterCompany(player,_local_player)) {
+ 		w = AllocateWindowDescFront(&_player_roadveh_desc, (station << 16) | player);
+ 	} else  {
+ 		w = AllocateWindowDescFront(&_other_player_roadveh_desc, (station << 16) | player);
+Index: pathfind.c
+===================================================================
+--- pathfind.c	(revision 2424)
++++ pathfind.c	(working copy)
+@@ -4,6 +4,8 @@
+ #include "tile.h"
+ #include "pathfind.h"
+ 
++extern bool IsSisterCompany(byte c1, byte c2);
++
+ // remember which tiles we have already visited so we don't visit them again.
+ static bool TPFSetTileBit(TrackPathFinder *tpf, uint tile, int dir)
+ {
+@@ -150,7 +152,7 @@
+ 		if (IsTileType(tile, MP_RAILWAY) || IsTileType(tile, MP_STATION) || IsTileType(tile, MP_TUNNELBRIDGE))
+ 			/* Check if we are on the middle of a bridge (has no owner) */
+ 			if (!IsTileType(tile, MP_TUNNELBRIDGE) || (_map5[tile] & 0xC0) != 0xC0)
+-				if (owner != -1 && !IsTileOwner(tile, owner))
++				if (owner != -1 && !IsSisterCompany(GetTileOwner(tile),owner) && !_patches.shared_tracks)
+ 					return;
+ 	}
+ 
+@@ -296,7 +298,7 @@
+ 				/* Check if we are on a bridge (middle parts don't have an owner */
+ 				if (!IsTileType(tile, MP_TUNNELBRIDGE) || (_map5[tile] & 0xC0) != 0xC0)
+ 					if (!IsTileType(tile_org, MP_TUNNELBRIDGE) || (_map5[tile_org] & 0xC0) != 0xC0)
+-						if (GetTileOwner(tile_org) != GetTileOwner(tile))
++						if (!IsSisterCompany(GetTileOwner(tile_org), GetTileOwner(tile)) && !_patches.shared_tracks)
+ 							return;
+ 	}
+ 
+Index: order_cmd.c
+===================================================================
+--- order_cmd.c	(revision 2424)
++++ order_cmd.c	(working copy)
+@@ -9,6 +9,7 @@
+ #include "station.h"
+ #include "player.h"
+ #include "news.h"
++#include "economy.h"
+ #include "saveload.h"
+ #include "vehicle_gui.h"
+ 
+@@ -171,7 +172,7 @@
+ 			st = GetStation(new_order.station);
+ 
+ 			if (!IsValidStation(st) ||
+-					(st->airport_type != AT_OILRIG && !(IsBuoy(st)) && !CheckOwnership(st->owner))) {
++					(st->airport_type != AT_OILRIG && !(IsBuoy(st)) && !CheckOwnership(st->owner)&& !_patches.shared_stations)) {
+ 				return CMD_ERROR;
+ 			}
+ 
+@@ -221,7 +222,7 @@
+ 				st = GetStation(new_order.station);
+ 
+ 				if (!IsValidStation(st) ||
+-						(st->airport_type != AT_OILRIG && !CheckOwnership(st->owner)) ||
++						(st->airport_type != AT_OILRIG && !CheckOwnership(st->owner) && !_patches.shared_stations) ||
+ 						!(st->facilities & FACIL_AIRPORT) ||
+ 						GetAirport(st->airport_type)->nof_depots == 0) {
+ 					return CMD_ERROR;
+@@ -233,7 +234,7 @@
+ 				dp = GetDepot(new_order.station);
+ 
+ 				if (!IsValidDepot(dp) ||
+-						!CheckOwnership(GetTileOwner(dp->xy))) {
++						(!CheckOwnership(GetTileOwner(dp->xy)) && !_patches.shared_stations)) {
+ 					return CMD_ERROR;
+ 				}
+ 
+@@ -274,7 +275,7 @@
+ 			if (!IsWaypointIndex(new_order.station)) return CMD_ERROR;
+ 			wp = GetWaypoint(new_order.station);
+ 
+-			if (!CheckOwnership(GetTileOwner(wp->xy))) return CMD_ERROR;
++			if (!CheckOwnership(GetTileOwner(wp->xy)) && !_patches.shared_stations) return CMD_ERROR;
+ 
+ 			switch (new_order.flags) {
+ 				case 0:
+@@ -598,7 +599,7 @@
+ 			src = GetVehicle(veh_src);
+ 
+ 			/* Sanity checks */
+-			if (src->type == 0 || !CheckOwnership(src->owner) || dst->type != src->type || dst == src)
++			if (src->type == 0 || !(CheckOwnership(src->owner) || _patches.shared_stations) || dst->type != src->type || dst == src)
+ 				return CMD_ERROR;
+ 
+ 			/* Trucks can't share orders with busses (and visa versa) */
+@@ -647,7 +648,7 @@
+ 			src = GetVehicle(veh_src);
+ 
+ 			/* Sanity checks */
+-			if (src->type == 0 || !CheckOwnership(src->owner) || dst->type != src->type || dst == src)
++			if (src->type == 0 || !(CheckOwnership(src->owner) || _patches.shared_stations) || dst->type != src->type || dst == src)
+ 				return CMD_ERROR;
+ 
+ 			/* Trucks can't copy all the orders from busses (and visa versa) */
+Index: openttd.vcproj
+===================================================================
+--- openttd.vcproj	(revision 2424)
++++ openttd.vcproj	(working copy)
+@@ -28,7 +28,8 @@
+ 				FavorSizeOrSpeed="2"
+ 				OmitFramePointers="TRUE"
+ 				OptimizeForProcessor="1"
+-				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;WIN32_EXCEPTION_TRACKER;WIN32_ENABLE_DIRECTMUSIC_SUPPORT;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK"
++				AdditionalIncludeDirectories="C:\documents\openttd\openttd_useful"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;WIN32_EXCEPTION_TRACKER;WIN32_ENABLE_DIRECTMUSIC_SUPPORT;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK;WITH_REV_HACK=\&quot;Sub_2412\&quot;"
+ 				StringPooling="TRUE"
+ 				ExceptionHandling="FALSE"
+ 				RuntimeLibrary="4"
+@@ -57,6 +58,7 @@
+ 				OutputFile=".\Release/openttd.exe"
+ 				LinkIncremental="1"
+ 				SuppressStartupBanner="TRUE"
++				AdditionalLibraryDirectories="C:\documents\openttd\openttd_useful"
+ 				ProgramDatabaseFile=".\Release/openttd.pdb"
+ 				GenerateMapFile="TRUE"
+ 				MapFileName=".\Release/openttd.map"
+@@ -100,7 +102,8 @@
+ 			<Tool
+ 				Name="VCCLCompilerTool"
+ 				Optimization="0"
+-				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK"
++				AdditionalIncludeDirectories="C:\documents\openttd\openttd_useful"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;WITH_ZLIB;WITH_PNG;ENABLE_NETWORK,WITH_REV_HACK=\&quot;Sub_2412\&quot;"
+ 				BasicRuntimeChecks="3"
+ 				RuntimeLibrary="5"
+ 				UsePrecompiledHeader="2"
+@@ -124,6 +127,7 @@
+ 				OutputFile=".\Debug/openttd.exe"
+ 				LinkIncremental="0"
+ 				SuppressStartupBanner="TRUE"
++				AdditionalLibraryDirectories="C:\documents\openttd\openttd_useful"
+ 				GenerateDebugInformation="TRUE"
+ 				ProgramDatabaseFile=".\Debug/openttd.pdb"
+ 				SubSystem="2"
+@@ -257,6 +261,12 @@
+ 				RelativePath="oldloader.c">
+ 			</File>
+ 			<File
++				RelativePath="openttd.c">
++			</File>
++			<File
++				RelativePath="openttd.rc">
++			</File>
++			<File
+ 				RelativePath="pathfind.c">
+ 			</File>
+ 			<File
+@@ -308,12 +318,6 @@
+ 				RelativePath=".\tile.c">
+ 			</File>
+ 			<File
+-				RelativePath="openttd.c">
+-			</File>
+-			<File
+-				RelativePath="openttd.rc">
+-			</File>
+-			<File
+ 				RelativePath="vehicle.c">
+ 			</File>
+ 			<File
+@@ -436,6 +440,9 @@
+ 				RelativePath=".\npf.h">
+ 			</File>
+ 			<File
++				RelativePath="openttd.h">
++			</File>
++			<File
+ 				RelativePath="pathfind.h">
+ 			</File>
+ 			<File
+@@ -475,9 +482,6 @@
+ 				RelativePath=".\town.h">
+ 			</File>
+ 			<File
+-				RelativePath="openttd.h">
+-			</File>
+-			<File
+ 				RelativePath="variables.h">
+ 			</File>
+ 			<File
+Index: settings.c
+===================================================================
+--- settings.c	(revision 2424)
++++ settings.c	(working copy)
+@@ -903,6 +903,22 @@
+ 
+ 	{"colored_news_date",		SDT_UINT32, (void*)2000,	&_patches.colored_news_date,		NULL},
+ 
++	{"smooth_economy",			SDT_BOOL,		(void*)false, &_patches.smooth_economy,				NULL},
++	
++	{"subsidiaries",				           SDT_BOOL,  (void*)true,  &_patches.subsidiaries,					                NULL},
++	{"allow_track_removal",	           SDT_BOOL,  (void*)true,  &_patches.allow_track_removal,	                NULL},
++	{"shared_stations_tax",            SDT_UINT8, (void*)10,		&_patches.shared_stations_tax,	                NULL},
++	{"shared_tracks_sub_tax",          SDT_INT32, (void*)6,			&_patches.shared_tracks_tax_subsidiary,	        NULL},
++	{"shared_tracks",				           SDT_BOOL,  (void*)false,	&_patches.shared_tracks,				                NULL},
++	{"shared_tracks_other_tax",        SDT_INT32, (void*)12,	  &_patches.shared_tracks_tax_others,	            NULL},
++
++	{"shared_stations_subs_cargotax",  SDT_INT32, (void*)20,    &_patches.shared_stations_pickuptax_subsidiary, NULL},
++	{"shared_stations",			           SDT_BOOL,  (void*)false, &_patches.shared_stations,			                NULL},
++	{"shared_stations_tax_others",     SDT_UINT8, (void*)20,    &_patches.shared_stations_tax_others,           NULL},
++	{"shared_stations_other_cargotax", SDT_INT32, (void*)40,    &_patches.shared_stations_pickuptax_others,     NULL},
++	{"years_of_protection",            SDT_UINT8,	(void*)0,			&_patches.years_of_protection,	                NULL},
++
++	{"dist_local_authority",SDT_UINT8,	(void*)20,		&_patches.dist_local_authority, NULL},
+ 	{"extra_dynamite",			SDT_BOOL,		(void*)false, &_patches.extra_dynamite,				NULL},
+ 
+ 	{"never_expire_vehicles",SDT_BOOL,	(void*)false, &_patches.never_expire_vehicles,NULL},
+Index: train_gui.c
+===================================================================
+--- train_gui.c	(revision 2424)
++++ train_gui.c	(working copy)
+@@ -12,6 +12,8 @@
+ #include "command.h"
+ #include "player.h"
+ #include "engine.h"
++#include "economy.h"
++#include "network.h"
+ #include "vehicle_gui.h"
+ #include "depot.h"
+ 
+@@ -354,9 +356,8 @@
+ 	tile = w->window_number;
+ 
+ 	/* setup disabled buttons */
+-	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 5) | (1 << 8));
+-
++	w->disabled_state = (IsSisterCompany(GetTileOwner(tile),_local_player)) ? 0 : ((1<<4)|(1<<5)|(1<<8));
++	
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+ 	hnum = 1;
+@@ -622,14 +623,18 @@
+ 			HandleButtonClick(w, e->click.widget);
+ 
+ 			sell_cmd = (e->click.widget == 5 || _ctrl_pressed) ? 1 : 0;
+-
+-			if (v->subtype != TS_Front_Engine) {
+-				DoCommandP(v->tile, v->index, sell_cmd, NULL, CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE));
+-			} else {
+-				_backup_orders_tile = v->tile;
+-				BackupVehicleOrders(v, _backup_orders_data);
+-				if (!DoCommandP(v->tile, v->index, sell_cmd, NULL, CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE)))
+-					_backup_orders_tile = 0;
++			{
++				byte backup = _current_player;
++				_current_player = v->owner;
++				if (v->subtype != TS_Front_Engine) {
++					DoCommandP(v->tile, v->index, sell_cmd, NULL, CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE));
++				} else {
++					_backup_orders_tile = v->tile;
++					BackupVehicleOrders(v, _backup_orders_data);
++					if (!DoCommandP(v->tile, v->index, sell_cmd, NULL, CMD_SELL_RAIL_WAGON | CMD_MSG(STR_8839_CAN_T_SELL_RAILROAD_VEHICLE)))
++						_backup_orders_tile = 0;
++				}
++				_current_player = backup;
+ 			}
+ 		}	break;
+ 
+@@ -813,7 +818,7 @@
+ 
+ 		v = GetVehicle(w->window_number);
+ 
+-		w->disabled_state = (v->owner == _local_player) ? 0 : 0x380;
++		w->disabled_state = (IsSisterCompany(v->owner, _local_player)) ? 0 : 0x380;
+ 
+ 		SETBIT(w->disabled_state, 12);
+ 
+@@ -1061,7 +1066,7 @@
+ 	SetVScrollCount(w, num);
+ 
+ 	w->disabled_state = 1 << (det_tab + 9);
+-	if (v->owner != _local_player)
++	if (!IsSisterCompany(v->owner,_local_player))
+ 		w->disabled_state |= (1 << 2);
+ 
+ 	if (!_patches.servint_trains) // disable service-scroller when interval is set to disabled
+@@ -1289,6 +1294,16 @@
+ 		BuildVehicleList(vl, VEH_Train, owner, station);
+ 		SortVehicleList(vl);
+ 
++		if (_local_player != owner){
++			if(IsWindowOfPrototype(w,_player_trains_widgets)){
++				w->disabled_state |= (1<<10);
++			}else{
++				w->disabled_state |= (1<<9);
++			}
++		}else{
++			w->disabled_state &= ~(1<<9);
++		}
++
+ 		SetVScrollCount(w, vl->list_length);
+ 
+ 		// disable 'Sort By' tooltip on Unsorted sorting criteria
+@@ -1322,7 +1337,7 @@
+ 			Vehicle *v = GetVehicle(vl->sort_list[i].index);
+ 			StringID str;
+ 
+-			assert(v->type == VEH_Train && v->owner == owner);
++			assert(v->type == VEH_Train && (IsSisterCompany(v->owner, owner) || _patches.shared_stations));
+ 
+ 			DrawTrainImage(
+ 				v, x + 21, y + 6 + _traininfo_vehicle_pitch, w->hscroll.cap, 0, INVALID_VEHICLE);
+@@ -1376,7 +1391,7 @@
+ 
+ 				v = GetVehicle(vl->sort_list[id_v].index);
+ 
+-				assert(v->type == VEH_Train && v->subtype == TS_Front_Engine && v->owner == owner);
++				assert(v->type == VEH_Train && v->subtype == TS_Front_Engine && IsSisterCompany(v->owner, owner));
+ 
+ 				ShowTrainViewWindow(v);
+ 			}
+@@ -1476,7 +1491,7 @@
+ {
+ 	Window *w;
+ 
+-	if (player == _local_player) {
++	if (IsSisterCompany(player,_local_player)) {
+ 		w = AllocateWindowDescFront(&_player_trains_desc, (station << 16) | player);
+ 	} else {
+ 		w = AllocateWindowDescFront(&_other_player_trains_desc, (station << 16) | player);
+Index: settings_gui.c
+===================================================================
+--- settings_gui.c	(revision 2424)
++++ settings_gui.c	(working copy)
+@@ -11,6 +11,7 @@
+ #include "engine.h"
+ #include "screenshot.h"
+ #include "newgrf.h"
++#include "economy.h"
+ #include "network.h"
+ #include "console.h"
+ #include "town.h"
+@@ -742,6 +743,20 @@
+ 	{PE_BOOL,		0, STR_CONFIG_PATCHES_AI_BUILDS_SHIPS,"ai_disable_veh_ship",&_patches.ai_disable_veh_ship,			0,  0,  0, NULL},
+ };
+ 
++static const PatchEntry _patches_cooperation[] = {
++	{PE_BOOL,			0, STR_CONFIG_PATCHES_SUBSIDIARIES,														"subsidiaries",										&_patches.subsidiaries,													0,  0,  0, NULL},
++	{PE_BOOL,			0, STR_CONFIG_PATCHES_SUBS_ALLOW_REMOVE,											"allow_track_removal",						&_patches.allow_track_removal,									0,	0,	0, NULL},
++	{PE_UINT8,		0, STR_CONFIG_PATCHES_SHARED_ST_TAX,													"shared_stations_tax",						&_patches.shared_stations_tax,  								0,100,  1, NULL},
++	{PE_CURRENCY,	0, STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_SUB_CONFIG,	"shared_tracks_sub_tax",					&_patches.shared_tracks_tax_subsidiary,  				0,100,	1, NULL},
++	{PE_CURRENCY,	0, STR_CONFIG_PATCHES_SHARED_STATIONS_SUBS_CARGOTAX,					"shared_stations_subs_cargotax",	&_patches.shared_stations_pickuptax_subsidiary,	0,100,  1, NULL},
++	{PE_BOOL,			0, STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_CONFIG,			"shared_tracks",									&_patches.shared_tracks,  											0,	0,  0, NULL},
++	{PE_CURRENCY,	0, STR_CONFIG_PATCHES_SUBSIDIARIES_SHARED_TRACKS_OTHER_CONFIG,"shared_tracks_other_tax",				&_patches.shared_tracks_tax_others,  						0,100,  1, NULL},
++	{PE_BOOL,			0, STR_CONFIG_PATCHES_SHARED_STATIONS,												"shared_stations",								&_patches.shared_stations,  										0,	0,  0, NULL},
++	{PE_UINT8,		0, STR_CONFIG_PATCHES_SHARED_ST_TAX_OTHERS,										"shared_stations_tax_others",			&_patches.shared_stations_tax_others,  					0,100,  1, NULL},
++	{PE_CURRENCY,	0, STR_CONFIG_PATCHES_SHARED_STATIONS_OTHERS_CARGOTAX,				"shared_stations_other_cargotax",	&_patches.shared_stations_pickuptax_others,  		0,100,  1, NULL},
++	{PE_UINT8,		0, STR_CONFIG_PATCHES_YEARS_OF_PROTECTION,										"years_of_protection",						&_patches.years_of_protection,  								0,100,  1, NULL},
++};
++
+ typedef struct PatchPage {
+ 	const PatchEntry *entries;
+ 	uint num;
+@@ -754,6 +769,7 @@
+ 	{_patches_stations,			lengthof(_patches_stations) },
+ 	{_patches_economy,			lengthof(_patches_economy) },
+ 	{_patches_ai,						lengthof(_patches_ai) },
++	{_patches_cooperation,			lengthof(_patches_cooperation)},
+ };
+ 
+ 
+@@ -975,7 +991,7 @@
+ 
+ 			break;
+ 		}
+-		case 4: case 5: case 6: case 7: case 8: case 9:
++		case 4: case 5: case 6: case 7: case 8: case 9: case 10:
+ 			WP(w,def_d).data_1 = e->click.widget - 4;
+ 			DeleteWindowById(WC_QUERY_STRING, 0);
+ 			SetWindowDirty(w);
+@@ -1131,6 +1147,7 @@
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,   271,   357,    16,    27, STR_CONFIG_PATCHES_STATIONS,			STR_NULL},
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,    10,    96,    28,    39, STR_CONFIG_PATCHES_ECONOMY,			STR_NULL},
+ {   WWT_CLOSEBOX,   RESIZE_NONE,     3,    97,   183,    28,    39, STR_CONFIG_PATCHES_AI,						STR_NULL},
++{   WWT_CLOSEBOX,   RESIZE_NONE,     3,   184,   270,    28,    39, STR_CONFIG_PATCHES_COOP,						STR_NULL},
+ {   WIDGETS_END},
+ };
+ 
+Index: ship_gui.c
+===================================================================
+--- ship_gui.c	(revision 2424)
++++ ship_gui.c	(working copy)
+@@ -12,6 +12,8 @@
+ #include "command.h"
+ #include "player.h"
+ #include "engine.h"
++#include "economy.h"
++#include "network.h"
+ #include "depot.h"
+ 
+ /**
+@@ -471,7 +473,7 @@
+ 				IsTileDepotType(v->tile, TRANSPORT_WATER))
+ 			disabled = 0;
+ 
+-		if (v->owner != _local_player)
++		if (!IsSisterCompany(v->owner,_local_player))
+ 			disabled |= 1<<8 | 1<<7;
+ 		w->disabled_state = disabled;
+ 
+@@ -609,9 +611,8 @@
+ 	tile = w->window_number;
+ 
+ 	/* setup disabled buttons */
+-	w->disabled_state =
+-		IsTileOwner(tile, _local_player) ? 0 : ((1 << 4) | (1 << 7));
+-
++	w->disabled_state = (IsSisterCompany(GetTileOwner(tile),_local_player)) ? 0 : ((1<<4)|(1<<7));
++	
+ 	/* determine amount of items for scroller */
+ 	num = 0;
+ 	FOR_ALL_VEHICLES(v) {
+@@ -770,6 +771,7 @@
+ 		case 4:
+ 			if (!HASBIT(w->disabled_state, 4) &&
+ 					WP(w,traindepot_d).sel != INVALID_VEHICLE)	{
++				byte backup = _current_player;
+ 				Vehicle *v;
+ 
+ 				HandleButtonClick(w, 4);
+@@ -780,8 +782,10 @@
+ 				_backup_orders_tile = v->tile;
+ 				BackupVehicleOrders(v, _backup_orders_data);
+ 
++				_current_player = v->owner;
+ 				if (!DoCommandP(v->tile, v->index, 0, NULL, CMD_SELL_SHIP | CMD_MSG(STR_980C_CAN_T_SELL_SHIP)))
+ 					_backup_orders_tile = 0;
++				_current_player = backup;
+ 			}
+ 			break;
+ 		default:
+@@ -917,6 +921,16 @@
+ 		BuildVehicleList(vl, VEH_Ship, owner, station);
+ 		SortVehicleList(vl);
+ 
++		if (_local_player != owner){
++			if(IsWindowOfPrototype(w,_player_ships_widgets)){
++				w->disabled_state |= (1<<10);
++			}else{
++				w->disabled_state |= (1<<9);
++			}
++		}else{
++			w->disabled_state &= ~(1<<9);
++		}
++
+ 		SetVScrollCount(w, vl->list_length);
+ 
+ 		// disable 'Sort By' tooltip on Unsorted sorting criteria
+@@ -1103,7 +1117,7 @@
+ {
+ 	Window *w;
+ 
+-	if ( player == _local_player) {
++	if ( IsSisterCompany(player,_local_player)) {
+ 		w = AllocateWindowDescFront(&_player_ships_desc, (station << 16) | player);
+ 	} else  {
+ 		w = AllocateWindowDescFront(&_other_player_ships_desc, (station << 16) | player);
+Index: command.c
+===================================================================
+--- command.c	(revision 2424)
++++ command.c	(working copy)
+@@ -155,6 +155,12 @@
+ 
+ DEF_COMMAND(CmdReplaceVehicle);
+ 
++DEF_COMMAND(CmdSubsidiaryGetMoney);
++DEF_COMMAND(CmdSubsidiarySendMoney);
++DEF_COMMAND(CmdSubsidiarySendMoneyOnRequest);
++DEF_COMMAND(CmdSubsidiaryBuyShareResponse);
++
++
+ /* The master command table */
+ static const Command _command_proc_table[] = {
+ 	{CmdBuildRailroadTrack,                  0}, /*   0 */
+@@ -296,6 +302,11 @@
+ 	{CmdGiveMoney,                           0}, /* 113 */
+ 	{CmdChangePatchSetting,         CMD_SERVER}, /* 114 */
+ 	{CmdReplaceVehicle,                      0}, /* 115 */
++
++	{CmdSubsidiarySendMoney,				 0}, /* 116 */
++	{CmdSubsidiaryGetMoney,				     0}, /* 117 */
++	{CmdSubsidiarySendMoneyOnRequest,	     0}, /* 118 */
++	{CmdSubsidiaryBuyShareResponse,	         0}, /* 119 */
+ };
+ 
+ /* This function range-checks a cmd, and checks if the cmd is not NULL */
+Index: order_gui.c
+===================================================================
+--- order_gui.c	(revision 2424)
++++ order_gui.c	(working copy)
+@@ -12,6 +12,7 @@
+ #include "town.h"
+ #include "command.h"
+ #include "viewport.h"
++#include "economy.h"
+ #include "depot.h"
+ #include "waypoint.h"
+ 
+@@ -38,7 +39,7 @@
+ 
+ 	v = GetVehicle(w->window_number);
+ 
+-	w->disabled_state = (v->owner == _local_player) ? 0 : (
++	w->disabled_state = (IsSisterCompany(v->owner,_local_player)) ? 0 : (
+ 		1 << 4 |   //skip
+ 		1 << 5 |   //delete
+ 		1 << 6 |   //non-stop
+@@ -167,7 +168,7 @@
+ 	if (_patches.gotodepot) {
+ 		switch (GetTileType(tile)) {
+ 		case MP_RAILWAY:
+-			if (v->type == VEH_Train && IsTileOwner(tile, _local_player)) {
++			if (v->type == VEH_Train && (IsSisterCompany(GetTileOwner(tile), _local_player) || _patches.shared_stations)) {
+ 				if ((_map5[tile]&0xFC)==0xC0) {
+ 					order.type = OT_GOTO_DEPOT;
+ 					order.flags = OF_PART_OF_ORDERS;
+@@ -178,7 +179,7 @@
+ 			break;
+ 
+ 		case MP_STREET:
+-			if ((_map5[tile] & 0xF0) == 0x20 && v->type == VEH_Road && IsTileOwner(tile, _local_player)) {
++			if ((_map5[tile] & 0xF0) == 0x20 && v->type == VEH_Road && (IsSisterCompany(GetTileOwner(tile), _local_player) || _patches.shared_stations)){
+ 				order.type = OT_GOTO_DEPOT;
+ 				order.flags = OF_PART_OF_ORDERS;
+ 				order.station = GetDepotByTile(tile)->index;
+@@ -188,7 +189,7 @@
+ 
+ 		case MP_STATION:
+ 			if (v->type != VEH_Aircraft) break;
+-			if (IsAircraftHangarTile(tile) && IsTileOwner(tile, _local_player)) {
++			if ( IsAircraftHangarTile(tile) && (IsSisterCompany(GetTileOwner(tile), _local_player) || _patches.shared_stations)){
+ 				order.type = OT_GOTO_DEPOT;
+ 				order.flags = OF_PART_OF_ORDERS | OF_NON_STOP;	//XXX - whats the nonstop stuff doing here?
+ 				order.station = _map2[tile];
+@@ -198,8 +199,8 @@
+ 
+ 		case MP_WATER:
+ 			if (v->type != VEH_Ship) break;
+-			if (IsTileDepotType(tile, TRANSPORT_WATER) &&
+-					IsTileOwner(tile, _local_player)) {
++
++			if (IsTileDepotType(tile, TRANSPORT_WATER) && (IsSisterCompany(GetTileOwner(tile), _local_player) || _patches.shared_stations)) {
+ 				switch (_map5[tile]) {
+ 				case 0x81: tile--; break;
+ 				case 0x83: tile-= TILE_XY(0,1); break;
+@@ -216,10 +217,10 @@
+ 	}
+ 
+ 	// check waypoint
+-	if (IsTileType(tile, MP_RAILWAY) &&
+-			v->type == VEH_Train &&
+-			IsTileOwner(tile, _local_player) &&
+-			(_map5[tile] & 0xFE) == 0xC4) {
++	if (IsTileType(tile, MP_RAILWAY)
++			&& v->type == VEH_Train
++			&& (IsSisterCompany(GetTileOwner(tile), _local_player) || _patches.shared_stations)
++			&& (_map5[tile]&0xFE)==0xC4) {
+ 		order.type = OT_GOTO_WAYPOINT;
+ 		order.flags = 0;
+ 		order.station = GetWaypointByTile(tile)->index;
+@@ -229,7 +230,7 @@
+ 	if (IsTileType(tile, MP_STATION)) {
+ 		st = GetStation(st_index = _map2[tile]);
+ 
+-		if (st->owner == _current_player || st->owner == OWNER_NONE) {
++		if (IsSisterCompany(st->owner, _current_player) || _patches.shared_stations || st->owner == OWNER_NONE) {
+ 			byte facil;
+ 			(facil=FACIL_DOCK, v->type == VEH_Ship) ||
+ 			(facil=FACIL_TRAIN, v->type == VEH_Train) ||
+@@ -571,7 +572,7 @@
+ 
+ 	_alloc_wnd_parent_num = veh;
+ 
+-	if (v->owner != _local_player) {
++	if (!IsSisterCompany(v->owner, _local_player)) {
+ 		w = AllocateWindowDesc( &_other_orders_desc);
+ 	} else
+ 		w = AllocateWindowDesc( (v->type == VEH_Train) ? &_orders_train_desc : &_orders_desc);
+Index: command.h
+===================================================================
+--- command.h	(revision 2424)
++++ command.h	(working copy)
+@@ -134,6 +134,11 @@
+ 	CMD_CHANGE_PATCH_SETTING = 114,
+ 
+ 	CMD_REPLACE_VEHICLE = 115,
++
++	CMD_SUBSIDIARY_SEND_MONEY = 116,
++	CMD_SUBSIDIARY_GET_MONEY = 117,
++	CMD_SUBSIDIARY_SEND_MONEY_ON_REQUEST = 118,
++	CMD_SUBSIDIARY_BUY_SHARE_RESPONSE = 119,
+ };
+ 
+ enum {

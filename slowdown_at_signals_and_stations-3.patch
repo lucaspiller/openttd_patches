@@ -1,0 +1,118 @@
+Index: trunk/lang/english.txt
+===================================================================
+--- trunk/lang/english.txt	(revision 84)
++++ trunk/lang/english.txt	(working copy)
+@@ -2504,3 +2504,5 @@
+ STR_BRIBE_FAILED					:{WHITE}Your attempted bribery has been
+ STR_BRIBE_FAILED_2				:{WHITE}discovered by a regional investigator
+ STR_BUILD_DATE						:{BLACK}Built: {LTBLUE}{DATE_LONG}
++
++STR_WAITING_SIGNAL					:{LTBLUE}Waiting at a signal
+\ No newline at end of file
+Index: trunk/train_cmd.c
+===================================================================
+--- trunk/train_cmd.c	(revision 84)
++++ trunk/train_cmd.c	(working copy)
+@@ -1997,11 +1997,16 @@
+ 	byte chosen_dir;
+ 	byte chosen_track;
+ 	byte old_z;
++	uint accel;	
++	uint spd;
+ 
+ 	/* For every vehicle after and including the given vehicle */
+ 	for(;;) {
+ 		BeginVehicleMove(v);
+ 		
++		accel = -v->acceleration * 2;
++		spd = v->subspeed + accel;// * 2;		
++		
+ 		if (v->u.rail.track != 0x40) {
+ 			/* Not inside tunnel */
+ 			if (GetNewVehiclePos(v, &gp)) {
+@@ -2054,7 +2059,18 @@
+ 					chosen_track = 1 << ChooseTrainTrack(v, gp.new_tile, dir>>1, (byte)tracks);
+ 
+ 					/* Check if it's a red signal and that force proceed is not clicked. */
+-					if ( (tracks>>16)&chosen_track && v->u.rail.force_proceed == 0) goto red_light;
++					if ( (tracks>>16)&chosen_track && v->u.rail.force_proceed == 0) {
++						goto red_light;
++					}else if (v->vehstatus & VS_WAIT_SIGNAL) {
++						v->vehstatus ^= VS_WAIT_SIGNAL;
++					}
++					
++					/* Check if a station is about to be entered */
++					r = VehicleEnterTile(v, gp.new_tile, gp.x, gp.y);
++					if (r & 0x2) {
++						v->subspeed = (byte)spd;
++						v->cur_speed = spd = clamp(v->cur_speed + ((int)spd >> 5), 0, v->max_speed);							
++					}
+ 				} else {
+ 					static byte _matching_tracks[8] = {0x30, 1, 0xC, 2, 0x30, 1, 0xC, 2};
+ 					
+@@ -2153,15 +2169,15 @@
+ 		 * FIND_FIRST_BIT only handles 6 bits at a time. */
+ 		i = FindFirstBit2x64(ts);
+ 		
++		v->subspeed = (byte)spd;
++		v->cur_speed = spd = clamp(v->cur_speed + ((int)spd >> 5), 0, v->max_speed);		
++		v->vehstatus |= VS_WAIT_SIGNAL;
++			
+ 		if (!(_map3_lo[gp.new_tile] & _signal_otherdir[i])) {
+-			v->cur_speed = 0;
+-			v->subspeed = 0;
+ 			v->progress = 255-100;
+ 			if (++v->load_unload_time_rem < _patches.wait_oneway_signal * 20)
+ 				return;
+ 		} else if (_map3_lo[gp.new_tile] & _signal_onedir[i]){
+-			v->cur_speed = 0;
+-			v->subspeed = 0;
+ 			v->progress = 255-10;
+ 			if (++v->load_unload_time_rem < _patches.wait_twoway_signal * 73) {
+ 				uint o_tile = gp.new_tile + _tileoffs_by_dir[dir>>1];
+Index: trunk/vehicle.h
+===================================================================
+--- trunk/vehicle.h	(revision 84)
++++ trunk/vehicle.h	(working copy)
+@@ -122,7 +122,7 @@
+ 	byte acceleration; // used by train & aircraft
+ 	byte progress;
+ 
+-	byte vehstatus;		// Status
++	int32 vehstatus;		// Status
+ 	byte last_station_visited;
+ 	
+ 	byte cargo_type;	// type of cargo this vehicle is carrying
+@@ -212,7 +212,7 @@
+ 	OT_LEAVESTATION = 4,
+ 	OT_DUMMY = 5,
+ 	OT_GOTO_CHECKPOINT = 6,
+-
++	
+ 	OT_MASK = 0x1F,
+ };
+ 
+@@ -234,6 +234,7 @@
+ 	VS_DISASTER = 0x20,
+ 	VS_AIRCRAFT_BROKEN = 0x40,
+ 	VS_CRASHED = 0x80,
++	VS_WAIT_SIGNAL = 0x100,
+ };
+ 
+ 
+Index: trunk/train_gui.c
+===================================================================
+--- trunk/train_gui.c	(revision 84)
++++ trunk/train_gui.c	(working copy)
+@@ -750,8 +750,11 @@
+ 				SET_DPARAM16(0, v->u.rail.last_speed * 10 >> 4);
+ 				str = STR_TRAIN_STOPPING + _patches.vehicle_speed;
+ 			}
++		} else if (v->vehstatus & VS_WAIT_SIGNAL) {
++			str = STR_WAITING_SIGNAL;
+ 		} else {
+ 			switch(v->next_order & OT_MASK) {
++				
+ 			case OT_GOTO_STATION: {
+ 				str = STR_HEADING_FOR_STATION + _patches.vehicle_speed;
+ 				SET_DPARAM16(0, v->next_order_param);
